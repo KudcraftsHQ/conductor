@@ -2,7 +2,7 @@
 
 A CLI tool for managing git worktrees across multiple projects with automatic port isolation and environment management.
 
-> **Heavily inspired by [Coolify](https://coolify.io/)** - the open-source & self-hostable Heroku/Netlify alternative. Conductor brings similar developer experience principles to local worktree management.
+> **Heavily inspired by [Conductor.build](https://conductor.build/)** - the Mac app for running multiple AI coding agents in isolated workspaces. This CLI brings similar git worktree isolation and management to the command line.
 
 ## Why Conductor?
 
