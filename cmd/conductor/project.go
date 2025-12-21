@@ -144,8 +144,8 @@ var projectListCmd = &cobra.Command{
 		sort.Strings(names)
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "NAME\tPATH\tWORKTREES\tPORTS")
-		fmt.Fprintln(w, "----\t----\t---------\t-----")
+		_, _ = fmt.Fprintln(w, "NAME\tPATH\tWORKTREES\tPORTS")
+		_, _ = fmt.Fprintln(w, "----\t----\t---------\t-----")
 
 		for _, name := range names {
 			proj := cfg.Projects[name]
@@ -165,9 +165,9 @@ var projectListCmd = &cobra.Command{
 					wtCount++
 				}
 			}
-			fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", name, proj.Path, wtCount, portRange)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", name, proj.Path, wtCount, portRange)
 		}
-		w.Flush()
+		_ = w.Flush()
 
 		return nil
 	},

@@ -101,8 +101,8 @@ var worktreeListCmd = &cobra.Command{
 		fmt.Printf("Worktrees for %s:\n\n", projectName)
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "NAME\tBRANCH\tPORTS\tCREATED")
-		fmt.Fprintln(w, "----\t------\t-----\t-------")
+		_, _ = fmt.Fprintln(w, "NAME\tBRANCH\tPORTS\tCREATED")
+		_, _ = fmt.Fprintln(w, "----\t------\t-----\t-------")
 
 		for _, name := range names {
 			wt := project.Worktrees[name]
@@ -112,9 +112,9 @@ var worktreeListCmd = &cobra.Command{
 			if wt.IsRoot {
 				prefix = "* "
 			}
-			fmt.Fprintf(w, "%s%s\t%s\t%s\t%s\n", prefix, name, wt.Branch, portRange, created)
+			_, _ = fmt.Fprintf(w, "%s%s\t%s\t%s\t%s\n", prefix, name, wt.Branch, portRange, created)
 		}
-		w.Flush()
+		_ = w.Flush()
 
 		fmt.Println("\n* = root worktree")
 

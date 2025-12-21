@@ -39,12 +39,13 @@ func GitWorktreeAdd(repoPath, worktreePath, branch string) error {
 	// Fetch latest from origin first
 	fetchCmd := exec.Command("git", "fetch", "origin", defaultBranch)
 	fetchCmd.Dir = repoPath
-	fetchCmd.CombinedOutput() // Ignore error - remote might not exist
+	_, _ = fetchCmd.CombinedOutput() // Ignore error - remote might not exist
 
 	// Create worktree with new branch based on origin's default branch
 	cmd := exec.Command("git", "worktree", "add", "-b", branch, worktreePath, "origin/"+defaultBranch)
 	cmd.Dir = repoPath
 	out, err := cmd.CombinedOutput()
+	_ = out // Used in error path
 	if err != nil {
 		// Fallback to creating from current HEAD if origin doesn't exist
 		cmd = exec.Command("git", "worktree", "add", "-b", branch, worktreePath)

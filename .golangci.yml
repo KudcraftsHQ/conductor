@@ -1,0 +1,52 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+linters-settings:
+  errcheck:
+    exclude-functions:
+      - fmt.Print
+      - fmt.Println
+      - fmt.Printf
+      - fmt.Fprint
+      - fmt.Fprintln
+      - fmt.Fprintf
+      - (fmt.State).Write
+      - (*text/tabwriter.Writer).Flush
+      - (*os.File).Close
+      - (*os.File).WriteString
+
+issues:
+  exclude-rules:
+    # Ignore errcheck for tabwriter operations (CLI output)
+    - path: cmd/conductor/
+      linters:
+        - errcheck
+      text: "Flush|Fprintln|Fprintf"
+
+    # Ignore errcheck for log file operations (non-critical)
+    - path: internal/workspace/setup.go
+      linters:
+        - errcheck
+      text: "WriteString|Close"
+
+    # Ignore errcheck for TUI async operations
+    - path: internal/tui/update.go
+      linters:
+        - errcheck
+      text: "RunSetupAsync"
+
+    # Allow unused helper methods in TUI model (kept for future use)
+    - path: internal/tui/model.go
+      linters:
+        - unused

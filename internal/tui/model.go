@@ -42,9 +42,8 @@ type Model struct {
 	filterMode bool
 
 	// Help
-	help    help.Model
-	keyMap  keys.KeyMap
-	showHelp bool
+	help   help.Model
+	keyMap keys.KeyMap
 
 	// Create worktree modal
 	createInput     textinput.Model
@@ -142,41 +141,9 @@ func (m *Model) refreshWorktreeList() {
 	sort.Strings(m.worktreeNames)
 }
 
-func (m *Model) currentListLength() int {
-	switch m.currentView {
-	case ViewProjects:
-		return len(m.projectNames)
-	case ViewWorktrees:
-		return len(m.worktreeNames)
-	case ViewPorts:
-		return len(m.config.GetAllPortInfo())
-	default:
-		return 0
-	}
-}
-
-func (m *Model) selectedProjectName() string {
-	if m.cursor >= 0 && m.cursor < len(m.projectNames) {
-		return m.projectNames[m.cursor]
-	}
-	return ""
-}
-
-func (m *Model) selectedWorktreeName() string {
-	if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
-		return m.worktreeNames[m.cursor]
-	}
-	return ""
-}
-
 func (m *Model) setStatus(msg string, isError bool) {
 	m.statusMessage = msg
 	m.statusIsError = isError
-}
-
-func (m *Model) clearStatus() {
-	m.statusMessage = ""
-	m.statusIsError = false
 }
 
 // tableHeight returns available height for table content

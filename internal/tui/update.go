@@ -408,7 +408,7 @@ func (m *Model) createWorktree() (tea.Model, tea.Cmd) {
 	worktreeName := name
 	return m, func() tea.Msg {
 		done := make(chan SetupCompleteMsg)
-		m.wsManager.RunSetupAsync(projectName, worktreeName, func(success bool, setupErr error) {
+		_ = m.wsManager.RunSetupAsync(projectName, worktreeName, func(success bool, setupErr error) {
 			done <- SetupCompleteMsg{
 				ProjectName:  projectName,
 				WorktreeName: worktreeName,
@@ -421,7 +421,8 @@ func (m *Model) createWorktree() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) executeDelete() (tea.Model, tea.Cmd) {
-	if m.deleteTargetType == "worktree" {
+	switch m.deleteTargetType {
+	case "worktree":
 		projectName := m.selectedProject
 		wtName := m.deleteTarget
 
@@ -444,7 +445,7 @@ func (m *Model) executeDelete() (tea.Model, tea.Cmd) {
 				WorktreeName: wtName,
 			}
 		}
-	} else if m.deleteTargetType == "project" {
+	case "project":
 		projectName := m.deleteTarget
 		m.currentView = ViewProjects
 		m.deleteTarget = ""
@@ -462,10 +463,10 @@ func (m *Model) executeDelete() (tea.Model, tea.Cmd) {
 
 			return RefreshMsg{}
 		}
+	default:
+		m.currentView = m.prevView
+		return m, nil
 	}
-
-	m.currentView = m.prevView
-	return m, nil
 }
 
 func (m *Model) openWorktree(termType opener.TerminalType) (tea.Model, tea.Cmd) {

@@ -121,7 +121,7 @@ func (sm *SetupManager) RunSetupAsync(
 
 		defer func() {
 			if logFile != nil {
-				logFile.Close()
+				_ = logFile.Close()
 			}
 
 			sm.mu.Lock()
@@ -180,9 +180,9 @@ func (sm *SetupManager) RunSetupAsync(
 
 		// Write header to log
 		header := fmt.Sprintf("=== Setup started at %s ===\n", time.Now().Format(time.RFC3339))
-		logBuf.WriteString(header)
+		_, _ = logBuf.WriteString(header)
 		if logFile != nil {
-			logFile.WriteString(header)
+			_, _ = logFile.WriteString(header)
 		}
 
 		// Create multi-writer to write to both buffer and file
@@ -204,9 +204,9 @@ func (sm *SetupManager) RunSetupAsync(
 		} else {
 			footer = fmt.Sprintf("\n=== Setup FAILED at %s: %v ===\n", time.Now().Format(time.RFC3339), setupErr)
 		}
-		logBuf.WriteString(footer)
+		_, _ = logBuf.WriteString(footer)
 		if logFile != nil {
-			logFile.WriteString(footer)
+			_, _ = logFile.WriteString(footer)
 		}
 	}()
 }
@@ -248,7 +248,7 @@ func (sm *SetupManager) RunArchiveScript(
 	}
 	defer func() {
 		if logFile != nil {
-			logFile.Close()
+			_ = logFile.Close()
 		}
 	}()
 
@@ -288,7 +288,7 @@ func (sm *SetupManager) RunArchiveScript(
 	// Write header to log
 	header := fmt.Sprintf("=== Archive started at %s ===\n", time.Now().Format(time.RFC3339))
 	if logFile != nil {
-		logFile.WriteString(header)
+		_, _ = logFile.WriteString(header)
 	}
 
 	// Capture output to file
@@ -307,7 +307,7 @@ func (sm *SetupManager) RunArchiveScript(
 		footer = fmt.Sprintf("\n=== Archive FAILED at %s: %v ===\n", time.Now().Format(time.RFC3339), archiveErr)
 	}
 	if logFile != nil {
-		logFile.WriteString(footer)
+		_, _ = logFile.WriteString(footer)
 	}
 
 	return archiveErr

@@ -46,17 +46,17 @@ var portsListCmd = &cobra.Command{
 		fmt.Printf("Allocated ports: %d\n\n", len(portInfo))
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "PORT\tPROJECT\tWORKTREE\tINDEX\tLABEL")
-		fmt.Fprintln(w, "----\t-------\t--------\t-----\t-----")
+		_, _ = fmt.Fprintln(w, "PORT\tPROJECT\tWORKTREE\tINDEX\tLABEL")
+		_, _ = fmt.Fprintln(w, "----\t-------\t--------\t-----\t-----")
 
 		for _, p := range portInfo {
 			label := p.Label
 			if label == "" {
 				label = "-"
 			}
-			fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\n", p.Port, p.Project, p.Worktree, p.Index, label)
+			_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\n", p.Port, p.Project, p.Worktree, p.Index, label)
 		}
-		w.Flush()
+		_ = w.Flush()
 
 		return nil
 	},
@@ -82,7 +82,7 @@ var portsFreeCmd = &cobra.Command{
 		fmt.Printf("Freeing this port may cause issues. Are you sure? (y/N): ")
 
 		var response string
-		fmt.Scanln(&response)
+		_, _ = fmt.Scanln(&response)
 		if response != "y" && response != "Y" {
 			fmt.Println("Cancelled.")
 			return nil

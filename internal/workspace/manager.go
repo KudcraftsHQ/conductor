@@ -122,16 +122,16 @@ func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 
 	// Run archive script first (logs are saved to file for debugging)
 	// We ignore the error - archiving proceeds regardless
-	GetSetupManager().RunArchiveScript(project.Path, worktree.Path, projectName, worktreeName, worktree)
+	_ = GetSetupManager().RunArchiveScript(project.Path, worktree.Path, projectName, worktreeName, worktree)
 
 	// Remove git worktree
 	if err := GitWorktreeRemove(project.Path, worktree.Path); err != nil {
 		// Try to remove directory manually
-		os.RemoveAll(worktree.Path)
+		_ = os.RemoveAll(worktree.Path)
 	}
 
-	// Delete the branch
-	GitBranchDelete(project.Path, worktree.Branch)
+	// Delete the branch (ignore error - branch may not exist)
+	_ = GitBranchDelete(project.Path, worktree.Branch)
 
 	// Free ports
 	m.config.FreeWorktreePorts(projectName, worktreeName)
