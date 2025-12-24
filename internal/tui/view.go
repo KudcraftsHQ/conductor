@@ -91,17 +91,27 @@ func (m *Model) renderHeader() string {
 	projectCount := len(m.config.Projects)
 	info = m.styles.HeaderInfo.Render(fmt.Sprintf("  %d projects • %d ports", projectCount, totalPorts))
 
+	// Version info (right side)
+	versionStr := fmt.Sprintf("v%s", m.version)
+	if m.updateAvailable {
+		versionStr = fmt.Sprintf("v%s → v%s ✨", m.version, m.latestVersion)
+	} else if m.updateDownloaded {
+		versionStr = fmt.Sprintf("v%s (updated, restart) ✓", m.version)
+	}
+	versionInfo := m.styles.HeaderInfo.Render(versionStr)
+
 	// Build header line
 	left := logo + info
 	leftWidth := lipgloss.Width(left)
+	rightWidth := lipgloss.Width(versionInfo)
 
-	// Right side spacing
-	spacing := m.width - leftWidth - 2
+	// Middle spacing
+	spacing := m.width - leftWidth - rightWidth - 2
 	if spacing < 0 {
 		spacing = 0
 	}
 
-	header := left + strings.Repeat(" ", spacing)
+	header := left + strings.Repeat(" ", spacing) + versionInfo
 	return m.styles.Header.Width(m.width).Render(header)
 }
 

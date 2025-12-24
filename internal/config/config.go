@@ -86,6 +86,11 @@ func Load() (*Config, error) {
 		cfg.Projects = make(map[string]*Project)
 	}
 
+	// Initialize update settings if not present (backward compatibility)
+	if cfg.Updates.CheckInterval == "" {
+		cfg.Updates = DefaultUpdateSettings()
+	}
+
 	return &cfg, nil
 }
 

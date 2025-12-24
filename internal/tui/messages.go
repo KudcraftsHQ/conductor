@@ -116,3 +116,16 @@ type AllPRsSyncedMsg struct {
 	ProjectName string
 	Err         error
 }
+
+// UpdateCheckMsg indicates an update check has completed
+type UpdateCheckMsg struct {
+	UpdateAvailable bool
+	LatestVersion   string
+	Err             error
+}
+
+// UpdateInstalledMsg indicates an update has been installed
+type UpdateInstalledMsg struct {
+	Version string
+	Err     error
+}

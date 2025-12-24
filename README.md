@@ -30,26 +30,63 @@ Conductor solves these problems by:
 
 ## Installation
 
-### From Source
+### From Source (Recommended)
 
 ```bash
 # Clone the repository
 git clone https://github.com/hammashamzah/conductor.git
 cd conductor
 
-# Build and install
+# Build and install to ~/.local/bin (supports auto-updates)
 make install
 ```
 
-This installs `conductor` to your `$GOPATH/bin`. Make sure it's in your PATH.
+This installs `conductor` to `~/.local/bin`, which enables automatic updates without requiring sudo.
+
+**Make sure `~/.local/bin` is in your PATH:**
+
+```bash
+# Add to ~/.zshrc or ~/.bashrc
+export PATH="$HOME/.local/bin:$PATH"
+
+# Then reload your shell
+source ~/.zshrc  # or source ~/.bashrc
+```
 
 ### Build Options
 
 ```bash
 make build          # Build for current platform
 make build-all      # Build for Linux, macOS, and Windows
-make install        # Install to $GOPATH/bin
-make install-global # Install to /usr/local/bin (requires sudo)
+make install        # Install to ~/.local/bin (recommended, supports auto-updates)
+make install-global # Install to /usr/local/bin (requires sudo, disables auto-updates)
+```
+
+### Auto-Updates
+
+Conductor automatically checks for updates on every launch and downloads them in the background. Updates are seamless and require no user intervention.
+
+```bash
+# Manually check for updates
+conductor update
+
+# Check without installing
+conductor update --check
+
+# Disable auto-updates (add to ~/.conductor/conductor.json)
+{
+  "updates": {
+    "autoCheck": false
+  }
+}
+```
+
+**Migrating from System Installation:**
+
+If you previously installed to `/usr/local/bin`, migrate to enable auto-updates:
+
+```bash
+conductor migrate
 ```
 
 ## Quick Start

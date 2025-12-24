@@ -2,6 +2,7 @@ package tui
 
 import (
 	"sort"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -17,6 +18,12 @@ import (
 type Model struct {
 	// Config
 	config *config.Config
+
+	// Version info
+	version          string
+	updateAvailable  bool
+	latestVersion    string
+	updateDownloaded bool
 
 	// Styles
 	styles *styles.Styles
@@ -83,6 +90,11 @@ type Model struct {
 
 // NewModel creates a new TUI model
 func NewModel(cfg *config.Config) *Model {
+	return NewModelWithVersion(cfg, "dev")
+}
+
+// NewModelWithVersion creates a new TUI model with version info
+func NewModelWithVersion(cfg *config.Config, version string) *Model {
 	ti := textinput.New()
 	ti.Placeholder = "branch-name"
 	ti.CharLimit = 100
@@ -101,6 +113,7 @@ func NewModel(cfg *config.Config) *Model {
 
 	m := &Model{
 		config:          cfg,
+		version:         version,
 		styles:          styles.DefaultStyles(),
 		currentView:     ViewProjects,
 		help:            h,
@@ -117,7 +130,51 @@ func NewModel(cfg *config.Config) *Model {
 
 // Init initializes the model
 func (m *Model) Init() tea.Cmd {
-	return m.spinner.Tick
+	return tea.Batch(
+		m.spinner.Tick,
+		m.checkForUpdates(),
+	)
+}
+
+// checkForUpdates returns a command that checks for updates in the background
+func (m *Model) checkForUpdates() tea.Cmd {
+	// Skip if auto-check is disabled
+	if !m.config.Updates.AutoCheck {
+		return nil
+	}
+
+	// Skip if we checked recently (within the last 6 hours)
+	if m.config.Updates.LastCheck.IsZero() || m.shouldCheckForUpdate() {
+		return func() tea.Msg {
+			// Import updater package and check for updates
+			// We'll do this in a goroutine to not block startup
+			return m.performUpdateCheck()
+		}
+	}
+
+	// If we have cached update info, return it
+	if m.config.Updates.LastVersion != "" && m.config.Updates.LastVersion != m.version {
+		return func() tea.Msg {
+			return UpdateCheckMsg{
+				UpdateAvailable: true,
+				LatestVersion:   m.config.Updates.LastVersion,
+			}
+		}
+	}
+
+	return nil
+}
+
+// shouldCheckForUpdate determines if we should check for updates
+func (m *Model) shouldCheckForUpdate() bool {
+	// Check if the interval has passed (default 6 hours)
+	duration := 6 * time.Hour // Default interval
+	return time.Since(m.config.Updates.LastCheck) > duration
+}
+
+// performUpdateCheck does the actual update check
+func (m *Model) performUpdateCheck() UpdateCheckMsg {
+	return m.performUpdateCheckImpl()
 }
 
 func (m *Model) refreshProjectList() {
