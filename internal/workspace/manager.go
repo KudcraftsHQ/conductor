@@ -430,15 +430,15 @@ func (m *Manager) AutoSetupClaudePRs(projectName string) (*AutoSetupClaudePRsRes
 
 	result.TotalPRs = len(allPRs)
 
-	// Filter for claude/* PRs and only open/draft ones
+	// Filter for claude/* PRs and only open ones
 	for _, pr := range allPRs {
 		// Skip if not a claude/* branch
 		if !isClaudeBranch(pr.HeadBranch) {
 			continue
 		}
 
-		// Skip if PR is closed or merged (only process open/draft)
-		if pr.State == "closed" || pr.State == "merged" {
+		// Skip if PR is not open (only process open PRs)
+		if pr.State != "open" {
 			continue
 		}
 
