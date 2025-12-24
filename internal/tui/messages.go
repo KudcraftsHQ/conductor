@@ -129,3 +129,12 @@ type UpdateInstalledMsg struct {
 	Version string
 	Err     error
 }
+
+// AutoSetupClaudePRsMsg indicates Claude PRs auto-setup has completed
+type AutoSetupClaudePRsMsg struct {
+	ProjectName    string
+	NewWorktrees   []string
+	ExistingBranch []string
+	Errors         []string
+	Err            error
+}

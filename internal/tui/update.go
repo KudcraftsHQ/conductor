@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -206,6 +207,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Update config
 			m.config.Updates.LastVersion = msg.Version
 			_ = config.Save(m.config)
+		}
+		return m, nil
+
+	case AutoSetupClaudePRsMsg:
+		if msg.Err != nil {
+			m.setStatus("Error auto-setting up Claude PRs: "+msg.Err.Error(), true)
+		} else {
+			// Build status message
+			statusMsg := fmt.Sprintf("✅ Created %d worktree(s)", len(msg.NewWorktrees))
+			if len(msg.ExistingBranch) > 0 {
+				statusMsg += fmt.Sprintf(", skipped %d existing", len(msg.ExistingBranch))
+			}
+			if len(msg.Errors) > 0 {
+				statusMsg += fmt.Sprintf(", %d error(s)", len(msg.Errors))
+				m.setStatus(statusMsg, true)
+			} else {
+				m.setStatus(statusMsg, false)
+			}
+
+			// Reload config to show new worktrees
+			if len(msg.NewWorktrees) > 0 {
+				m.refreshWorktreeList()
+				_ = config.Save(m.config)
+			}
 		}
 		return m, nil
 	}
@@ -455,6 +480,30 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					WorktreeName: wtName,
 					PRs:          prs,
 					Err:          err,
+				}
+			}
+		}
+
+	case key.Matches(msg, m.keyMap.AutoSetupClaude):
+		// Auto-setup worktrees for all Claude PRs
+		if m.selectedProject != "" {
+			m.statusMessage = "🔍 Scanning for Claude PRs..."
+			m.statusIsError = false
+			projectName := m.selectedProject
+			return m, func() tea.Msg {
+				result, err := m.wsManager.AutoSetupClaudePRs(projectName)
+				if err != nil {
+					return AutoSetupClaudePRsMsg{
+						ProjectName: projectName,
+						Err:         err,
+					}
+				}
+				return AutoSetupClaudePRsMsg{
+					ProjectName:    projectName,
+					NewWorktrees:   result.NewWorktrees,
+					ExistingBranch: result.ExistingBranch,
+					Errors:         result.Errors,
+					Err:            nil,
 				}
 			}
 		}
