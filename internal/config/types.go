@@ -57,12 +57,13 @@ const (
 
 // PRInfo represents a GitHub pull request linked to a worktree
 type PRInfo struct {
-	Number    int       `json:"number"`
-	URL       string    `json:"url"`
-	Title     string    `json:"title"`
-	State     string    `json:"state"`  // "open", "closed", "merged", "draft"
-	Author    string    `json:"author"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Number     int       `json:"number"`
+	URL        string    `json:"url"`
+	Title      string    `json:"title"`
+	State      string    `json:"state"`  // "open", "closed", "merged", "draft"
+	Author     string    `json:"author"`
+	HeadBranch string    `json:"head_branch"` // The branch being merged (PR source branch)
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Worktree represents a git worktree with its allocated ports
