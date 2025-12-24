@@ -27,16 +27,24 @@ type ConfigSavedMsg struct {
 	Err error
 }
 
-// WorktreeCreatedMsg indicates a worktree was created
+// WorktreeCreatedMsg indicates a worktree git creation completed (async)
 type WorktreeCreatedMsg struct {
 	ProjectName  string
 	WorktreeName string
 	Worktree     *config.Worktree
+	Success      bool
 	Err          error
 }
 
 // WorktreeArchivedMsg indicates a worktree was archived
 type WorktreeArchivedMsg struct {
+	ProjectName  string
+	WorktreeName string
+	Err          error
+}
+
+// WorktreeDeletedMsg indicates a worktree was permanently deleted
+type WorktreeDeletedMsg struct {
 	ProjectName  string
 	WorktreeName string
 	Err          error
@@ -79,4 +87,32 @@ type SetupCompleteMsg struct {
 // ViewLogs views for log display
 const (
 	ViewLogs View = iota + 100
+	ViewQuit
+	ViewPRs
 )
+
+// ArchiveStartedMsg indicates archiving has started for a worktree
+type ArchiveStartedMsg struct {
+	ProjectName  string
+	WorktreeName string
+}
+
+// PRsFetchedMsg indicates PRs have been fetched for a worktree
+type PRsFetchedMsg struct {
+	ProjectName  string
+	WorktreeName string
+	PRs          []config.PRInfo
+	Err          error
+}
+
+// PROpenedMsg indicates a PR was opened in browser
+type PROpenedMsg struct {
+	URL string
+	Err error
+}
+
+// AllPRsSyncedMsg indicates all PRs have been synced for a project
+type AllPRsSyncedMsg struct {
+	ProjectName string
+	Err         error
+}

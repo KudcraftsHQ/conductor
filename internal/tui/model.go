@@ -63,11 +63,22 @@ type Model struct {
 	wsManager *workspace.Manager
 
 	// Logs view
-	logsWorktree string // worktree name for logs view
-	logsScroll   int    // scroll offset for logs
+	logsWorktree   string // worktree name for logs view
+	logsScroll     int    // scroll offset for logs
+	logsAutoScroll bool   // auto-scroll to bottom
+	logsType       string // "setup" or "archive"
+
+	// Quit dialog
+	quitFocused int // 0 = kill all, 1 = detach
 
 	// Spinner for setup status
 	spinner spinner.Model
+
+	// PR view state
+	prList       []config.PRInfo // PRs for current worktree
+	prCursor     int             // Selected PR in modal
+	prWorktree   string          // Which worktree's PRs we're viewing
+	prLoading    bool            // Whether we're fetching PRs
 }
 
 // NewModel creates a new TUI model
@@ -144,8 +155,8 @@ func (m *Model) setStatus(msg string, isError bool) {
 
 // tableHeight returns available height for table content
 func (m *Model) tableHeight() int {
-	// Header (1) + tabs (1) + title bar (1) + footer (2) + borders (2)
-	return m.height - 7
+	// Header (1) + tabs (1) + title bar (1) + footer (1)
+	return m.height - 4
 }
 
 // ensureCursorVisible adjusts offset to keep cursor visible
@@ -159,5 +170,19 @@ func (m *Model) ensureCursorVisible() {
 		m.offset = m.cursor
 	} else if m.cursor >= m.offset+tableHeight {
 		m.offset = m.cursor - tableHeight + 1
+	}
+}
+
+// ensurePRCursorVisible adjusts offset to keep PR cursor visible
+func (m *Model) ensurePRCursorVisible() {
+	tableHeight := m.tableHeight()
+	if tableHeight <= 0 {
+		return
+	}
+
+	if m.prCursor < m.offset {
+		m.offset = m.prCursor
+	} else if m.prCursor >= m.offset+tableHeight {
+		m.offset = m.prCursor - tableHeight + 1
 	}
 }

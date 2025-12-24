@@ -125,39 +125,59 @@ func WindowName(project, branch string) string {
 	return fmt.Sprintf("%s/%s", project, branch)
 }
 
+// claudeSystemPrompt returns the system prompt for Claude with tmux instructions
+func claudeSystemPrompt(devPaneID string) string {
+	return fmt.Sprintf(`## Conductor Tmux Integration
+
+This workspace uses conductor with tmux panes:
+- Left pane: Claude Code (you are here)
+- Right pane: Dev server (pane ID: %s)
+
+### Dev Server Management
+- To view dev server logs: tmux capture-pane -t %s -p | tail -50
+- To kill the dev server: tmux send-keys -t %s C-c
+- To restart the dev server: tmux send-keys -t %s 'conductor run' Enter
+- IMPORTANT: Only run dev server commands in the dev pane, never in this pane`, devPaneID, devPaneID, devPaneID, devPaneID)
+}
+
 // CreateCodingWindow creates a new window with split panes for coding
 // Left: claude CLI, Right: dev server
 func CreateCodingWindow(project, branch, worktreePath string) error {
 	windowName := WindowName(project, branch)
+	windowTarget := fmt.Sprintf("%s:%s", SessionName, windowName)
 
-	// Create new window with left pane (claude)
-	// Use "session:" format to create window at next available index
+	// Create new window with dev server first (will be on the right after split)
+	// Use bash with trap to catch Ctrl+C and keep the pane open
+	devCmd := `trap '' INT; while true; do conductor run; ec=$?; echo ''; if [ $ec -eq 130 ]; then echo 'Dev server stopped. Press Enter to restart or type command...'; else echo 'Dev server exited. Press Enter to restart or type command...'; fi; read -r cmd; [ -n "$cmd" ] && eval "$cmd" || continue; done`
 	cmd := exec.Command("tmux", "new-window",
 		"-t", SessionName+":",
 		"-n", windowName,
 		"-c", worktreePath,
-		"claude", "--dangerously-skip-permissions")
-	if err := cmd.Run(); err != nil {
+		"-P", "-F", "#{pane_id}", // Print the pane ID
+		"bash", "-c", devCmd)
+	devPaneIDBytes, err := cmd.Output()
+	if err != nil {
 		return fmt.Errorf("failed to create tmux window: %w", err)
 	}
+	devPaneID := strings.TrimSpace(string(devPaneIDBytes))
 
-	// Split horizontally and run dev server in right pane
+	// Set dev pane title
+	_ = exec.Command("tmux", "select-pane", "-t", devPaneID, "-T", "dev").Run()
+
+	// Split horizontally and run claude in left pane (split creates pane to the left)
 	cmd = exec.Command("tmux", "split-window",
-		"-t", fmt.Sprintf("%s:%s", SessionName, windowName),
-		"-h", // horizontal split
+		"-t", windowTarget,
+		"-hb", // horizontal split, before (left of) current pane
 		"-c", worktreePath,
-		"conductor", "run")
+		"claude", "--dangerously-skip-permissions",
+		"--append-system-prompt", claudeSystemPrompt(devPaneID))
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to split window: %w", err)
 	}
 
-	windowTarget := fmt.Sprintf("%s:%s", SessionName, windowName)
-
-	// Set pane titles for iTerm2 tab display (format: "branch - role")
-	// Left pane (claude)
+	// Set pane titles for iTerm2 tab display
+	// Left pane (claude) - includes branch for context
 	_ = exec.Command("tmux", "select-pane", "-t", windowTarget+".{left}", "-T", branch+" - claude").Run()
-	// Right pane (dev server)
-	_ = exec.Command("tmux", "select-pane", "-t", windowTarget+".{right}", "-T", branch+" - dev").Run()
 
 	// Focus left pane (claude)
 	_ = exec.Command("tmux", "select-pane", "-t", windowTarget+".{left}").Run()
@@ -201,5 +221,18 @@ func FocusWindow(project, branch string) error {
 	windowName := WindowName(project, branch)
 	cmd := exec.Command("tmux", "select-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, windowName))
+	return cmd.Run()
+}
+
+// KillSession kills the entire conductor tmux session
+func KillSession() error {
+	cmd := exec.Command("tmux", "kill-session", "-t", SessionName)
+	return cmd.Run()
+}
+
+// DetachSession detaches from the conductor tmux session
+func DetachSession() error {
+	// Detach all clients from the session
+	cmd := exec.Command("tmux", "detach-client", "-s", SessionName)
 	return cmd.Run()
 }

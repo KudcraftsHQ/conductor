@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/runner"
 )
 
 // SetupManager handles background setup processes
@@ -86,7 +87,7 @@ type RunSetupResult struct {
 // RunSetupAsync runs the setup script in the background
 // Returns a channel that will receive the result when done
 func (sm *SetupManager) RunSetupAsync(
-	projectPath, worktreePath, projectName, worktreeName string,
+	project *config.Project, projectName, worktreeName string,
 	worktree *config.Worktree,
 	onComplete func(success bool, err error),
 ) {
@@ -138,16 +139,18 @@ func (sm *SetupManager) RunSetupAsync(
 			}
 		}()
 
+		// Load project config for environment variables
+		projectConfig, _ := config.LoadProjectConfig(project.Path)
+
 		// Check for setup script in .conductor-scripts/setup.sh
-		scriptPath := filepath.Join(projectPath, ".conductor-scripts", "setup.sh")
+		scriptPath := filepath.Join(project.Path, ".conductor-scripts", "setup.sh")
 		var cmd *exec.Cmd
 
 		if _, err := os.Stat(scriptPath); err == nil {
 			cmd = exec.Command("bash", scriptPath)
 		} else {
 			// Check for inline setup script in conductor.json
-			projectConfig, err := config.LoadProjectConfig(projectPath)
-			if err != nil || projectConfig == nil || projectConfig.Scripts == nil {
+			if projectConfig == nil || projectConfig.Scripts == nil {
 				success = true // No setup script, consider it success
 				return
 			}
@@ -161,17 +164,10 @@ func (sm *SetupManager) RunSetupAsync(
 			cmd = exec.Command("bash", "-c", script)
 		}
 
-		cmd.Dir = worktreePath
+		cmd.Dir = worktree.Path
 
-		// Build environment variables
-		env := os.Environ()
-		env = append(env, fmt.Sprintf("CONDUCTOR_PROJECT=%s", projectName))
-		env = append(env, fmt.Sprintf("CONDUCTOR_WORKTREE=%s", worktreeName))
-		env = append(env, fmt.Sprintf("CONDUCTOR_WORKTREE_PATH=%s", worktreePath))
-		if len(worktree.Ports) > 0 {
-			env = append(env, fmt.Sprintf("CONDUCTOR_PORT=%d", worktree.Ports[0]))
-		}
-		cmd.Env = env
+		// Build environment variables using the same function as CLI runner
+		cmd.Env = runner.BuildEnv(projectName, project, worktreeName, worktree, projectConfig)
 
 		// Capture output to both memory buffer and file
 		sm.mu.RLock()
@@ -230,7 +226,7 @@ func (sm *SetupManager) ArchiveLogFilePath(projectName, worktreeName string) str
 // RunArchiveScript runs the archive script synchronously and logs output
 // Returns error if script fails, but caller should still proceed with deletion
 func (sm *SetupManager) RunArchiveScript(
-	projectPath, worktreePath, projectName, worktreeName string,
+	project *config.Project, projectName, worktreeName string,
 	worktree *config.Worktree,
 ) error {
 	// Create log file
@@ -252,16 +248,18 @@ func (sm *SetupManager) RunArchiveScript(
 		}
 	}()
 
+	// Load project config for environment variables
+	projectConfig, _ := config.LoadProjectConfig(project.Path)
+
 	// Check for archive script in .conductor-scripts/archive.sh
-	scriptPath := filepath.Join(projectPath, ".conductor-scripts", "archive.sh")
+	scriptPath := filepath.Join(project.Path, ".conductor-scripts", "archive.sh")
 	var cmd *exec.Cmd
 
 	if _, err := os.Stat(scriptPath); err == nil {
 		cmd = exec.Command("bash", scriptPath)
 	} else {
 		// Check for inline archive script in conductor.json
-		projectConfig, err := config.LoadProjectConfig(projectPath)
-		if err != nil || projectConfig == nil || projectConfig.Scripts == nil {
+		if projectConfig == nil || projectConfig.Scripts == nil {
 			return nil // No archive script, nothing to do
 		}
 
@@ -273,17 +271,10 @@ func (sm *SetupManager) RunArchiveScript(
 		cmd = exec.Command("bash", "-c", script)
 	}
 
-	cmd.Dir = worktreePath
+	cmd.Dir = worktree.Path
 
-	// Build environment variables
-	env := os.Environ()
-	env = append(env, fmt.Sprintf("CONDUCTOR_PROJECT=%s", projectName))
-	env = append(env, fmt.Sprintf("CONDUCTOR_WORKTREE=%s", worktreeName))
-	env = append(env, fmt.Sprintf("CONDUCTOR_WORKTREE_PATH=%s", worktreePath))
-	if len(worktree.Ports) > 0 {
-		env = append(env, fmt.Sprintf("CONDUCTOR_PORT=%d", worktree.Ports[0]))
-	}
-	cmd.Env = env
+	// Build environment variables using the same function as CLI runner
+	cmd.Env = runner.BuildEnv(projectName, project, worktreeName, worktree, projectConfig)
 
 	// Write header to log
 	header := fmt.Sprintf("=== Archive started at %s ===\n", time.Now().Format(time.RFC3339))

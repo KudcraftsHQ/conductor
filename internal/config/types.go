@@ -28,30 +28,55 @@ type PortAlloc struct {
 
 // Project represents a registered project
 type Project struct {
-	Path                   string               `json:"path"`
-	AddedAt                time.Time            `json:"addedAt"`
-	DefaultPortsPerWorktree int                 `json:"defaultPortsPerWorktree"`
-	Worktrees              map[string]*Worktree `json:"worktrees"`
+	Path                    string               `json:"path"`
+	AddedAt                 time.Time            `json:"addedAt"`
+	DefaultPortsPerWorktree int                  `json:"defaultPortsPerWorktree"`
+	GitHubOwner             string               `json:"github_owner,omitempty"`
+	GitHubRepo              string               `json:"github_repo,omitempty"`
+	Worktrees               map[string]*Worktree `json:"worktrees"`
 }
 
 // SetupStatus represents the state of worktree setup
 type SetupStatus string
 
 const (
-	SetupStatusNone    SetupStatus = ""
-	SetupStatusRunning SetupStatus = "running"
-	SetupStatusDone    SetupStatus = "done"
-	SetupStatusFailed  SetupStatus = "failed"
+	SetupStatusNone     SetupStatus = ""
+	SetupStatusCreating SetupStatus = "creating"
+	SetupStatusRunning  SetupStatus = "running"
+	SetupStatusDone     SetupStatus = "done"
+	SetupStatusFailed   SetupStatus = "failed"
 )
+
+// ArchiveStatus represents the state of worktree archiving
+type ArchiveStatus string
+
+const (
+	ArchiveStatusNone    ArchiveStatus = ""
+	ArchiveStatusRunning ArchiveStatus = "running"
+)
+
+// PRInfo represents a GitHub pull request linked to a worktree
+type PRInfo struct {
+	Number    int       `json:"number"`
+	URL       string    `json:"url"`
+	Title     string    `json:"title"`
+	State     string    `json:"state"`  // "open", "closed", "merged", "draft"
+	Author    string    `json:"author"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
 
 // Worktree represents a git worktree with its allocated ports
 type Worktree struct {
-	Path        string      `json:"path"`
-	Branch      string      `json:"branch"`
-	IsRoot      bool        `json:"isRoot"`
-	Ports       []int       `json:"ports"`
-	CreatedAt   time.Time   `json:"createdAt"`
-	SetupStatus SetupStatus `json:"-"` // Runtime only, not persisted
+	Path          string        `json:"path"`
+	Branch        string        `json:"branch"`
+	IsRoot        bool          `json:"isRoot"`
+	Ports         []int         `json:"ports"`
+	CreatedAt     time.Time     `json:"createdAt"`
+	Archived      bool          `json:"archived,omitempty"`
+	ArchivedAt    time.Time     `json:"archivedAt,omitempty"`
+	PRs           []PRInfo      `json:"prs,omitempty"`
+	SetupStatus   SetupStatus   `json:"-"` // Runtime only, not persisted
+	ArchiveStatus ArchiveStatus `json:"-"` // Runtime only, not persisted
 }
 
 // ProjectConfig represents project-level conductor.json

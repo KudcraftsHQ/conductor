@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/github"
 	"github.com/hammashamzah/conductor/internal/opener"
 	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/workspace"
@@ -27,10 +28,43 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKeyMsg(msg)
 
+	case tea.MouseMsg:
+		return m.handleMouseMsg(msg)
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
+
+	case WorktreeCreatedMsg:
+		m.refreshWorktreeList()
+		if !msg.Success {
+			m.setStatus("Failed to create worktree: "+msg.Err.Error(), true)
+			// Mark as failed
+			if msg.Worktree != nil {
+				msg.Worktree.SetupStatus = config.SetupStatusFailed
+			}
+			return m, nil
+		}
+		// Git worktree created, now run setup
+		m.setStatus("Created "+msg.WorktreeName+", running setup...", false)
+		if msg.Worktree != nil {
+			msg.Worktree.SetupStatus = config.SetupStatusRunning
+		}
+		projectName := msg.ProjectName
+		worktreeName := msg.WorktreeName
+		return m, func() tea.Msg {
+			done := make(chan SetupCompleteMsg)
+			_ = m.wsManager.RunSetupAsync(projectName, worktreeName, func(success bool, setupErr error) {
+				done <- SetupCompleteMsg{
+					ProjectName:  projectName,
+					WorktreeName: worktreeName,
+					Success:      success,
+					Err:          setupErr,
+				}
+			})
+			return <-done
+		}
 
 	case SetupCompleteMsg:
 		m.refreshWorktreeList()
@@ -42,10 +76,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case WorktreeArchivedMsg:
+		// Clear archive status
+		if msg.ProjectName != "" && msg.WorktreeName != "" {
+			if project := m.config.Projects[msg.ProjectName]; project != nil {
+				if wt := project.Worktrees[msg.WorktreeName]; wt != nil {
+					wt.ArchiveStatus = config.ArchiveStatusNone
+				}
+			}
+		}
+
 		if msg.Err != nil {
 			m.setStatus("Error: "+msg.Err.Error(), true)
 		} else {
 			m.setStatus("Archived worktree: "+msg.WorktreeName, false)
+			m.refreshWorktreeList()
+			if m.cursor >= len(m.worktreeNames) {
+				m.cursor = len(m.worktreeNames) - 1
+			}
+			if m.cursor < 0 {
+				m.cursor = 0
+			}
+		}
+		return m, nil
+
+	case WorktreeDeletedMsg:
+		if msg.Err != nil {
+			m.setStatus("Error: "+msg.Err.Error(), true)
+		} else {
+			m.setStatus("Deleted worktree: "+msg.WorktreeName, false)
 			m.refreshWorktreeList()
 			if m.cursor >= len(m.worktreeNames) {
 				m.cursor = len(m.worktreeNames) - 1
@@ -74,13 +132,54 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cfg, err := config.Load()
 		if err != nil {
 			m.setStatus("Error reloading config: "+err.Error(), true)
-		} else {
-			m.config = cfg
-			m.refreshProjectList()
-			if m.selectedProject != "" {
-				m.refreshWorktreeList()
+			return m, nil
+		}
+		m.config = cfg
+		m.wsManager = workspace.NewManager(cfg)
+		m.refreshProjectList()
+		if m.selectedProject != "" {
+			m.refreshWorktreeList()
+			// Also sync PRs in background when refreshing in worktrees view
+			if m.currentView == ViewWorktrees {
+				projectName := m.selectedProject
+				m.setStatus("Refreshing PRs...", false)
+				return m, func() tea.Msg {
+					err := m.wsManager.SyncAllPRs(projectName)
+					return AllPRsSyncedMsg{ProjectName: projectName, Err: err}
+				}
 			}
-			m.setStatus("Refreshed", false)
+		}
+		m.setStatus("Refreshed", false)
+		return m, nil
+
+	case PRsFetchedMsg:
+		m.prLoading = false
+		if msg.Err != nil {
+			m.setStatus("Error fetching PRs: "+msg.Err.Error(), true)
+			m.prList = nil
+		} else {
+			m.prList = msg.PRs
+			m.prCursor = 0
+			// Save updated PR data to config
+			_ = config.Save(m.config)
+		}
+		return m, nil
+
+	case PROpenedMsg:
+		if msg.Err != nil {
+			m.setStatus("Error opening PR: "+msg.Err.Error(), true)
+		} else {
+			m.setStatus("Opened PR in browser", false)
+		}
+		return m, nil
+
+	case AllPRsSyncedMsg:
+		if msg.Err != nil {
+			m.setStatus("Error syncing PRs: "+msg.Err.Error(), true)
+		} else {
+			m.setStatus("PRs refreshed", false)
+			// Save updated PR data to config
+			_ = config.Save(m.config)
 		}
 		return m, nil
 	}
@@ -118,10 +217,23 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleLogsView(msg)
 	}
 
+	// Handle quit dialog
+	if m.currentView == ViewQuit {
+		return m.handleQuitDialog(msg)
+	}
+
+	// Handle PRs modal
+	if m.currentView == ViewPRs {
+		return m.handlePRsView(msg)
+	}
+
 	// Global keys
 	switch {
 	case key.Matches(msg, m.keyMap.Quit):
-		return m, tea.Quit
+		m.quitFocused = 0
+		m.prevView = m.currentView
+		m.currentView = ViewQuit
+		return m, nil
 
 	case key.Matches(msg, m.keyMap.Help):
 		m.prevView = m.currentView
@@ -189,6 +301,13 @@ func (m *Model) handleProjectsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.offset = 0
 			m.prevView = ViewProjects
 			m.currentView = ViewWorktrees
+
+			// Sync PRs for all worktrees in background
+			projectName := m.selectedProject
+			return m, func() tea.Msg {
+				err := m.wsManager.SyncAllPRs(projectName)
+				return AllPRsSyncedMsg{ProjectName: projectName, Err: err}
+			}
 		}
 
 	case key.Matches(msg, m.keyMap.Ports):
@@ -239,17 +358,41 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.prevView = ViewWorktrees
 		m.currentView = ViewCreateWorktree
 
-	case key.Matches(msg, m.keyMap.Archive), key.Matches(msg, m.keyMap.Delete):
+	case key.Matches(msg, m.keyMap.Archive):
+		// 'a' key - archive active worktrees
 		if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
 			wtName := m.worktreeNames[m.cursor]
 			project := m.config.Projects[m.selectedProject]
-			if wt := project.Worktrees[wtName]; wt != nil && !wt.IsRoot {
-				m.deleteTarget = wtName
-				m.deleteTargetType = "worktree"
-				m.prevView = ViewWorktrees
-				m.currentView = ViewConfirmDelete
-			} else {
-				m.setStatus("Cannot archive root worktree", true)
+			if wt := project.Worktrees[wtName]; wt != nil {
+				if wt.IsRoot {
+					m.setStatus("Cannot archive root worktree", true)
+				} else if wt.Archived {
+					m.setStatus("Worktree is already archived (use 'd' to delete)", true)
+				} else {
+					m.deleteTarget = wtName
+					m.deleteTargetType = "worktree"
+					m.prevView = ViewWorktrees
+					m.currentView = ViewConfirmDelete
+				}
+			}
+		}
+
+	case key.Matches(msg, m.keyMap.Delete):
+		// 'd' key - delete archived worktrees permanently
+		if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
+			wtName := m.worktreeNames[m.cursor]
+			project := m.config.Projects[m.selectedProject]
+			if wt := project.Worktrees[wtName]; wt != nil {
+				if wt.IsRoot {
+					m.setStatus("Cannot delete root worktree", true)
+				} else if !wt.Archived {
+					m.setStatus("Worktree must be archived first (use 'a' to archive)", true)
+				} else {
+					m.deleteTarget = wtName
+					m.deleteTargetType = "worktree-delete"
+					m.prevView = ViewWorktrees
+					m.currentView = ViewConfirmDelete
+				}
 			}
 		}
 
@@ -266,13 +409,49 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.prevView = ViewWorktrees
 		m.currentView = ViewPorts
 
+	case key.Matches(msg, m.keyMap.MergeReqs):
+		// Open PR modal for selected worktree
+		if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
+			wtName := m.worktreeNames[m.cursor]
+			m.prWorktree = wtName
+			m.prList = nil
+			m.prCursor = 0
+			m.prLoading = true
+			m.prevView = ViewWorktrees
+			m.currentView = ViewPRs
+
+			// Fetch PRs asynchronously
+			projectName := m.selectedProject
+			return m, func() tea.Msg {
+				prs, err := m.wsManager.SyncPRsForWorktree(projectName, wtName)
+				return PRsFetchedMsg{
+					ProjectName:  projectName,
+					WorktreeName: wtName,
+					PRs:          prs,
+					Err:          err,
+				}
+			}
+		}
+
 	case msg.String() == "l":
 		// View logs for selected worktree
 		if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
-			m.logsWorktree = m.worktreeNames[m.cursor]
+			wtName := m.worktreeNames[m.cursor]
+			project := m.config.Projects[m.selectedProject]
+			wt := project.Worktrees[wtName]
+
+			m.logsWorktree = wtName
 			m.logsScroll = 0
+			m.logsAutoScroll = true // Enable auto-scroll by default
 			m.prevView = ViewWorktrees
 			m.currentView = ViewLogs
+
+			// Show archive logs for archived worktrees, setup logs otherwise
+			if wt.Archived {
+				m.logsType = "archive"
+			} else {
+				m.logsType = "setup"
+			}
 		}
 		m.cursor = 0
 		m.offset = 0
@@ -385,36 +564,37 @@ func (m *Model) createWorktree() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Create worktree synchronously so we can show errors in dialog
-	name, _, err := m.wsManager.CreateWorktree(m.selectedProject, branch, portCount)
+	// Prepare worktree optimistically (allocates ports, creates entry)
+	name, worktree, err := m.wsManager.PrepareWorktree(m.selectedProject, branch, portCount)
 	if err != nil {
 		m.createError = err.Error()
 		return m, nil
 	}
 
-	// Save config
+	// Save config immediately so the entry appears in the list
 	if err := config.Save(m.config); err != nil {
 		m.createError = "Failed to save config: " + err.Error()
 		return m, nil
 	}
 
-	// Success - close dialog and show worktree list
+	// Success - close dialog and show worktree list immediately
 	m.createError = ""
 	m.currentView = ViewWorktrees
 	m.refreshWorktreeList()
-	m.setStatus("Created worktree: "+name+" (setting up...)", false)
+	m.setStatus("Creating worktree: "+name+"...", false)
 
-	// Start setup in background
+	// Start git worktree creation in background
 	projectName := m.selectedProject
 	worktreeName := name
 	return m, func() tea.Msg {
-		done := make(chan SetupCompleteMsg)
-		_ = m.wsManager.RunSetupAsync(projectName, worktreeName, func(success bool, setupErr error) {
-			done <- SetupCompleteMsg{
+		done := make(chan WorktreeCreatedMsg)
+		_ = m.wsManager.CreateWorktreeAsync(projectName, worktreeName, func(success bool, createErr error) {
+			done <- WorktreeCreatedMsg{
 				ProjectName:  projectName,
 				WorktreeName: worktreeName,
+				Worktree:     worktree,
 				Success:      success,
-				Err:          setupErr,
+				Err:          createErr,
 			}
 		})
 		return <-done
@@ -427,9 +607,16 @@ func (m *Model) executeDelete() (tea.Model, tea.Cmd) {
 		projectName := m.selectedProject
 		wtName := m.deleteTarget
 
+		// Mark worktree as archiving
+		project := m.config.Projects[projectName]
+		if wt := project.Worktrees[wtName]; wt != nil {
+			wt.ArchiveStatus = config.ArchiveStatusRunning
+		}
+
 		m.currentView = ViewWorktrees
 		m.deleteTarget = ""
 		m.deleteTargetType = ""
+		m.setStatus("Archiving "+wtName+"...", false)
 
 		return m, func() tea.Msg {
 			err := m.wsManager.ArchiveWorktree(projectName, wtName)
@@ -442,6 +629,29 @@ func (m *Model) executeDelete() (tea.Model, tea.Cmd) {
 			}
 
 			return WorktreeArchivedMsg{
+				ProjectName:  projectName,
+				WorktreeName: wtName,
+			}
+		}
+	case "worktree-delete":
+		projectName := m.selectedProject
+		wtName := m.deleteTarget
+
+		m.currentView = ViewWorktrees
+		m.deleteTarget = ""
+		m.deleteTargetType = ""
+
+		return m, func() tea.Msg {
+			err := m.wsManager.DeleteWorktree(projectName, wtName)
+			if err != nil {
+				return WorktreeDeletedMsg{Err: err}
+			}
+
+			if err := config.Save(m.config); err != nil {
+				return WorktreeDeletedMsg{Err: err}
+			}
+
+			return WorktreeDeletedMsg{
 				ProjectName:  projectName,
 				WorktreeName: wtName,
 			}
@@ -513,7 +723,7 @@ func (m *Model) openWorktreeIDE(ideType opener.IDEType) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleLogsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	logs := workspace.GetSetupManager().GetLogs(m.selectedProject, m.logsWorktree)
+	logs := m.getCurrentLogs()
 	lines := strings.Split(logs, "\n")
 	maxScroll := len(lines) - m.tableHeight()
 	if maxScroll < 0 {
@@ -529,18 +739,165 @@ func (m *Model) handleLogsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keyMap.Up) || msg.String() == "k":
 		if m.logsScroll > 0 {
 			m.logsScroll--
+			m.logsAutoScroll = false // Disable auto-scroll when user scrolls up
 		}
 
 	case key.Matches(msg, m.keyMap.Down) || msg.String() == "j":
 		if m.logsScroll < maxScroll {
 			m.logsScroll++
 		}
+		// Re-enable auto-scroll if we reach the bottom
+		if m.logsScroll >= maxScroll {
+			m.logsAutoScroll = true
+		}
 
 	case msg.String() == "g":
 		m.logsScroll = 0
+		m.logsAutoScroll = false
 
 	case msg.String() == "G":
 		m.logsScroll = maxScroll
+		m.logsAutoScroll = true
+
+	case msg.String() == "a":
+		// Toggle auto-scroll
+		m.logsAutoScroll = !m.logsAutoScroll
+		if m.logsAutoScroll {
+			m.logsScroll = maxScroll
+		}
+	}
+
+	return m, nil
+}
+
+func (m *Model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Only handle mouse events in logs view
+	if m.currentView != ViewLogs {
+		return m, nil
+	}
+
+	logs := m.getCurrentLogs()
+	lines := strings.Split(logs, "\n")
+	maxScroll := len(lines) - m.tableHeight()
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		if m.logsScroll > 0 {
+			m.logsScroll -= 3
+			if m.logsScroll < 0 {
+				m.logsScroll = 0
+			}
+			m.logsAutoScroll = false // Disable auto-scroll when user scrolls up
+		}
+
+	case tea.MouseButtonWheelDown:
+		if m.logsScroll < maxScroll {
+			m.logsScroll += 3
+			if m.logsScroll > maxScroll {
+				m.logsScroll = maxScroll
+			}
+		}
+		// Re-enable auto-scroll if we reach the bottom
+		if m.logsScroll >= maxScroll {
+			m.logsAutoScroll = true
+		}
+	}
+
+	return m, nil
+}
+
+// getCurrentLogs returns the appropriate logs based on logsType
+func (m *Model) getCurrentLogs() string {
+	if m.logsType == "archive" {
+		return workspace.GetSetupManager().GetArchiveLogs(m.selectedProject, m.logsWorktree)
+	}
+	return workspace.GetSetupManager().GetLogs(m.selectedProject, m.logsWorktree)
+}
+
+func (m *Model) handleQuitDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.Type == tea.KeyEsc || msg.String() == "q":
+		m.currentView = m.prevView
+		return m, nil
+
+	case key.Matches(msg, m.keyMap.Up), msg.String() == "k", msg.String() == "h":
+		if m.quitFocused > 0 {
+			m.quitFocused--
+		}
+
+	case key.Matches(msg, m.keyMap.Down), msg.String() == "j", msg.String() == "l":
+		if m.quitFocused < 1 {
+			m.quitFocused++
+		}
+
+	case msg.Type == tea.KeyEnter:
+		if m.quitFocused == 0 {
+			// Kill all - kill the entire tmux session
+			return m, func() tea.Msg {
+				_ = tmux.KillSession()
+				return tea.Quit()
+			}
+		}
+		// Detach - detach from tmux session, TUI keeps running
+		_ = tmux.DetachSession()
+		m.currentView = m.prevView
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m *Model) handlePRsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keyMap.Back):
+		m.currentView = ViewWorktrees
+		m.prList = nil
+		m.prWorktree = ""
+		m.cursor = 0
+		m.offset = 0
+		return m, nil
+
+	case key.Matches(msg, m.keyMap.Up):
+		if m.prCursor > 0 {
+			m.prCursor--
+			m.ensurePRCursorVisible()
+		}
+
+	case key.Matches(msg, m.keyMap.Down):
+		if m.prCursor < len(m.prList)-1 {
+			m.prCursor++
+			m.ensurePRCursorVisible()
+		}
+
+	case key.Matches(msg, m.keyMap.Open) || msg.Type == tea.KeyEnter:
+		// Open selected PR in browser
+		if len(m.prList) > 0 && m.prCursor >= 0 && m.prCursor < len(m.prList) {
+			pr := m.prList[m.prCursor]
+			return m, func() tea.Msg {
+				err := github.OpenInBrowser(pr.URL)
+				return PROpenedMsg{URL: pr.URL, Err: err}
+			}
+		}
+
+	case key.Matches(msg, m.keyMap.Refresh):
+		// Refresh PRs
+		if m.prWorktree != "" {
+			m.prLoading = true
+			projectName := m.selectedProject
+			wtName := m.prWorktree
+			return m, func() tea.Msg {
+				prs, err := m.wsManager.SyncPRsForWorktree(projectName, wtName)
+				return PRsFetchedMsg{
+					ProjectName:  projectName,
+					WorktreeName: wtName,
+					PRs:          prs,
+					Err:          err,
+				}
+			}
+		}
 	}
 
 	return m, nil

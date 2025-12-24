@@ -7,7 +7,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/tui/styles"
-	"github.com/hammashamzah/conductor/internal/workspace"
 )
 
 // View renders the current state
@@ -57,6 +56,8 @@ func (m *Model) View() string {
 		}
 	case ViewLogs:
 		sections = append(sections, m.renderLogsView())
+	case ViewPRs:
+		sections = append(sections, m.renderPRsPage())
 	}
 
 	// Footer
@@ -73,6 +74,8 @@ func (m *Model) View() string {
 		return m.overlayModal(baseView, m.renderConfirmDeleteModal())
 	case ViewHelp:
 		return m.overlayModal(baseView, m.renderHelpModal())
+	case ViewQuit:
+		return m.overlayModal(baseView, m.renderQuitModal())
 	}
 
 	return baseView
@@ -141,8 +144,15 @@ func (m *Model) renderTitleBar() string {
 		title = "HELP"
 		count = 0
 	case ViewLogs:
-		title = "SETUP LOGS: " + m.logsWorktree
+		if m.logsType == "archive" {
+			title = "ARCHIVE LOGS: " + m.logsWorktree
+		} else {
+			title = "SETUP LOGS: " + m.logsWorktree
+		}
 		count = 0
+	case ViewPRs:
+		title = "MERGE REQUESTS: " + m.prWorktree
+		count = len(m.prList)
 	}
 
 	// Build title: ─────── TITLE(count) ───────
@@ -262,23 +272,25 @@ func (m *Model) renderWorktreesTable() string {
 
 	// Column widths
 	nameW := 15
-	portW := 15
+	portW := 12
 	statusW := 12
-	createdW := 15
-	branchW := m.width - nameW - portW - statusW - createdW - 12 // Remaining space for branch
-	if branchW < 20 {
-		branchW = 20
+	createdW := 14
+	prW := 12
+	branchW := m.width - nameW - portW - statusW - createdW - prW - 14 // Remaining space for branch
+	if branchW < 15 {
+		branchW = 15
 	}
 
 	var rows []string
 
 	// Header
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s",
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
 		nameW, "NAME",
 		branchW, "BRANCH",
 		portW, "PORTS",
 		statusW, "STATUS",
-		createdW, "CREATED")
+		createdW, "CREATED",
+		prW, "PR")
 	rows = append(rows, m.styles.TableHeader.Render(header))
 
 	// Calculate visible rows
@@ -304,32 +316,60 @@ func (m *Model) renderWorktreesTable() string {
 			}
 		}
 
-		// Status based on setup state
+		// Status based on setup state, archive state, or archived state
 		status := "ready"
-		switch wt.SetupStatus {
-		case config.SetupStatusRunning:
-			status = m.spinner.View() + " setting up"
-		case config.SetupStatusFailed:
-			status = "✗ failed"
-		case config.SetupStatusDone:
-			status = "ready"
+		if wt.ArchiveStatus == config.ArchiveStatusRunning {
+			status = m.spinner.View() + " archiving"
+		} else if wt.Archived {
+			status = "archived"
+		} else {
+			switch wt.SetupStatus {
+			case config.SetupStatusCreating:
+				status = m.spinner.View() + " creating"
+			case config.SetupStatusRunning:
+				status = m.spinner.View() + " setting up"
+			case config.SetupStatusFailed:
+				status = "✗ failed"
+			case config.SetupStatusDone:
+				status = "ready"
+			}
 		}
 
-		created := wt.CreatedAt.Format("Jan 2, 15:04")
+		// Show archived date instead of created date for archived worktrees
+		dateStr := wt.CreatedAt.Format("Jan 2, 15:04")
+		if wt.Archived {
+			dateStr = wt.ArchivedAt.Format("Jan 2, 15:04")
+		}
+
+		// PR column - show most recent PR
+		prStr := "-"
+		if len(wt.PRs) > 0 {
+			pr := wt.PRs[0] // Most recent
+			prStr = fmt.Sprintf("#%d %s", pr.Number, pr.State)
+		}
 
 		// Build row content (without cursor)
-		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s",
-			nameW, truncate(name, nameW),
+		displayName := name
+		if wt.Archived {
+			displayName = "◦" + name // Add ◦ prefix for archived
+		}
+
+		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+			nameW, truncate(displayName, nameW),
 			branchW, truncate(wt.Branch, branchW),
 			portW, portRange,
 			statusW, status,
-			createdW, created)
+			createdW, dateStr,
+			prW, truncate(prStr, prW))
 
 		// Pad to full width
 		rowContent = padRight(rowContent, m.width-2)
 
 		if i == m.cursor {
 			rows = append(rows, m.styles.TableRowSelected.Width(m.width).Render("> "+rowContent))
+		} else if wt.Archived {
+			// Dim archived worktrees
+			rows = append(rows, m.styles.Muted.Render("  "+rowContent))
 		} else {
 			rows = append(rows, "  "+rowContent)
 		}
@@ -421,6 +461,11 @@ func (m *Model) renderFooter() string {
 		breadcrumbs = append(breadcrumbs, "create")
 	case ViewConfirmDelete:
 		breadcrumbs = append(breadcrumbs, "confirm")
+	case ViewPRs:
+		breadcrumbs = append(breadcrumbs, "projects")
+		breadcrumbs = append(breadcrumbs, m.selectedProject)
+		breadcrumbs = append(breadcrumbs, m.prWorktree)
+		breadcrumbs = append(breadcrumbs, "prs")
 	}
 
 	for i, bc := range breadcrumbs {
@@ -445,9 +490,11 @@ func (m *Model) renderFooter() string {
 		case ViewProjects:
 			hints = []string{"enter:select", "d:delete", "?:help", "q:quit"}
 		case ViewWorktrees:
-			hints = []string{"c:create", "o:open", "C:cursor", "a:archive", "esc:back"}
+			hints = []string{"c:create", "o:open", "C:cursor", "a:archive", "m:PRs", "l:logs", "esc:back"}
 		case ViewPorts:
 			hints = []string{"esc:back"}
+		case ViewPRs:
+			hints = []string{"o:open in browser", "r:refresh", "esc:back"}
 		}
 		right = m.styles.Muted.Render(strings.Join(hints, "  "))
 	}
@@ -461,7 +508,7 @@ func (m *Model) renderFooter() string {
 	}
 
 	footer := left + strings.Repeat(" ", spacing) + right
-	return "\n" + footer
+	return footer
 }
 
 func (m *Model) renderCreateWorktreeModal() string {
@@ -529,13 +576,21 @@ func (m *Model) renderConfirmDeleteModal() string {
 
 	var content strings.Builder
 
-	content.WriteString(m.styles.ModalTitle.Render("Confirm Delete"))
-	content.WriteString("\n\n")
-
-	if m.deleteTargetType == "worktree" {
+	switch m.deleteTargetType {
+	case "worktree":
+		content.WriteString(m.styles.ModalTitle.Render("Confirm Archive"))
+		content.WriteString("\n\n")
 		content.WriteString(fmt.Sprintf("  Archive worktree '%s'?\n\n", m.deleteTarget))
-		content.WriteString(m.styles.Muted.Render("  This will remove the git worktree and free its ports."))
-	} else {
+		content.WriteString(m.styles.Muted.Render("  This will remove the git worktree and free its ports.\n"))
+		content.WriteString(m.styles.Muted.Render("  The entry will remain for viewing logs."))
+	case "worktree-delete":
+		content.WriteString(m.styles.ModalTitle.Render("Confirm Delete"))
+		content.WriteString("\n\n")
+		content.WriteString(fmt.Sprintf("  Permanently delete '%s'?\n\n", m.deleteTarget))
+		content.WriteString(m.styles.Muted.Render("  This will remove the worktree entry and its logs."))
+	default:
+		content.WriteString(m.styles.ModalTitle.Render("Confirm Delete"))
+		content.WriteString("\n\n")
 		content.WriteString(fmt.Sprintf("  Remove project '%s'?\n\n", m.deleteTarget))
 		content.WriteString(m.styles.Muted.Render("  This will free all ports. Files will NOT be deleted."))
 	}
@@ -590,6 +645,7 @@ func (m *Model) renderHelpModal() string {
 				{"1", "Projects view"},
 				{"2", "Worktrees view"},
 				{"p", "Ports view"},
+				{"m", "Merge requests"},
 			},
 		},
 		{
@@ -620,6 +676,140 @@ func (m *Model) renderHelpModal() string {
 	modal := m.styles.Modal.Width(width).Render(content.String())
 
 	return modal
+}
+
+func (m *Model) renderQuitModal() string {
+	width := 40
+	if width > m.width-4 {
+		width = m.width - 4
+	}
+
+	var content strings.Builder
+
+	content.WriteString(m.styles.ModalTitle.Render("Quit Conductor"))
+	content.WriteString("\n\n")
+	content.WriteString(m.styles.Muted.Render("  Choose an action:"))
+	content.WriteString("\n\n")
+
+	// Kill all option
+	killLabel := "  Kill All"
+	killDesc := "Stop all tmux windows and exit"
+	if m.quitFocused == 0 {
+		content.WriteString(m.styles.Cursor.Render("► "))
+		content.WriteString(m.styles.TableRowSelected.Render(killLabel))
+		content.WriteString("\n")
+		content.WriteString("    " + m.styles.Muted.Render(killDesc))
+	} else {
+		content.WriteString("  " + killLabel)
+		content.WriteString("\n")
+		content.WriteString("    " + m.styles.Muted.Render(killDesc))
+	}
+	content.WriteString("\n\n")
+
+	// Detach option
+	detachLabel := "  Detach"
+	detachDesc := "Exit TUI, keep windows running"
+	if m.quitFocused == 1 {
+		content.WriteString(m.styles.Cursor.Render("► "))
+		content.WriteString(m.styles.TableRowSelected.Render(detachLabel))
+		content.WriteString("\n")
+		content.WriteString("    " + m.styles.Muted.Render(detachDesc))
+	} else {
+		content.WriteString("  " + detachLabel)
+		content.WriteString("\n")
+		content.WriteString("    " + m.styles.Muted.Render(detachDesc))
+	}
+	content.WriteString("\n\n")
+
+	// Actions
+	content.WriteString("  ")
+	content.WriteString(m.styles.RenderKeyHelp("enter", "confirm"))
+	content.WriteString("  ")
+	content.WriteString(m.styles.RenderKeyHelp("esc", "cancel"))
+
+	modal := m.styles.Modal.Width(width).Render(content.String())
+	return modal
+}
+
+func (m *Model) renderPRsPage() string {
+	if m.prLoading {
+		loading := m.spinner.View() + " Fetching PRs from GitHub..."
+		return m.padContent(loading)
+	}
+
+	if len(m.prList) == 0 {
+		empty := m.styles.Muted.Render("No pull requests found for this branch.")
+		return m.padContent(empty)
+	}
+
+	// Column widths for PR table
+	numW := 8
+	stateW := 12
+	authorW := 15
+	updatedW := 14
+	titleW := m.width - numW - stateW - authorW - updatedW - 12 // Remaining for title
+	if titleW < 20 {
+		titleW = 20
+	}
+
+	var rows []string
+
+	// Header
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s",
+		numW, "NUMBER",
+		titleW, "TITLE",
+		stateW, "STATE",
+		authorW, "AUTHOR",
+		updatedW, "UPDATED")
+	rows = append(rows, m.styles.TableHeader.Render(header))
+
+	// Calculate visible rows
+	tableHeight := m.tableHeight()
+	start := m.offset
+	end := start + tableHeight
+	if end > len(m.prList) {
+		end = len(m.prList)
+	}
+
+	// PR rows
+	for i := start; i < end; i++ {
+		pr := m.prList[i]
+		numStr := fmt.Sprintf("#%d", pr.Number)
+
+		// State with indicator
+		stateStr := pr.State
+		switch pr.State {
+		case "merged":
+			stateStr = "✓ merged"
+		case "closed":
+			stateStr = "✗ closed"
+		case "draft":
+			stateStr = "◦ draft"
+		case "open":
+			stateStr = "● open"
+		}
+
+		// Format updated date
+		updatedStr := pr.UpdatedAt.Format("Jan 2, 15:04")
+
+		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s",
+			numW, numStr,
+			titleW, truncate(pr.Title, titleW),
+			stateW, stateStr,
+			authorW, truncate(pr.Author, authorW),
+			updatedW, updatedStr)
+
+		// Pad to full width
+		rowContent = padRight(rowContent, m.width-2)
+
+		if i == m.prCursor {
+			rows = append(rows, m.styles.TableRowSelected.Width(m.width).Render("> "+rowContent))
+		} else {
+			rows = append(rows, "  "+rowContent)
+		}
+	}
+
+	return m.padContent(strings.Join(rows, "\n"))
 }
 
 // overlayModal overlays a modal on top of the base view
@@ -694,10 +884,16 @@ func padRight(s string, width int) string {
 }
 
 func (m *Model) renderLogsView() string {
-	logs := workspace.GetSetupManager().GetLogs(m.selectedProject, m.logsWorktree)
+	logs := m.getCurrentLogs()
 
 	if logs == "" {
-		empty := m.styles.Muted.Render("No logs available for this worktree.")
+		var emptyMsg string
+		if m.logsType == "archive" {
+			emptyMsg = "No archive logs available for this worktree."
+		} else {
+			emptyMsg = "No setup logs available for this worktree."
+		}
+		empty := m.styles.Muted.Render(emptyMsg)
 		return m.padContent(empty)
 	}
 
@@ -706,6 +902,17 @@ func (m *Model) renderLogsView() string {
 
 	// Calculate visible area
 	viewHeight := m.tableHeight()
+
+	// Calculate max scroll
+	maxScroll := len(lines) - viewHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+
+	// Apply auto-scroll if enabled
+	if m.logsAutoScroll {
+		m.logsScroll = maxScroll
+	}
 
 	// Apply scroll offset
 	start := m.logsScroll
@@ -743,8 +950,12 @@ func (m *Model) renderLogsView() string {
 		formatted = append(formatted, "")
 	}
 
-	// Add scroll indicator
-	scrollInfo := fmt.Sprintf("Lines %d-%d of %d (j/k to scroll, esc to close)", start+1, end, len(lines))
+	// Add scroll indicator with auto-scroll status
+	autoScrollStatus := ""
+	if m.logsAutoScroll {
+		autoScrollStatus = " [AUTO-SCROLL ON]"
+	}
+	scrollInfo := fmt.Sprintf("Lines %d-%d of %d%s (j/k/mouse: scroll, a: toggle auto-scroll, esc: close)", start+1, end, len(lines), autoScrollStatus)
 	formatted = append(formatted, "")
 	formatted = append(formatted, m.styles.Muted.Render(scrollInfo))
 

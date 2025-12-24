@@ -20,6 +20,12 @@ Conductor solves these problems by:
 - **Running setup/run/archive scripts** automatically
 - **Providing a TUI** for easy management of all your projects and worktrees
 
+## Requirements
+
+- **tmux** - Required for the TUI to work
+- **git** - For worktree operations
+- **gh** (optional) - GitHub CLI for PR integration
+
 ## Installation
 
 ### From Source
@@ -76,11 +82,18 @@ conductor
 - `Tab` - Switch between Projects, Worktrees, and Ports views
 - `Enter` - Select/Open
 - `n` - New worktree
+- `c` - Create worktree
+- `a` - Archive worktree
 - `d` - Delete (with confirmation)
 - `o` - Open in terminal
-- `c` - Open in Cursor
-- `v` - Open in VS Code
-- `l` - View setup logs
+- `t` - Open in terminal
+- `C` - Open in Cursor
+- `V` - Open in VS Code
+- `l` - View logs
+- `m` - View merge requests/PRs
+- `p` - View ports
+- `r` - Refresh
+- `/` - Filter
 - `?` - Help
 - `q` - Quit
 
@@ -263,8 +276,8 @@ By default, worktrees are named after cities (tokyo, paris, london, etc.) for ea
 
 Conductor supports opening worktrees in:
 
-- **Cursor** (`--cursor` or `c` in TUI)
-- **VS Code** (`--vscode` or `v` in TUI)
+- **Cursor** (`--cursor` or `C` in TUI)
+- **VS Code** (`--vscode` or `V` in TUI)
 - **Zed** (`--zed`)
 - **Neovim** (configured via `ideCommand`)
 
@@ -313,7 +326,7 @@ conductor worktree archive tokyo
 
 ### Requirements
 
-- Go 1.21+
+- Go 1.24+
 
 ### Building
 

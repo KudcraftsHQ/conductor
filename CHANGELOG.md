@@ -1,0 +1,52 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.12.24] - 2024-12-24
+
+### Added
+- **GitHub PR Integration**: View pull requests for worktree branches via `gh` CLI
+  - New `m` keybinding in TUI to view merge requests/PRs
+  - Automatic GitHub owner/repo detection from git remote
+  - PR state display (open, closed, merged, draft)
+- **Tmux Integration**: TUI now runs within tmux sessions
+  - Automatic tmux session management
+  - Dependency check for tmux on startup
+- **New TUI Keybindings**:
+  - `c` - Create worktree
+  - `a` - Archive worktree
+  - `t` - Open in terminal
+  - `m` - View merge requests/PRs
+  - `p` - View ports
+  - `r` / `Ctrl+R` - Refresh
+  - `/` - Filter
+  - `C` (uppercase) - Open in Cursor
+  - `V` (uppercase) - Open in VS Code
+- **Modal Overlay System**: Improved dialogs for create, delete, and help views
+- **GitHub Actions**: CI and release workflows
+
+### Changed
+- Updated README with accurate keybindings and requirements
+- Improved TUI navigation and status display
+- Enhanced worktree status tracking
+
+### Fixed
+- All lint issues resolved
+- Added pre-commit hook for code quality
+
+## [0.1.0] - 2024-12-20
+
+### Added
+- Initial release
+- Git worktree management with automatic port allocation
+- Interactive TUI with Bubble Tea
+- CLI commands for project, worktree, and port management
+- Setup/run/archive script execution with environment injection
+- IDE integration (Cursor, VS Code, Zed)
+- Terminal integration (iTerm2, Terminal.app, WezTerm)
+- City-based worktree naming (Tokyo, Paris, London, etc.)
+- Port range configuration (default: 3100-3999)
+- Labeled port support for multi-port setups
