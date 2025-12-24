@@ -4,6 +4,8 @@ A CLI tool for managing git worktrees across multiple projects with automatic po
 
 > **Heavily inspired by [Conductor.build](https://conductor.build/)** - the Mac app for running multiple AI coding agents in isolated workspaces. This CLI brings similar git worktree isolation and management to the command line.
 
+![Conductor TUI Screenshot](images/screenshot.png)
+
 ## Why Conductor?
 
 When working on multiple features or bug fixes simultaneously, git worktrees are incredibly useful. However, managing them manually becomes tedious:
