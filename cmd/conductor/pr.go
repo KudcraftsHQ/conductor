@@ -22,7 +22,7 @@ var prAutoSetupCmd = &cobra.Command{
 	Long: `Fetches all PRs with "claude/*" prefix and automatically creates worktrees for them.
 
 If no project is specified, uses the current directory's project.
-Only open and draft PRs are processed.
+Only open PRs are processed (drafts, closed, and merged PRs are skipped).
 Skips PRs that already have worktrees.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -61,7 +61,7 @@ Skips PRs that already have worktrees.`,
 		// Display results
 		fmt.Printf("\n📊 Results:\n")
 		fmt.Printf("  Total PRs found: %d\n", result.TotalPRs)
-		fmt.Printf("  Claude PRs (open/draft): %d\n", result.ClaudePRs)
+		fmt.Printf("  Claude PRs (open): %d\n", result.ClaudePRs)
 		fmt.Printf("  New worktrees created: %d\n", len(result.NewWorktrees))
 		fmt.Printf("  Existing worktrees skipped: %d\n", len(result.ExistingBranch))
 
