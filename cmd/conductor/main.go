@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/spf13/cobra"
 )
 
@@ -30,6 +31,8 @@ When run without subcommands, it launches an interactive TUI.`,
 }
 
 func init() {
+	cobra.OnInitialize(checkDependencies)
+
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(projectCmd)
 	rootCmd.AddCommand(worktreeCmd)
@@ -48,4 +51,13 @@ var versionCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Printf("conductor version %s\n", version)
 	},
+}
+
+func checkDependencies() {
+	if err := tmux.CheckInstalled(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, tmux.TmuxInstallGuide())
+		os.Exit(1)
+	}
 }

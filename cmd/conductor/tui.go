@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/tui"
 	"github.com/spf13/cobra"
 
@@ -22,6 +23,27 @@ var tuiCmd = &cobra.Command{
 }
 
 func runTUI() {
+	// If already inside conductor tmux session, run TUI directly
+	if tmux.IsInsideConductorSession() {
+		runTUIDirectly()
+		return
+	}
+
+	// If inside different tmux session, warn and run directly
+	if tmux.IsInsideTmux() {
+		fmt.Println("Warning: Running inside existing tmux session. For best experience, exit and run 'conductor' directly.")
+		runTUIDirectly()
+		return
+	}
+
+	// Not in tmux - start conductor session (this execs, doesn't return)
+	if err := tmux.StartSession(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start tmux session: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runTUIDirectly() {
 	cfg, err := config.Load()
 	if err != nil {
 		if !config.Exists() {

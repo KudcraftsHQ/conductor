@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/tmux"
 )
 
 // Manager handles worktree operations
@@ -123,6 +124,9 @@ func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 	// Run archive script first (logs are saved to file for debugging)
 	// We ignore the error - archiving proceeds regardless
 	_ = GetSetupManager().RunArchiveScript(project.Path, worktree.Path, projectName, worktreeName, worktree)
+
+	// Kill tmux window if it exists
+	_ = tmux.KillWindow(projectName, worktree.Branch)
 
 	// Remove git worktree
 	if err := GitWorktreeRemove(project.Path, worktree.Path); err != nil {

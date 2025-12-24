@@ -130,11 +130,7 @@ func (m *Model) refreshWorktreeList() {
 	}
 
 	m.worktreeNames = make([]string, 0, len(project.Worktrees))
-	for name, wt := range project.Worktrees {
-		// Skip root - it's not a worktree
-		if wt.IsRoot {
-			continue
-		}
+	for name := range project.Worktrees {
 		m.worktreeNames = append(m.worktreeNames, name)
 	}
 

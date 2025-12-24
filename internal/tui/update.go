@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/opener"
+	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/workspace"
 )
 
@@ -481,7 +482,15 @@ func (m *Model) openWorktree(termType opener.TerminalType) (tea.Model, tea.Cmd) 
 	m.setStatus("Opening "+wtName+"...", false)
 
 	return m, func() tea.Msg {
-		err := opener.OpenInITermSplit(wt.Path, "", "conductor run")
+		// Check if tmux window already exists
+		if tmux.WindowExists(m.selectedProject, wt.Branch) {
+			// Focus existing window
+			err := tmux.FocusWindow(m.selectedProject, wt.Branch)
+			return OpenedMsg{Path: wt.Path, Err: err}
+		}
+
+		// Create new coding window with claude on left, dev server on right
+		err := tmux.CreateCodingWindow(m.selectedProject, wt.Branch, wt.Path)
 		return OpenedMsg{Path: wt.Path, Err: err}
 	}
 }

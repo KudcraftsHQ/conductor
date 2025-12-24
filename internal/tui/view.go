@@ -27,7 +27,7 @@ func (m *Model) View() string {
 	// Title bar
 	sections = append(sections, m.renderTitleBar())
 
-	// Main content
+	// Main content - for modal views, render the background content first
 	switch m.currentView {
 	case ViewProjects:
 		sections = append(sections, m.renderProjectsTable())
@@ -36,11 +36,25 @@ func (m *Model) View() string {
 	case ViewPorts:
 		sections = append(sections, m.renderPortsTable())
 	case ViewCreateWorktree:
-		sections = append(sections, m.renderCreateWorktreeModal())
+		// Render worktree table as background
+		sections = append(sections, m.renderWorktreesTable())
 	case ViewConfirmDelete:
-		sections = append(sections, m.renderConfirmDeleteModal())
+		// Render previous view as background
+		if m.prevView == ViewWorktrees {
+			sections = append(sections, m.renderWorktreesTable())
+		} else {
+			sections = append(sections, m.renderProjectsTable())
+		}
 	case ViewHelp:
-		sections = append(sections, m.renderHelpModal())
+		// Render previous view as background
+		switch m.prevView {
+		case ViewWorktrees:
+			sections = append(sections, m.renderWorktreesTable())
+		case ViewPorts:
+			sections = append(sections, m.renderPortsTable())
+		default:
+			sections = append(sections, m.renderProjectsTable())
+		}
 	case ViewLogs:
 		sections = append(sections, m.renderLogsView())
 	}
@@ -48,7 +62,20 @@ func (m *Model) View() string {
 	// Footer
 	sections = append(sections, m.renderFooter())
 
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+	// Join all sections into base view
+	baseView := lipgloss.JoinVertical(lipgloss.Left, sections...)
+
+	// Overlay modal if in a modal view
+	switch m.currentView {
+	case ViewCreateWorktree:
+		return m.overlayModal(baseView, m.renderCreateWorktreeModal())
+	case ViewConfirmDelete:
+		return m.overlayModal(baseView, m.renderConfirmDeleteModal())
+	case ViewHelp:
+		return m.overlayModal(baseView, m.renderHelpModal())
+	}
+
+	return baseView
 }
 
 func (m *Model) renderHeader() string {
@@ -491,8 +518,7 @@ func (m *Model) renderCreateWorktreeModal() string {
 
 	modal := m.styles.Modal.Width(width).Render(content.String())
 
-	// Center the modal
-	return m.centerModal(modal)
+	return modal
 }
 
 func (m *Model) renderConfirmDeleteModal() string {
@@ -521,7 +547,7 @@ func (m *Model) renderConfirmDeleteModal() string {
 
 	modal := m.styles.Modal.Width(width).Render(content.String())
 
-	return m.centerModal(modal)
+	return modal
 }
 
 func (m *Model) renderHelpModal() string {
@@ -593,36 +619,49 @@ func (m *Model) renderHelpModal() string {
 
 	modal := m.styles.Modal.Width(width).Render(content.String())
 
-	return m.centerModal(modal)
+	return modal
 }
 
-func (m *Model) centerModal(modal string) string {
-	modalHeight := strings.Count(modal, "\n") + 1
+// overlayModal overlays a modal on top of the base view
+// The modal is centered both horizontally and vertically within the full view
+func (m *Model) overlayModal(baseView string, modal string) string {
+	baseLines := strings.Split(baseView, "\n")
+	modalLines := strings.Split(modal, "\n")
+
+	// Ensure we have enough base lines
+	for len(baseLines) < m.height {
+		baseLines = append(baseLines, "")
+	}
+
+	// Calculate center position for modal
+	modalHeight := len(modalLines)
 	modalWidth := lipgloss.Width(modal)
 
-	// Vertical padding
 	topPad := (m.height - modalHeight) / 2
 	if topPad < 0 {
 		topPad = 0
 	}
 
-	// Horizontal padding
 	leftPad := (m.width - modalWidth) / 2
 	if leftPad < 0 {
 		leftPad = 0
 	}
 
-	// Add padding
-	lines := strings.Split(modal, "\n")
-	var padded []string
-	for i := 0; i < topPad; i++ {
-		padded = append(padded, "")
-	}
-	for _, line := range lines {
-		padded = append(padded, strings.Repeat(" ", leftPad)+line)
+	// Overlay modal lines onto base
+	for i, modalLine := range modalLines {
+		baseIdx := topPad + i
+		if baseIdx < 0 || baseIdx >= len(baseLines) {
+			continue
+		}
+
+		// Build new line: padding + modal line
+		// The lines where the modal appears will replace the base content
+		// Lines above/below the modal will show the original base content
+		padding := strings.Repeat(" ", leftPad)
+		baseLines[baseIdx] = padding + modalLine
 	}
 
-	return strings.Join(padded, "\n")
+	return strings.Join(baseLines, "\n")
 }
 
 func (m *Model) padContent(content string) string {
