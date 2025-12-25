@@ -163,3 +163,13 @@ type GitStatusFetchedMsg struct {
 	Statuses    map[string]*workspace.GitStatusInfo
 	Err         error
 }
+
+// WorktreeFromPRCreatedMsg indicates a worktree was created from a PR
+type WorktreeFromPRCreatedMsg struct {
+	ProjectName   string
+	WorktreeName  string
+	PRNumber      int
+	Branch        string
+	AlreadyExists bool
+	Err           error
+}

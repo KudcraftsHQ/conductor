@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.25.7] - 2025-12-25
+
+### Added
+- **Create worktree from PR**: Create a worktree directly from any PR in the PR list view
+  - New `w` keybinding in PR view to create a worktree for the selected PR's branch
+  - New `WORKTREE` column in PR table showing existing worktree names for each PR's branch
+  - Automatically navigates back to worktrees view after creation
+  - Shows helpful message if worktree already exists for the branch
+
+## [0.12.25.6] - 2025-12-25
+
+### Fixed
+- **Nil pointer crash fix**: Prevent panic when worktree is deleted in background but view tries to access it before the list is refreshed
+
 ## [0.12.25.5] - 2025-12-25
 
 ### Added

@@ -204,6 +204,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case WorktreeFromPRCreatedMsg:
+		if msg.Err != nil {
+			m.setStatus(fmt.Sprintf("Failed to create worktree for PR #%d: %s", msg.PRNumber, msg.Err.Error()), true)
+		} else {
+			m.setStatus(fmt.Sprintf("Creating worktree '%s' for PR #%d (%s)...", msg.WorktreeName, msg.PRNumber, msg.Branch), false)
+			// Navigate back to worktrees view to see the new worktree
+			m.currentView = ViewWorktrees
+			m.prList = nil
+			m.prWorktree = ""
+			m.refreshWorktreeList()
+		}
+		return m, nil
+
 	case AllPRsSyncedMsg:
 		if msg.Err != nil {
 			m.setStatus("Error syncing PRs: "+msg.Err.Error(), true)
@@ -1175,6 +1188,70 @@ func (m *Model) handlePRsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					WorktreeName: wtName,
 					PRs:          prs,
 					Err:          err,
+				}
+			}
+		}
+
+	case key.Matches(msg, m.keyMap.CreateWorktreeFromPR):
+		// Create worktree from selected PR
+		if len(m.prList) > 0 && m.prCursor >= 0 && m.prCursor < len(m.prList) {
+			pr := m.prList[m.prCursor]
+			projectName := m.selectedProject
+
+			// Check if worktree already exists for this branch
+			project, ok := m.config.GetProject(projectName)
+			if !ok {
+				m.setStatus("Project not found", true)
+				return m, nil
+			}
+
+			// Look for existing worktree with this branch
+			for wtName, wt := range project.Worktrees {
+				if wt.Branch == pr.HeadBranch && !wt.Archived {
+					m.setStatus(fmt.Sprintf("Worktree '%s' already exists for branch %s", wtName, pr.HeadBranch), false)
+					return m, nil
+				}
+			}
+
+			// Create the worktree
+			return m, func() tea.Msg {
+				name, worktree, err := m.wsManager.PrepareWorktree(projectName, pr.HeadBranch, project.DefaultPortsPerWorktree)
+				if err != nil {
+					return WorktreeFromPRCreatedMsg{
+						ProjectName: projectName,
+						PRNumber:    pr.Number,
+						Branch:      pr.HeadBranch,
+						Err:         err,
+					}
+				}
+
+				// Save config
+				if err := config.Save(m.config); err != nil {
+					return WorktreeFromPRCreatedMsg{
+						ProjectName:  projectName,
+						WorktreeName: name,
+						PRNumber:     pr.Number,
+						Branch:       pr.HeadBranch,
+						Err:          err,
+					}
+				}
+
+				// Queue worktree creation
+				workspace.GetWorktreeQueue().Enqueue(&workspace.WorktreeJob{
+					ProjectName:  projectName,
+					WorktreeName: name,
+					Worktree:     worktree,
+					Config:       m.config,
+					Manager:      m.wsManager,
+					OnComplete:   nil,
+				})
+
+				return WorktreeFromPRCreatedMsg{
+					ProjectName:  projectName,
+					WorktreeName: name,
+					PRNumber:     pr.Number,
+					Branch:       pr.HeadBranch,
+					Err:          nil,
 				}
 			}
 		}

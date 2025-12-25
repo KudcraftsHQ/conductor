@@ -94,3 +94,20 @@ Examples:
 - `0.12.25.0` = First release on Dec 25, 2025
 - `0.12.25.3` = Fourth release on Dec 25, 2025
 - `1.1.15.0` = First release on Jan 15, 2026
+
+## Releasing New Features
+
+When releasing a new feature or fix:
+
+1. **Update version numbers** in all locations:
+   - `Makefile` - Update `VERSION ?= X.X.X.X`
+
+2. **Update CHANGELOG.md**: Add a new version entry following Keep a Changelog format
+   - Check `git log` to determine the correct version number (increment PATCH)
+   - Document all changes under appropriate headers (Added, Fixed, Changed, etc.)
+
+3. **Update README.md**: If the feature adds new keybindings or user-facing changes
+   - Update the Navigation section with new keybindings
+   - Update any relevant documentation sections
+
+4. **Commit and push** with a descriptive release message

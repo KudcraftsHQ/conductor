@@ -22,9 +22,10 @@ type KeyMap struct {
 	Delete          key.Binding
 	Tab             key.Binding
 	Ports           key.Binding
-	MergeReqs       key.Binding
-	AutoSetupClaude key.Binding
-	Retry           key.Binding
+	MergeReqs            key.Binding
+	AutoSetupClaude      key.Binding
+	Retry                key.Binding
+	CreateWorktreeFromPR key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings
@@ -113,6 +114,10 @@ func DefaultKeyMap() KeyMap {
 		Retry: key.NewBinding(
 			key.WithKeys("R"),
 			key.WithHelp("R", "retry failed setup"),
+		),
+		CreateWorktreeFromPR: key.NewBinding(
+			key.WithKeys("w"),
+			key.WithHelp("w", "create worktree"),
 		),
 	}
 }

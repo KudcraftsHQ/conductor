@@ -131,6 +131,7 @@ conductor
 - `l` - View logs
 - `R` - Retry failed setup
 - `m` - View merge requests/PRs
+- `w` - Create worktree from PR (in PR view)
 - `A` - Auto-setup Claude PRs
 - `p` - View ports
 - `r` - Refresh

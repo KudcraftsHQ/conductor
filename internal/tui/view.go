@@ -540,7 +540,7 @@ func (m *Model) renderFooter() string {
 		case ViewPorts:
 			hints = []string{"esc:back"}
 		case ViewPRs:
-			hints = []string{"o:open in browser", "r:refresh", "esc:back"}
+			hints = []string{"o:open in browser", "w:worktree", "r:refresh", "esc:back"}
 		}
 		right = m.styles.Muted.Render(strings.Join(hints, "  "))
 	}
@@ -788,12 +788,23 @@ func (m *Model) renderPRsPage() string {
 		return m.padContent(empty)
 	}
 
+	// Build a map of branch -> worktree name for quick lookup
+	branchToWorktree := make(map[string]string)
+	if project, ok := m.config.GetProject(m.selectedProject); ok {
+		for wtName, wt := range project.Worktrees {
+			if !wt.Archived {
+				branchToWorktree[wt.Branch] = wtName
+			}
+		}
+	}
+
 	// Column widths for PR table
 	numW := 8
 	stateW := 12
 	authorW := 15
 	updatedW := 14
-	titleW := m.width - numW - stateW - authorW - updatedW - 12 // Remaining for title
+	worktreeW := 12
+	titleW := m.width - numW - stateW - authorW - updatedW - worktreeW - 14 // Remaining for title
 	if titleW < 20 {
 		titleW = 20
 	}
@@ -801,12 +812,13 @@ func (m *Model) renderPRsPage() string {
 	var rows []string
 
 	// Header
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s",
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
 		numW, "NUMBER",
 		titleW, "TITLE",
 		stateW, "STATE",
 		authorW, "AUTHOR",
-		updatedW, "UPDATED")
+		updatedW, "UPDATED",
+		worktreeW, "WORKTREE")
 	rows = append(rows, m.styles.TableHeader.Render(header))
 
 	// Calculate visible rows
@@ -838,12 +850,19 @@ func (m *Model) renderPRsPage() string {
 		// Format updated date
 		updatedStr := pr.UpdatedAt.Format("Jan 2, 15:04")
 
-		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s",
+		// Check if worktree exists for this PR's branch
+		worktreeStr := "-"
+		if wtName, exists := branchToWorktree[pr.HeadBranch]; exists {
+			worktreeStr = wtName
+		}
+
+		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
 			numW, numStr,
 			titleW, truncate(pr.Title, titleW),
 			stateW, stateStr,
 			authorW, truncate(pr.Author, authorW),
-			updatedW, updatedStr)
+			updatedW, updatedStr,
+			worktreeW, truncate(worktreeStr, worktreeW))
 
 		// Pad to full width
 		rowContent = padRight(rowContent, m.width-2)
