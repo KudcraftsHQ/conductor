@@ -93,6 +93,12 @@ type Model struct {
 	prWorktree   string          // Which worktree's PRs we're viewing
 	prLoading    bool            // Whether we're fetching PRs
 
+	// All PRs view state (project-level PR list)
+	allPRList       []config.PRInfo // All PRs for current project
+	allPRCursor     int             // Selected PR in all PRs view
+	allPRLoading    bool            // Whether we're fetching all PRs
+	allPRCreating   bool            // Whether we're creating a worktree from a PR
+
 	// Claude PR auto-scan state
 	claudePRScanning bool // Whether we're currently scanning for Claude PRs
 
@@ -271,5 +277,19 @@ func (m *Model) ensurePRCursorVisible() {
 		m.offset = m.prCursor
 	} else if m.prCursor >= m.offset+tableHeight {
 		m.offset = m.prCursor - tableHeight + 1
+	}
+}
+
+// ensureAllPRCursorVisible adjusts offset to keep all PR cursor visible
+func (m *Model) ensureAllPRCursorVisible() {
+	tableHeight := m.tableHeight()
+	if tableHeight <= 0 {
+		return
+	}
+
+	if m.allPRCursor < m.offset {
+		m.offset = m.allPRCursor
+	} else if m.allPRCursor >= m.offset+tableHeight {
+		m.offset = m.allPRCursor - tableHeight + 1
 	}
 }

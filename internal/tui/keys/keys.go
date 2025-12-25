@@ -21,8 +21,9 @@ type KeyMap struct {
 	Add             key.Binding
 	Delete          key.Binding
 	Tab             key.Binding
-	Ports           key.Binding
+	Ports                key.Binding
 	MergeReqs            key.Binding
+	AllPRs               key.Binding
 	AutoSetupClaude      key.Binding
 	Retry                key.Binding
 	CreateWorktreeFromPR key.Binding
@@ -107,6 +108,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("m"),
 			key.WithHelp("m", "merge requests"),
 		),
+		AllPRs: key.NewBinding(
+			key.WithKeys("M"),
+			key.WithHelp("M", "all PRs"),
+		),
 		AutoSetupClaude: key.NewBinding(
 			key.WithKeys("A"),
 			key.WithHelp("A", "auto-setup claude PRs"),
@@ -133,7 +138,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.Enter, k.Back},
 		{k.Create, k.Archive, k.Delete, k.Retry},
 		{k.Open, k.OpenCursor, k.OpenVSCode, k.OpenTerminal},
-		{k.Filter, k.Refresh, k.Ports, k.MergeReqs, k.AutoSetupClaude},
+		{k.Filter, k.Refresh, k.Ports, k.MergeReqs, k.AllPRs, k.AutoSetupClaude},
 		{k.Help, k.Quit},
 	}
 }

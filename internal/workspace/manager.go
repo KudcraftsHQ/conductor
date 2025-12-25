@@ -395,6 +395,68 @@ func (m *Manager) GetPRs(projectName, worktreeName string) ([]config.PRInfo, err
 	return worktree.PRs, nil
 }
 
+// FetchAllProjectPRs fetches all PRs for a project (not filtered by branch)
+func (m *Manager) FetchAllProjectPRs(projectName string) ([]config.PRInfo, error) {
+	project, ok := m.config.GetProject(projectName)
+	if !ok {
+		return nil, fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	// Ensure GitHub config is set
+	if err := m.EnsureGitHubConfig(projectName); err != nil {
+		return nil, fmt.Errorf("failed to detect GitHub repo: %w", err)
+	}
+
+	// Fetch all PRs for the repo
+	prs, err := github.GetAllPRs(project.GitHubOwner, project.GitHubRepo)
+	if err != nil {
+		return nil, err
+	}
+
+	return prs, nil
+}
+
+// CreateWorktreeFromPR creates a worktree for a PR's branch
+func (m *Manager) CreateWorktreeFromPR(projectName string, pr config.PRInfo) (string, *config.Worktree, error) {
+	project, ok := m.config.GetProject(projectName)
+	if !ok {
+		return "", nil, fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	// Check if worktree for this branch already exists
+	for _, wt := range project.Worktrees {
+		if wt.Branch == pr.HeadBranch && !wt.Archived {
+			return "", nil, fmt.Errorf("worktree for branch '%s' already exists", pr.HeadBranch)
+		}
+	}
+
+	// Create worktree for this PR
+	name, worktree, err := m.PrepareWorktree(projectName, pr.HeadBranch, project.DefaultPortsPerWorktree)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to prepare worktree: %w", err)
+	}
+
+	// Save config with the new worktree entry
+	if err := config.Save(m.config); err != nil {
+		// Cleanup on save failure
+		m.config.FreeWorktreePorts(projectName, name)
+		delete(project.Worktrees, name)
+		return "", nil, fmt.Errorf("failed to save config: %w", err)
+	}
+
+	// Queue worktree creation
+	GetWorktreeQueue().Enqueue(&WorktreeJob{
+		ProjectName:  projectName,
+		WorktreeName: name,
+		Worktree:     worktree,
+		Config:       m.config,
+		Manager:      m,
+		OnComplete:   nil,
+	})
+
+	return name, worktree, nil
+}
+
 // AutoSetupClaudePRsResult represents the result of auto-setup operation
 type AutoSetupClaudePRsResult struct {
 	TotalPRs       int
