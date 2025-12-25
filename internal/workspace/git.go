@@ -41,9 +41,34 @@ func GitGetDefaultBranch(repoPath string) string {
 	return "main"
 }
 
-// GitWorktreeAdd creates a new git worktree based on origin's default branch
+// GitWorktreeAdd creates a new git worktree based on the specified branch from origin
 func GitWorktreeAdd(repoPath, worktreePath, branch string) error {
-	// Determine the default branch
+	// Check if the remote branch exists
+	remoteBranchExists := GitRemoteBranchExists(repoPath, "origin", branch)
+
+	if remoteBranchExists {
+		// Fetch the specific branch from origin
+		fetchCmd := exec.Command("git", "fetch", "origin", branch)
+		fetchCmd.Dir = repoPath
+		_, _ = fetchCmd.CombinedOutput() // Ignore error - will fallback below
+
+		// Create worktree tracking the remote branch
+		cmd := exec.Command("git", "worktree", "add", "--track", "-b", branch, worktreePath, "origin/"+branch)
+		cmd.Dir = repoPath
+		if _, err := cmd.CombinedOutput(); err == nil {
+			return nil
+		}
+		// If tracking failed, try without --track
+		cmd = exec.Command("git", "worktree", "add", "-b", branch, worktreePath, "origin/"+branch)
+		cmd.Dir = repoPath
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git worktree add failed: %s", string(out))
+		}
+		return nil
+	}
+
+	// Remote branch doesn't exist - create from default branch
 	defaultBranch := GitGetDefaultBranch(repoPath)
 
 	// Fetch latest from origin first
@@ -54,13 +79,11 @@ func GitWorktreeAdd(repoPath, worktreePath, branch string) error {
 	// Create worktree with new branch based on origin's default branch
 	cmd := exec.Command("git", "worktree", "add", "-b", branch, worktreePath, "origin/"+defaultBranch)
 	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
-	_ = out // Used in error path
-	if err != nil {
+	if _, err := cmd.CombinedOutput(); err != nil {
 		// Fallback to creating from current HEAD if origin doesn't exist
 		cmd = exec.Command("git", "worktree", "add", "-b", branch, worktreePath)
 		cmd.Dir = repoPath
-		out, err = cmd.CombinedOutput()
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("git worktree add failed: %s", string(out))
 		}
