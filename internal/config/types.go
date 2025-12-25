@@ -6,6 +6,7 @@ import "time"
 type Config struct {
 	Version         int                    `json:"version"`
 	Defaults        Defaults               `json:"defaults"`
+	Updates         UpdateSettings         `json:"updates"`
 	PortAllocations map[string]*PortAlloc  `json:"portAllocations"`
 	Projects        map[string]*Project    `json:"projects"`
 }
@@ -103,6 +104,7 @@ func NewConfig() *Config {
 			OpenWith:         "iterm",
 			IDECommand:       "cursor",
 		},
+		Updates:         DefaultUpdateSettings(),
 		PortAllocations: make(map[string]*PortAlloc),
 		Projects:        make(map[string]*Project),
 	}
@@ -126,5 +128,29 @@ func NewWorktree(path, branch string, isRoot bool, ports []int) *Worktree {
 		IsRoot:    isRoot,
 		Ports:     ports,
 		CreatedAt: time.Now(),
+	}
+}
+
+// UpdateSettings represents update configuration
+type UpdateSettings struct {
+	AutoCheck     bool      `json:"autoCheck"`
+	AutoDownload  bool      `json:"autoDownload"`
+	CheckInterval string    `json:"checkInterval"`
+	Channel       string    `json:"channel"`
+	LastCheck     time.Time `json:"lastCheck"`
+	LastVersion   string    `json:"lastVersion"`
+	NotifyInTUI   bool      `json:"notifyInTUI"`
+}
+
+// DefaultUpdateSettings returns the default update settings
+func DefaultUpdateSettings() UpdateSettings {
+	return UpdateSettings{
+		AutoCheck:     true,
+		AutoDownload:  true,
+		CheckInterval: "6h",
+		Channel:       "stable",
+		LastCheck:     time.Time{},
+		LastVersion:   "",
+		NotifyInTUI:   true,
 	}
 }

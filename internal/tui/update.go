@@ -207,6 +207,46 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case UpdateCheckMsg:
+		if msg.Err != nil {
+			// Silently ignore update check errors
+			return m, nil
+		}
+		if msg.UpdateAvailable {
+			m.updateAvailable = true
+			m.latestVersion = msg.LatestVersion
+			if m.config.Updates.NotifyInTUI {
+				m.setStatus("Update available: "+msg.LatestVersion+" (current: "+m.version+")", false)
+			}
+		}
+		return m, nil
+
+	case UpdateInstalledMsg:
+		if msg.Err != nil {
+			m.setStatus("Failed to install update: "+msg.Err.Error(), true)
+		} else {
+			m.updateDownloaded = true
+			m.setStatus("Updated to "+msg.Version+"! Restart to use new version.", false)
+			// Update config
+			m.config.Updates.LastVersion = msg.Version
+			_ = config.Save(m.config)
+		}
+		return m, nil
+
+	case UpdateCheckTickMsg:
+		// Schedule next check regardless of current state
+		nextCheck := m.scheduleUpdateCheck()
+
+		// Skip if auto-check is disabled or update already available
+		if !m.config.Updates.AutoCheck || m.updateAvailable {
+			return m, nextCheck
+		}
+
+		// Perform update check in background
+		return m, tea.Batch(nextCheck, func() tea.Msg {
+			return m.performUpdateCheck()
+		})
+
 	case ClaudePRScanTickMsg:
 		// Schedule next scan regardless of current state
 		nextScan := m.scheduleClaudePRScan()

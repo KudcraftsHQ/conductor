@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.25.2] - 2025-12-25
+
+### Added
+- **Auto-update system**: Conductor now automatically checks for and installs updates
+  - Checks for updates on TUI startup and every 6 hours while running
+  - New `conductor update` command to manually check and install updates
+  - New `conductor update --check` to check without installing
+  - New `conductor migrate` command to move installation to user directory for auto-updates
+  - Configurable via `~/.conductor/conductor.json` (autoCheck, autoDownload, notifyInTUI)
+  - Downloads from GitHub Releases for seamless updates
+
+### Changed
+- Installation now defaults to `~/.local/bin` to support auto-updates without sudo
+- Fixed GitHub API URL to point to correct repository (KudcraftsHQ/conductor)
+
 ## [0.12.25.1] - 2025-12-25
 
 ### Added
@@ -13,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `A` keybinding in TUI to trigger auto-setup from worktrees view
   - Fetches open PRs via `gh` CLI and creates worktrees with setup scripts
   - Skips PRs that already have worktrees
+  - Periodic background scanning every 30 seconds while TUI is running
+- **Retry failed setups**: New `R` keybinding to retry failed worktree setups
 
 ### Fixed
 - **Worktree status persistence**: `SetupStatus` and `ArchiveStatus` are now persisted to JSON, so failed worktrees remain marked as failed after restarting Conductor

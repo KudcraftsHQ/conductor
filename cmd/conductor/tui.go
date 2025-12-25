@@ -54,7 +54,7 @@ func runTUIDirectly() {
 		os.Exit(1)
 	}
 
-	m := tui.NewModel(cfg)
+	m := tui.NewModelWithVersion(cfg, version)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {

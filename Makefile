@@ -7,7 +7,7 @@ BINARY_NAME=conductor
 BUILD_DIR=build
 
 # Version (can be overridden)
-VERSION ?= 0.12.25.1
+VERSION ?= 0.12.25.2
 
 # Build flags
 LDFLAGS=-ldflags "-X main.version=$(VERSION)"
@@ -40,16 +40,27 @@ build-all: clean
 	@echo "Build complete!"
 	@ls -la $(BUILD_DIR)
 
-# Install to GOPATH/bin
-install:
-	@echo "Installing $(BINARY_NAME) to GOPATH/bin..."
-	go install $(LDFLAGS) ./cmd/conductor
+# Install to user directory (recommended - supports auto-updates)
+install: build
+	@echo "Installing $(BINARY_NAME) to ~/.local/bin..."
+	@mkdir -p ~/.local/bin
+	@cp $(BUILD_DIR)/$(BINARY_NAME) ~/.local/bin/$(BINARY_NAME)
+	@chmod +x ~/.local/bin/$(BINARY_NAME)
+	@echo "✓ Installed to ~/.local/bin/$(BINARY_NAME)"
+	@echo ""
+	@echo "Make sure ~/.local/bin is in your PATH:"
+	@echo "  export PATH=\"\$$HOME/.local/bin:\$$PATH\""
+	@echo ""
+	@echo "Add this to your ~/.zshrc or ~/.bashrc to make it permanent."
 
-# Install globally to /usr/local/bin
+# Install globally to /usr/local/bin (requires sudo, disables auto-updates)
 install-global: build
 	@echo "Installing $(BINARY_NAME) to /usr/local/bin..."
 	sudo cp $(BUILD_DIR)/$(BINARY_NAME) /usr/local/bin/$(BINARY_NAME)
-	@echo "Installed! Run 'conductor' to get started."
+	@echo "✓ Installed to /usr/local/bin/$(BINARY_NAME)"
+	@echo ""
+	@echo "⚠ Note: Auto-updates are disabled for system installations."
+	@echo "To enable auto-updates, use 'make install' instead."
 
 # Clean build artifacts
 clean:
@@ -87,8 +98,8 @@ help:
 	@echo "Available targets:"
 	@echo "  build          - Build for current platform"
 	@echo "  build-all      - Build for all platforms"
-	@echo "  install        - Install to GOPATH/bin"
-	@echo "  install-global - Install to /usr/local/bin (requires sudo)"
+	@echo "  install        - Install to ~/.local/bin (recommended, supports auto-updates)"
+	@echo "  install-global - Install to /usr/local/bin (requires sudo, disables auto-updates)"
 	@echo "  clean          - Remove build artifacts"
 	@echo "  dev            - Build and run"
 	@echo "  test           - Run tests"

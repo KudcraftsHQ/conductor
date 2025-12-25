@@ -117,6 +117,19 @@ type AllPRsSyncedMsg struct {
 	Err         error
 }
 
+// UpdateCheckMsg indicates an update check has completed
+type UpdateCheckMsg struct {
+	UpdateAvailable bool
+	LatestVersion   string
+	Err             error
+}
+
+// UpdateInstalledMsg indicates an update has been installed
+type UpdateInstalledMsg struct {
+	Version string
+	Err     error
+}
+
 // AutoSetupClaudePRsMsg indicates Claude PRs auto-setup has completed
 type AutoSetupClaudePRsMsg struct {
 	ProjectName    string
@@ -129,6 +142,9 @@ type AutoSetupClaudePRsMsg struct {
 
 // ClaudePRScanTickMsg triggers a periodic scan for Claude PRs
 type ClaudePRScanTickMsg struct{}
+
+// UpdateCheckTickMsg triggers a periodic update check
+type UpdateCheckTickMsg struct{}
 
 // RetrySetupMsg indicates a retry of failed setup has completed
 type RetrySetupMsg struct {
