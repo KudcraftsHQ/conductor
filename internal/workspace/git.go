@@ -2,10 +2,20 @@ package workspace
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+// WorktreeExists checks if a worktree directory exists
+func WorktreeExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
 
 // GitRemoteBranchExists checks if a remote branch exists
 func GitRemoteBranchExists(repoPath, remote, branch string) bool {

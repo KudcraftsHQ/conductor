@@ -13,13 +13,14 @@ import (
 
 // ghPR represents the JSON output from gh pr list/view
 type ghPR struct {
-	Number    int       `json:"number"`
-	URL       string    `json:"url"`
-	Title     string    `json:"title"`
-	State     string    `json:"state"`
-	Author    ghAuthor  `json:"author"`
-	IsDraft   bool      `json:"isDraft"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Number         int       `json:"number"`
+	URL            string    `json:"url"`
+	Title          string    `json:"title"`
+	State          string    `json:"state"`
+	Author         ghAuthor  `json:"author"`
+	IsDraft        bool      `json:"isDraft"`
+	HeadRefName    string    `json:"headRefName"` // The branch being merged
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 type ghAuthor struct {
@@ -49,7 +50,7 @@ func GetPRsForBranch(owner, repo, branch string) ([]config.PRInfo, error) {
 		"--repo", fmt.Sprintf("%s/%s", owner, repo),
 		"--head", branch,
 		"--state", "all",
-		"--json", "number,url,title,state,author,isDraft,updatedAt",
+		"--json", "number,url,title,state,author,isDraft,headRefName,updatedAt",
 	)
 
 	output, err := cmd.Output()
@@ -75,7 +76,7 @@ func GetAllPRs(owner, repo string) ([]config.PRInfo, error) {
 		"--repo", fmt.Sprintf("%s/%s", owner, repo),
 		"--state", "all",
 		"--limit", "100",
-		"--json", "number,url,title,state,author,isDraft,updatedAt",
+		"--json", "number,url,title,state,author,isDraft,headRefName,updatedAt",
 	)
 
 	output, err := cmd.Output()
@@ -142,12 +143,13 @@ func convertToPRInfo(ghPRs []ghPR) []config.PRInfo {
 		}
 
 		prs[i] = config.PRInfo{
-			Number:    pr.Number,
-			URL:       pr.URL,
-			Title:     pr.Title,
-			State:     state,
-			Author:    pr.Author.Login,
-			UpdatedAt: pr.UpdatedAt,
+			Number:     pr.Number,
+			URL:        pr.URL,
+			Title:      pr.Title,
+			State:      state,
+			Author:     pr.Author.Login,
+			HeadBranch: pr.HeadRefName,
+			UpdatedAt:  pr.UpdatedAt,
 		}
 	}
 	return prs

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/config"
@@ -392,5 +393,105 @@ func (m *Manager) GetPRs(projectName, worktreeName string) ([]config.PRInfo, err
 	}
 
 	return worktree.PRs, nil
+}
+
+// AutoSetupClaudePRsResult represents the result of auto-setup operation
+type AutoSetupClaudePRsResult struct {
+	TotalPRs       int
+	ClaudePRs      int
+	NewWorktrees   []string
+	ExistingBranch []string
+	Errors         []string
+}
+
+// AutoSetupClaudePRs fetches all PRs with "claude/*" prefix and auto-creates worktrees
+func (m *Manager) AutoSetupClaudePRs(projectName string) (*AutoSetupClaudePRsResult, error) {
+	project, ok := m.config.GetProject(projectName)
+	if !ok {
+		return nil, fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	result := &AutoSetupClaudePRsResult{
+		NewWorktrees:   make([]string, 0),
+		ExistingBranch: make([]string, 0),
+		Errors:         make([]string, 0),
+	}
+
+	// Ensure GitHub config is set
+	if err := m.EnsureGitHubConfig(projectName); err != nil {
+		return nil, fmt.Errorf("failed to detect GitHub repo: %w", err)
+	}
+
+	// Fetch all PRs
+	allPRs, err := github.GetAllPRs(project.GitHubOwner, project.GitHubRepo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch PRs: %w", err)
+	}
+
+	result.TotalPRs = len(allPRs)
+
+	// Filter for claude/* PRs and only open ones
+	for _, pr := range allPRs {
+		// Skip if not a claude/* branch
+		if !isClaudeBranch(pr.HeadBranch) {
+			continue
+		}
+
+		// Skip if PR is not open (only process open PRs)
+		if pr.State != "open" {
+			continue
+		}
+
+		result.ClaudePRs++
+
+		// Check if worktree for this branch already exists
+		branchExists := false
+		for _, wt := range project.Worktrees {
+			if wt.Branch == pr.HeadBranch && !wt.Archived {
+				branchExists = true
+				result.ExistingBranch = append(result.ExistingBranch, pr.HeadBranch)
+				break
+			}
+		}
+
+		if branchExists {
+			continue
+		}
+
+		// Create worktree for this PR
+		name, worktree, err := m.PrepareWorktree(projectName, pr.HeadBranch, project.DefaultPortsPerWorktree)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("Failed to prepare worktree for %s: %v", pr.HeadBranch, err))
+			continue
+		}
+
+		// Save config with the new worktree entry
+		if err := config.Save(m.config); err != nil {
+			// Cleanup on save failure
+			m.config.FreeWorktreePorts(projectName, name)
+			delete(project.Worktrees, name)
+			result.Errors = append(result.Errors, fmt.Sprintf("Failed to save config for %s: %v", pr.HeadBranch, err))
+			continue
+		}
+
+		// Queue worktree creation to avoid git lock conflicts when creating multiple worktrees
+		GetWorktreeQueue().Enqueue(&WorktreeJob{
+			ProjectName:  projectName,
+			WorktreeName: name,
+			Worktree:     worktree,
+			Config:       m.config,
+			Manager:      m,
+			OnComplete:   nil, // We don't need individual callbacks for auto-setup
+		})
+
+		result.NewWorktrees = append(result.NewWorktrees, fmt.Sprintf("%s (%s)", name, pr.HeadBranch))
+	}
+
+	return result, nil
+}
+
+// isClaudeBranch checks if a branch name starts with "claude/"
+func isClaudeBranch(branch string) bool {
+	return strings.HasPrefix(branch, "claude/")
 }
 

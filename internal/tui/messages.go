@@ -116,3 +116,24 @@ type AllPRsSyncedMsg struct {
 	ProjectName string
 	Err         error
 }
+
+// AutoSetupClaudePRsMsg indicates Claude PRs auto-setup has completed
+type AutoSetupClaudePRsMsg struct {
+	ProjectName    string
+	NewWorktrees   []string
+	ExistingBranch []string
+	Errors         []string
+	Err            error
+	IsManual       bool // true if triggered by user, false if periodic
+}
+
+// ClaudePRScanTickMsg triggers a periodic scan for Claude PRs
+type ClaudePRScanTickMsg struct{}
+
+// RetrySetupMsg indicates a retry of failed setup has completed
+type RetrySetupMsg struct {
+	ProjectName  string
+	WorktreeName string
+	Success      bool
+	Err          error
+}

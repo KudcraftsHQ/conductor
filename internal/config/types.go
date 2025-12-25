@@ -57,12 +57,13 @@ const (
 
 // PRInfo represents a GitHub pull request linked to a worktree
 type PRInfo struct {
-	Number    int       `json:"number"`
-	URL       string    `json:"url"`
-	Title     string    `json:"title"`
-	State     string    `json:"state"`  // "open", "closed", "merged", "draft"
-	Author    string    `json:"author"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Number     int       `json:"number"`
+	URL        string    `json:"url"`
+	Title      string    `json:"title"`
+	State      string    `json:"state"`  // "open", "closed", "merged", "draft"
+	Author     string    `json:"author"`
+	HeadBranch string    `json:"head_branch"` // The branch being merged (PR source branch)
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Worktree represents a git worktree with its allocated ports
@@ -75,8 +76,8 @@ type Worktree struct {
 	Archived      bool          `json:"archived,omitempty"`
 	ArchivedAt    time.Time     `json:"archivedAt,omitempty"`
 	PRs           []PRInfo      `json:"prs,omitempty"`
-	SetupStatus   SetupStatus   `json:"-"` // Runtime only, not persisted
-	ArchiveStatus ArchiveStatus `json:"-"` // Runtime only, not persisted
+	SetupStatus   SetupStatus   `json:"setupStatus,omitempty"`
+	ArchiveStatus ArchiveStatus `json:"archiveStatus,omitempty"`
 }
 
 // ProjectConfig represents project-level conductor.json

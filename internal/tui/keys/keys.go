@@ -4,25 +4,27 @@ import "github.com/charmbracelet/bubbles/key"
 
 // KeyMap defines all keybindings
 type KeyMap struct {
-	Up           key.Binding
-	Down         key.Binding
-	Enter        key.Binding
-	Back         key.Binding
-	Quit         key.Binding
-	Help         key.Binding
-	Filter       key.Binding
-	Create       key.Binding
-	Archive      key.Binding
-	Open         key.Binding
-	OpenCursor   key.Binding
-	OpenVSCode   key.Binding
-	OpenTerminal key.Binding
-	Refresh      key.Binding
-	Add          key.Binding
-	Delete       key.Binding
-	Tab          key.Binding
-	Ports        key.Binding
-	MergeReqs    key.Binding
+	Up              key.Binding
+	Down            key.Binding
+	Enter           key.Binding
+	Back            key.Binding
+	Quit            key.Binding
+	Help            key.Binding
+	Filter          key.Binding
+	Create          key.Binding
+	Archive         key.Binding
+	Open            key.Binding
+	OpenCursor      key.Binding
+	OpenVSCode      key.Binding
+	OpenTerminal    key.Binding
+	Refresh         key.Binding
+	Add             key.Binding
+	Delete          key.Binding
+	Tab             key.Binding
+	Ports           key.Binding
+	MergeReqs       key.Binding
+	AutoSetupClaude key.Binding
+	Retry           key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings
@@ -104,6 +106,14 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("m"),
 			key.WithHelp("m", "merge requests"),
 		),
+		AutoSetupClaude: key.NewBinding(
+			key.WithKeys("A"),
+			key.WithHelp("A", "auto-setup claude PRs"),
+		),
+		Retry: key.NewBinding(
+			key.WithKeys("R"),
+			key.WithHelp("R", "retry failed setup"),
+		),
 	}
 }
 
@@ -116,9 +126,9 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Enter, k.Back},
-		{k.Create, k.Archive, k.Delete},
+		{k.Create, k.Archive, k.Delete, k.Retry},
 		{k.Open, k.OpenCursor, k.OpenVSCode, k.OpenTerminal},
-		{k.Filter, k.Refresh, k.Ports, k.MergeReqs},
+		{k.Filter, k.Refresh, k.Ports, k.MergeReqs, k.AutoSetupClaude},
 		{k.Help, k.Quit},
 	}
 }
