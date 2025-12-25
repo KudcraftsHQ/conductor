@@ -315,6 +315,10 @@ func (m *Model) renderWorktreesTable() string {
 	for i := start; i < end; i++ {
 		name := m.worktreeNames[i]
 		wt := project.Worktrees[name]
+		if wt == nil {
+			// Worktree was deleted but list not yet refreshed
+			continue
+		}
 
 		// Format port range
 		portRange := "-"

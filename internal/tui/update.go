@@ -692,6 +692,9 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			wtName := m.worktreeNames[m.cursor]
 			project := m.config.Projects[m.selectedProject]
 			wt := project.Worktrees[wtName]
+			if wt == nil {
+				return m, nil
+			}
 
 			m.logsWorktree = wtName
 			m.logsScroll = 0
@@ -940,6 +943,9 @@ func (m *Model) openWorktree(termType opener.TerminalType) (tea.Model, tea.Cmd) 
 	wtName := m.worktreeNames[m.cursor]
 	project := m.config.Projects[m.selectedProject]
 	wt := project.Worktrees[wtName]
+	if wt == nil {
+		return m, nil
+	}
 
 	m.setStatus("Opening "+wtName+"...", false)
 
@@ -965,6 +971,9 @@ func (m *Model) openWorktreeIDE(ideType opener.IDEType) (tea.Model, tea.Cmd) {
 	wtName := m.worktreeNames[m.cursor]
 	project := m.config.Projects[m.selectedProject]
 	wt := project.Worktrees[wtName]
+	if wt == nil {
+		return m, nil
+	}
 
 	m.setStatus("Opening "+wtName+" in "+string(ideType)+"...", false)
 

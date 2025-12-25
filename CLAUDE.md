@@ -80,3 +80,17 @@ Tests use `testify` for assertions. Test files exist in:
 - `github.com/charmbracelet/lipgloss` - Terminal styling
 - `github.com/spf13/cobra` - CLI framework
 - `github.com/stretchr/testify` - Testing assertions
+
+## Versioning
+
+Version format: `YEAR.MONTH.DAY.PATCH`
+
+- **YEAR**: Offset from 2025 (2025=0, 2026=1, 2027=2, etc.)
+- **MONTH**: 1-12
+- **DAY**: Day of the month
+- **PATCH**: Incremental release number for that day (starts at 0)
+
+Examples:
+- `0.12.25.0` = First release on Dec 25, 2025
+- `0.12.25.3` = Fourth release on Dec 25, 2025
+- `1.1.15.0` = First release on Jan 15, 2026
