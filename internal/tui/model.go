@@ -14,6 +14,9 @@ import (
 	"github.com/hammashamzah/conductor/internal/workspace"
 )
 
+// claudePRScanInterval is the interval between automatic Claude PR scans
+const claudePRScanInterval = 30 * time.Second
+
 // Model is the main TUI state
 type Model struct {
 	// Config
@@ -86,6 +89,9 @@ type Model struct {
 	prCursor     int             // Selected PR in modal
 	prWorktree   string          // Which worktree's PRs we're viewing
 	prLoading    bool            // Whether we're fetching PRs
+
+	// Claude PR auto-scan state
+	claudePRScanning bool // Whether we're currently scanning for Claude PRs
 }
 
 // NewModel creates a new TUI model
@@ -133,6 +139,7 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
 		m.checkForUpdates(),
+		m.scheduleClaudePRScan(),
 	)
 }
 
@@ -175,6 +182,13 @@ func (m *Model) shouldCheckForUpdate() bool {
 // performUpdateCheck does the actual update check
 func (m *Model) performUpdateCheck() UpdateCheckMsg {
 	return m.performUpdateCheckImpl()
+}
+
+// scheduleClaudePRScan returns a command that triggers a Claude PR scan after the interval
+func (m *Model) scheduleClaudePRScan() tea.Cmd {
+	return tea.Tick(claudePRScanInterval, func(t time.Time) tea.Msg {
+		return ClaudePRScanTickMsg{}
+	})
 }
 
 func (m *Model) refreshProjectList() {

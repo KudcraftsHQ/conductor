@@ -24,6 +24,7 @@ type KeyMap struct {
 	Ports           key.Binding
 	MergeReqs       key.Binding
 	AutoSetupClaude key.Binding
+	Retry           key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings
@@ -109,6 +110,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("A"),
 			key.WithHelp("A", "auto-setup claude PRs"),
 		),
+		Retry: key.NewBinding(
+			key.WithKeys("R"),
+			key.WithHelp("R", "retry failed setup"),
+		),
 	}
 }
 
@@ -121,7 +126,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Enter, k.Back},
-		{k.Create, k.Archive, k.Delete},
+		{k.Create, k.Archive, k.Delete, k.Retry},
 		{k.Open, k.OpenCursor, k.OpenVSCode, k.OpenTerminal},
 		{k.Filter, k.Refresh, k.Ports, k.MergeReqs, k.AutoSetupClaude},
 		{k.Help, k.Quit},

@@ -77,8 +77,8 @@ type Worktree struct {
 	Archived      bool          `json:"archived,omitempty"`
 	ArchivedAt    time.Time     `json:"archivedAt,omitempty"`
 	PRs           []PRInfo      `json:"prs,omitempty"`
-	SetupStatus   SetupStatus   `json:"-"` // Runtime only, not persisted
-	ArchiveStatus ArchiveStatus `json:"-"` // Runtime only, not persisted
+	SetupStatus   SetupStatus   `json:"setupStatus,omitempty"`
+	ArchiveStatus ArchiveStatus `json:"archiveStatus,omitempty"`
 }
 
 // ProjectConfig represents project-level conductor.json
