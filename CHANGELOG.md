@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.25.4] - 2025-12-25
+
+### Fixed
+- **Navigation cursor preservation**: Cursor position now preserved when navigating back from child views
+  - Pressing Escape in worktrees view returns to the same project in the projects list
+  - Pressing Escape in PRs view returns to the same worktree
+  - Pressing Escape in logs view returns to the same worktree
+
 ## [0.12.25.3] - 2025-12-25
 
 ### Fixed

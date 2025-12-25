@@ -480,11 +480,20 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keyMap.Back):
+		// Find the index of the current project before switching back
+		projectIndex := 0
+		for i, name := range m.projectNames {
+			if name == m.selectedProject {
+				projectIndex = i
+				break
+			}
+		}
 		m.currentView = ViewProjects
 		m.selectedProject = ""
-		m.cursor = 0
+		m.cursor = projectIndex
 		m.offset = 0
 		m.refreshProjectList()
+		m.ensureCursorVisible()
 
 	case key.Matches(msg, m.keyMap.Create):
 		m.createInput.Reset()
@@ -668,8 +677,7 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.logsType = "setup"
 			}
 		}
-		m.cursor = 0
-		m.offset = 0
+		// Note: Don't reset cursor here - preserve selection for when we return
 
 	case key.Matches(msg, m.keyMap.Enter):
 		// Open in terminal on enter
@@ -947,6 +955,16 @@ func (m *Model) handleLogsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case msg.Type == tea.KeyEsc || msg.String() == "q":
+		// Restore cursor to the worktree we were viewing logs for
+		if m.prevView == ViewWorktrees && m.logsWorktree != "" {
+			for i, name := range m.worktreeNames {
+				if name == m.logsWorktree {
+					m.cursor = i
+					m.ensureCursorVisible()
+					break
+				}
+			}
+		}
 		m.currentView = m.prevView
 		m.logsWorktree = ""
 		m.logsScroll = 0
@@ -1068,11 +1086,20 @@ func (m *Model) handleQuitDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) handlePRsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keyMap.Back):
+		// Find the index of the worktree we came from
+		worktreeIndex := 0
+		for i, name := range m.worktreeNames {
+			if name == m.prWorktree {
+				worktreeIndex = i
+				break
+			}
+		}
 		m.currentView = ViewWorktrees
 		m.prList = nil
 		m.prWorktree = ""
-		m.cursor = 0
+		m.cursor = worktreeIndex
 		m.offset = 0
+		m.ensureCursorVisible()
 		return m, nil
 
 	case key.Matches(msg, m.keyMap.Up):
