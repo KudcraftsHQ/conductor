@@ -3,8 +3,6 @@ package updater
 import (
 	"archive/tar"
 	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,8 +17,8 @@ import (
 )
 
 const (
-	githubAPIURL      = "https://api.github.com/repos/hammashamzah/conductor/releases/latest"
-	checkInterval     = 6 * time.Hour
+	githubAPIURL       = "https://api.github.com/repos/KudcraftsHQ/conductor/releases/latest"
+	checkInterval      = 6 * time.Hour
 	updateCheckTimeout = 10 * time.Second
 )
 
@@ -48,7 +46,7 @@ func (u *Updater) CheckForUpdate() (*UpdateInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to check for updates: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
@@ -122,7 +120,7 @@ func (u *Updater) DownloadAndInstall(updateInfo *UpdateInfo) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	tmpFile := filepath.Join(tmpDir, asset.Name)
 	if err := u.downloadFile(tmpFile, asset.BrowserDownloadURL); err != nil {
@@ -156,19 +154,19 @@ func (u *Updater) DownloadAndInstall(updateInfo *UpdateInfo) error {
 	// Replace binary
 	if err := copyFile(binaryPath, executable); err != nil {
 		// Rollback
-		copyFile(backupPath, executable)
+		_ = copyFile(backupPath, executable)
 		return fmt.Errorf("failed to install update: %w", err)
 	}
 
 	// Set executable permissions
 	if err := os.Chmod(executable, 0755); err != nil {
 		// Rollback
-		copyFile(backupPath, executable)
+		_ = copyFile(backupPath, executable)
 		return fmt.Errorf("failed to set permissions: %w", err)
 	}
 
 	// Clean up backup
-	os.Remove(backupPath)
+	_ = os.Remove(backupPath)
 
 	return nil
 }
@@ -192,7 +190,7 @@ func (u *Updater) downloadFile(filepath string, url string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download failed with status: %d", resp.StatusCode)
@@ -202,7 +200,7 @@ func (u *Updater) downloadFile(filepath string, url string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	_, err = io.Copy(out, resp.Body)
 	return err
@@ -214,13 +212,13 @@ func (u *Updater) extractTarGz(archivePath, destDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	gzr, err := gzip.NewReader(file)
 	if err != nil {
 		return "", err
 	}
-	defer gzr.Close()
+	defer func() { _ = gzr.Close() }()
 
 	tr := tar.NewReader(gzr)
 
@@ -243,10 +241,10 @@ func (u *Updater) extractTarGz(archivePath, destDir string) (string, error) {
 				return "", err
 			}
 			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
+				_ = f.Close()
 				return "", err
 			}
-			f.Close()
+			_ = f.Close()
 
 			// This is likely our binary
 			if strings.Contains(header.Name, "conductor") && !strings.Contains(header.Name, ".tar.gz") {
@@ -274,7 +272,7 @@ func canWrite(path string) bool {
 	if err != nil {
 		return false
 	}
-	f.Close()
+	_ = f.Close()
 	return true
 }
 
@@ -284,13 +282,13 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer sourceFile.Close()
+	defer func() { _ = sourceFile.Close() }()
 
 	destFile, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer destFile.Close()
+	defer func() { _ = destFile.Close() }()
 
 	if _, err := io.Copy(destFile, sourceFile); err != nil {
 		return err
@@ -303,27 +301,6 @@ func copyFile(src, dst string) error {
 	}
 
 	return os.Chmod(dst, sourceInfo.Mode())
-}
-
-// verifySHA256 verifies the SHA256 checksum of a file
-func verifySHA256(filePath, expectedChecksum string) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return err
-	}
-
-	actualChecksum := hex.EncodeToString(hash.Sum(nil))
-	if actualChecksum != expectedChecksum {
-		return fmt.Errorf("checksum mismatch: expected %s, got %s", expectedChecksum, actualChecksum)
-	}
-
-	return nil
 }
 
 // GetInstallLocation returns the current installation path and whether it's user-writable

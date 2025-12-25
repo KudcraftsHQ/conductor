@@ -143,6 +143,9 @@ type AutoSetupClaudePRsMsg struct {
 // ClaudePRScanTickMsg triggers a periodic scan for Claude PRs
 type ClaudePRScanTickMsg struct{}
 
+// UpdateCheckTickMsg triggers a periodic update check
+type UpdateCheckTickMsg struct{}
+
 // RetrySetupMsg indicates a retry of failed setup has completed
 type RetrySetupMsg struct {
 	ProjectName  string

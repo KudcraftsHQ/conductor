@@ -82,7 +82,7 @@ func runUpdate(cmd *cobra.Command, args []string) {
 		if err == nil {
 			cfg.Updates.LastCheck = time.Now()
 			cfg.Updates.LastVersion = updateInfo.LatestVersion
-			config.Save(cfg)
+			_ = config.Save(cfg)
 		}
 	}
 
@@ -143,14 +143,14 @@ func runMigrate(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "Error: Failed to read current binary: %v\n", err)
 		os.Exit(1)
 	}
-	defer sourceFile.Close()
+	defer func() { _ = sourceFile.Close() }()
 
 	destFile, err := os.Create(newPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to create new binary: %v\n", err)
 		os.Exit(1)
 	}
-	defer destFile.Close()
+	defer func() { _ = destFile.Close() }()
 
 	if _, err := sourceFile.WriteTo(destFile); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to copy binary: %v\n", err)

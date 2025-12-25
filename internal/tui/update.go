@@ -233,6 +233,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case UpdateCheckTickMsg:
+		// Schedule next check regardless of current state
+		nextCheck := m.scheduleUpdateCheck()
+
+		// Skip if auto-check is disabled or update already available
+		if !m.config.Updates.AutoCheck || m.updateAvailable {
+			return m, nextCheck
+		}
+
+		// Perform update check in background
+		return m, tea.Batch(nextCheck, func() tea.Msg {
+			return m.performUpdateCheck()
+		})
+
 	case ClaudePRScanTickMsg:
 		// Schedule next scan regardless of current state
 		nextScan := m.scheduleClaudePRScan()

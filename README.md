@@ -34,7 +34,7 @@ Conductor solves these problems by:
 
 ```bash
 # Clone the repository
-git clone https://github.com/hammashamzah/conductor.git
+git clone https://github.com/KudcraftsHQ/conductor.git
 cd conductor
 
 # Build and install to ~/.local/bin (supports auto-updates)
@@ -129,7 +129,9 @@ conductor
 - `C` - Open in Cursor
 - `V` - Open in VS Code
 - `l` - View logs
+- `R` - Retry failed setup
 - `m` - View merge requests/PRs
+- `A` - Auto-setup Claude PRs
 - `p` - View ports
 - `r` - Refresh
 - `/` - Filter

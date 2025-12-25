@@ -17,6 +17,9 @@ import (
 // claudePRScanInterval is the interval between automatic Claude PR scans
 const claudePRScanInterval = 30 * time.Second
 
+// updateCheckInterval is the interval between automatic update checks
+const updateCheckInterval = 6 * time.Hour
+
 // Model is the main TUI state
 type Model struct {
 	// Config
@@ -140,6 +143,7 @@ func (m *Model) Init() tea.Cmd {
 		m.spinner.Tick,
 		m.checkForUpdates(),
 		m.scheduleClaudePRScan(),
+		m.scheduleUpdateCheck(),
 	)
 }
 
@@ -188,6 +192,13 @@ func (m *Model) performUpdateCheck() UpdateCheckMsg {
 func (m *Model) scheduleClaudePRScan() tea.Cmd {
 	return tea.Tick(claudePRScanInterval, func(t time.Time) tea.Msg {
 		return ClaudePRScanTickMsg{}
+	})
+}
+
+// scheduleUpdateCheck returns a command that triggers an update check after the interval
+func (m *Model) scheduleUpdateCheck() tea.Cmd {
+	return tea.Tick(updateCheckInterval, func(t time.Time) tea.Msg {
+		return UpdateCheckTickMsg{}
 	})
 }
 
