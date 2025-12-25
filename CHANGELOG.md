@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.25.5] - 2025-12-25
+
+### Added
+- **Git status indicators in worktree table**: Quickly see if a worktree is ready to be archived
+  - `[dirty]` tag (yellow) - Shows when worktree has uncommitted changes
+  - `[behind N]` tag (blue) - Shows when worktree is N commits behind main/master branch
+  - Status is fetched asynchronously when entering a project and on refresh ('r')
+  - Clean worktrees with no tags are ready to archive
+
 ## [0.12.25.4] - 2025-12-25
 
 ### Fixed

@@ -23,6 +23,10 @@ var (
 	PendingColor   = lipgloss.Color("#f59e0b")
 	CompletedColor = lipgloss.Color("#10b981")
 
+	// Git status tag colors
+	DirtyColor  = lipgloss.Color("#f59e0b") // Yellow/orange
+	BehindColor = lipgloss.Color("#3b82f6") // Blue
+
 	// Tab colors
 	NumKeyColor = lipgloss.Color("#00d4aa")
 	FilterColor = lipgloss.Color("#3b82f6")
@@ -84,6 +88,10 @@ type Styles struct {
 
 	// Muted
 	Muted lipgloss.Style
+
+	// Git status tags
+	TagDirty  lipgloss.Style
+	TagBehind lipgloss.Style
 }
 
 // DefaultStyles returns the default coolify-tui inspired styles
@@ -214,6 +222,13 @@ func DefaultStyles() *Styles {
 	// Muted
 	s.Muted = lipgloss.NewStyle().
 		Foreground(MutedColor)
+
+	// Git status tags
+	s.TagDirty = lipgloss.NewStyle().
+		Foreground(DirtyColor)
+
+	s.TagBehind = lipgloss.NewStyle().
+		Foreground(BehindColor)
 
 	return s
 }

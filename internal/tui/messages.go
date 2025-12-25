@@ -1,6 +1,9 @@
 package tui
 
-import "github.com/hammashamzah/conductor/internal/config"
+import (
+	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/workspace"
+)
 
 // View represents the current screen
 type View int
@@ -152,4 +155,11 @@ type RetrySetupMsg struct {
 	WorktreeName string
 	Success      bool
 	Err          error
+}
+
+// GitStatusFetchedMsg indicates git status has been fetched for all worktrees in a project
+type GitStatusFetchedMsg struct {
+	ProjectName string
+	Statuses    map[string]*workspace.GitStatusInfo
+	Err         error
 }

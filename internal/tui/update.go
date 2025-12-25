@@ -163,14 +163,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshProjectList()
 		if m.selectedProject != "" {
 			m.refreshWorktreeList()
-			// Also sync PRs in background when refreshing in worktrees view
+			// Also sync PRs and git status in background when refreshing in worktrees view
 			if m.currentView == ViewWorktrees {
 				projectName := m.selectedProject
-				m.setStatus("Refreshing PRs...", false)
-				return m, func() tea.Msg {
-					err := m.wsManager.SyncAllPRs(projectName)
-					return AllPRsSyncedMsg{ProjectName: projectName, Err: err}
-				}
+				m.gitStatusLoading = true
+				m.setStatus("Refreshing...", false)
+				return m, tea.Batch(
+					func() tea.Msg {
+						err := m.wsManager.SyncAllPRs(projectName)
+						return AllPRsSyncedMsg{ProjectName: projectName, Err: err}
+					},
+					func() tea.Msg {
+						statuses, err := m.wsManager.FetchGitStatusForProject(projectName)
+						return GitStatusFetchedMsg{ProjectName: projectName, Statuses: statuses, Err: err}
+					},
+				)
 			}
 		}
 		m.setStatus("Refreshed", false)
@@ -204,6 +211,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus("PRs refreshed", false)
 			// Save updated PR data to config
 			_ = config.Save(m.config)
+		}
+		return m, nil
+
+	case GitStatusFetchedMsg:
+		m.gitStatusLoading = false
+		if msg.Err != nil {
+			// Silently ignore git status fetch errors
+			return m, nil
+		}
+		// Update the cache with fetched statuses
+		for name, status := range msg.Statuses {
+			m.gitStatusCache[name] = status
 		}
 		return m, nil
 
@@ -439,12 +458,22 @@ func (m *Model) handleProjectsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.prevView = ViewProjects
 			m.currentView = ViewWorktrees
 
-			// Sync PRs for all worktrees in background
+			// Clear git status cache for new project
+			m.gitStatusCache = make(map[string]*workspace.GitStatusInfo)
+			m.gitStatusLoading = true
+
+			// Sync PRs and git status for all worktrees in background
 			projectName := m.selectedProject
-			return m, func() tea.Msg {
-				err := m.wsManager.SyncAllPRs(projectName)
-				return AllPRsSyncedMsg{ProjectName: projectName, Err: err}
-			}
+			return m, tea.Batch(
+				func() tea.Msg {
+					err := m.wsManager.SyncAllPRs(projectName)
+					return AllPRsSyncedMsg{ProjectName: projectName, Err: err}
+				},
+				func() tea.Msg {
+					statuses, err := m.wsManager.FetchGitStatusForProject(projectName)
+					return GitStatusFetchedMsg{ProjectName: projectName, Statuses: statuses, Err: err}
+				},
+			)
 		}
 
 	case key.Matches(msg, m.keyMap.Ports):

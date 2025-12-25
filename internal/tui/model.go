@@ -95,6 +95,10 @@ type Model struct {
 
 	// Claude PR auto-scan state
 	claudePRScanning bool // Whether we're currently scanning for Claude PRs
+
+	// Git status cache
+	gitStatusCache   map[string]*workspace.GitStatusInfo
+	gitStatusLoading bool
 }
 
 // NewModel creates a new TUI model
@@ -131,6 +135,7 @@ func NewModelWithVersion(cfg *config.Config, version string) *Model {
 		createPortInput: pi,
 		wsManager:       workspace.NewManager(cfg),
 		spinner:         s,
+		gitStatusCache:  make(map[string]*workspace.GitStatusInfo),
 	}
 
 	m.refreshProjectList()

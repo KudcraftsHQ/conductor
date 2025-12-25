@@ -283,7 +283,7 @@ func (m *Model) renderWorktreesTable() string {
 	// Column widths
 	nameW := 15
 	portW := 12
-	statusW := 12
+	statusW := 28 // Widened to accommodate git status tags
 	createdW := 14
 	prW := 12
 	branchW := m.width - nameW - portW - statusW - createdW - prW - 14 // Remaining space for branch
@@ -328,6 +328,7 @@ func (m *Model) renderWorktreesTable() string {
 
 		// Status based on setup state, archive state, or archived state
 		status := "ready"
+		statusTags := ""
 		if wt.ArchiveStatus == config.ArchiveStatusRunning {
 			status = m.spinner.View() + " archiving"
 		} else if wt.Archived {
@@ -342,6 +343,15 @@ func (m *Model) renderWorktreesTable() string {
 				status = "✗ failed"
 			case config.SetupStatusDone:
 				status = "ready"
+				// Add git status tags for ready worktrees
+				if gitStatus, ok := m.gitStatusCache[name]; ok {
+					if gitStatus.IsDirty {
+						statusTags += " " + m.styles.TagDirty.Render("[dirty]")
+					}
+					if gitStatus.CommitsBehind > 0 {
+						statusTags += " " + m.styles.TagBehind.Render(fmt.Sprintf("[behind %d]", gitStatus.CommitsBehind))
+					}
+				}
 			}
 		}
 
@@ -364,11 +374,33 @@ func (m *Model) renderWorktreesTable() string {
 			displayName = "◦" + name // Add ◦ prefix for archived
 		}
 
-		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+		// Build status column with tags
+		// The tags have ANSI colors, so we need to handle padding carefully
+		statusWithTags := status + statusTags
+		// Calculate the visible length (without ANSI codes) for padding
+		statusVisibleLen := len(status)
+		if statusTags != "" {
+			// Count visible characters in tags: "[dirty]" = 7, "[behind N]" = 9+ chars
+			if gitStatus, ok := m.gitStatusCache[name]; ok {
+				if gitStatus.IsDirty {
+					statusVisibleLen += 8 // " [dirty]"
+				}
+				if gitStatus.CommitsBehind > 0 {
+					statusVisibleLen += 10 + len(fmt.Sprintf("%d", gitStatus.CommitsBehind)) // " [behind N]"
+				}
+			}
+		}
+		// Pad the status to fill the column width
+		statusPadding := statusW - statusVisibleLen
+		if statusPadding > 0 {
+			statusWithTags += strings.Repeat(" ", statusPadding)
+		}
+
+		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %s  %-*s  %-*s",
 			nameW, truncate(displayName, nameW),
 			branchW, truncate(wt.Branch, branchW),
 			portW, portRange,
-			statusW, status,
+			statusWithTags,
 			createdW, dateStr,
 			prW, truncate(prStr, prW))
 

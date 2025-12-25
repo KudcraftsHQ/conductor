@@ -495,3 +495,55 @@ func isClaudeBranch(branch string) bool {
 	return strings.HasPrefix(branch, "claude/")
 }
 
+// GitStatusInfo holds git status information for a worktree
+type GitStatusInfo struct {
+	IsDirty       bool
+	CommitsBehind int
+}
+
+// FetchGitStatusForProject fetches git status for all worktrees in a project
+func (m *Manager) FetchGitStatusForProject(projectName string) (map[string]*GitStatusInfo, error) {
+	project, ok := m.config.GetProject(projectName)
+	if !ok {
+		return nil, fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	// Get the default branch for this project
+	defaultBranch := GitGetDefaultBranch(project.Path)
+
+	result := make(map[string]*GitStatusInfo)
+
+	for worktreeName, worktree := range project.Worktrees {
+		// Skip archived, creating, or failed worktrees
+		if worktree.Archived ||
+			worktree.SetupStatus == config.SetupStatusCreating ||
+			worktree.SetupStatus == config.SetupStatusRunning ||
+			worktree.SetupStatus == config.SetupStatusFailed {
+			continue
+		}
+
+		// Check if worktree path exists
+		if !WorktreeExists(worktree.Path) {
+			continue
+		}
+
+		status := &GitStatusInfo{}
+
+		// Check for uncommitted changes
+		isDirty, err := GitHasUncommittedChanges(worktree.Path)
+		if err == nil {
+			status.IsDirty = isDirty
+		}
+
+		// Check commits behind
+		behind, err := GitCommitsBehind(worktree.Path, defaultBranch)
+		if err == nil {
+			status.CommitsBehind = behind
+		}
+
+		result[worktreeName] = status
+	}
+
+	return result, nil
+}
+

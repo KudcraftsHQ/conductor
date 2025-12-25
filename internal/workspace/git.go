@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -194,4 +195,34 @@ func IsWorktree(path string) (bool, error) {
 	gitDir := strings.TrimSpace(string(out))
 	// If .git is a file (not a directory), it's a worktree
 	return strings.Contains(gitDir, ".git/worktrees/"), nil
+}
+
+// GitHasUncommittedChanges checks if working directory has uncommitted changes
+func GitHasUncommittedChanges(worktreePath string) (bool, error) {
+	// git status --porcelain returns empty string if clean
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = worktreePath
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git status failed: %w", err)
+	}
+	return len(strings.TrimSpace(string(out))) > 0, nil
+}
+
+// GitCommitsBehind returns how many commits the branch is behind origin/defaultBranch
+func GitCommitsBehind(worktreePath, defaultBranch string) (int, error) {
+	// git rev-list HEAD..origin/main --count
+	cmd := exec.Command("git", "rev-list", "HEAD..origin/"+defaultBranch, "--count")
+	cmd.Dir = worktreePath
+	out, err := cmd.Output()
+	if err != nil {
+		// Could be no upstream or other error - return 0
+		return 0, nil
+	}
+
+	count, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("invalid count: %w", err)
+	}
+	return count, nil
 }
