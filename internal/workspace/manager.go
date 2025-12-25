@@ -474,35 +474,15 @@ func (m *Manager) AutoSetupClaudePRs(projectName string) (*AutoSetupClaudePRsRes
 			continue
 		}
 
-		// Create git worktree and run setup asynchronously
-		err = m.CreateWorktreeAsync(projectName, name, func(success bool, createErr error) {
-			if !success {
-				// Mark as failed but don't remove from config (for log viewing)
-				worktree.SetupStatus = config.SetupStatusFailed
-				config.Save(m.config)
-				return
-			}
-
-			// Worktree created successfully, now run setup
-			worktree.SetupStatus = config.SetupStatusRunning
-			config.Save(m.config)
-
-			m.RunSetupAsync(projectName, name, func(setupSuccess bool, setupErr error) {
-				if setupSuccess {
-					worktree.SetupStatus = config.SetupStatusDone
-				} else {
-					worktree.SetupStatus = config.SetupStatusFailed
-				}
-				config.Save(m.config)
-			})
+		// Queue worktree creation to avoid git lock conflicts when creating multiple worktrees
+		GetWorktreeQueue().Enqueue(&WorktreeJob{
+			ProjectName:  projectName,
+			WorktreeName: name,
+			Worktree:     worktree,
+			Config:       m.config,
+			Manager:      m,
+			OnComplete:   nil, // We don't need individual callbacks for auto-setup
 		})
-
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("Failed to create worktree for %s: %v", pr.HeadBranch, err))
-			m.config.FreeWorktreePorts(projectName, name)
-			delete(project.Worktrees, name)
-			continue
-		}
 
 		result.NewWorktrees = append(result.NewWorktrees, fmt.Sprintf("%s (%s)", name, pr.HeadBranch))
 	}

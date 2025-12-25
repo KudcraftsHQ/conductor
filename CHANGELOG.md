@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.25.1] - 2025-12-25
+
+### Added
+- **Auto-setup for Claude PRs**: Automatically create worktrees for GitHub PRs with `claude/*` branch prefix
+  - New `conductor pr auto-setup [project]` CLI command
+  - New `A` keybinding in TUI to trigger auto-setup from worktrees view
+  - Fetches open PRs via `gh` CLI and creates worktrees with setup scripts
+  - Skips PRs that already have worktrees
+
+### Fixed
+- **Worktree status persistence**: `SetupStatus` and `ArchiveStatus` are now persisted to JSON, so failed worktrees remain marked as failed after restarting Conductor
+
 ## [0.12.24] - 2024-12-24
 
 ### Added

@@ -72,7 +72,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Success {
 			m.setStatus("Setup complete: "+msg.WorktreeName, false)
 		} else {
-			m.setStatus("Setup failed: "+msg.WorktreeName+" (press 'l' to view logs)", true)
+			m.setStatus("Setup failed: "+msg.WorktreeName+" (press 'l' to view logs, 'R' to retry)", true)
+		}
+		return m, nil
+
+	case RetrySetupMsg:
+		// Update worktree status
+		if project := m.config.Projects[msg.ProjectName]; project != nil {
+			if wt := project.Worktrees[msg.WorktreeName]; wt != nil {
+				if msg.Success {
+					wt.SetupStatus = config.SetupStatusDone
+				} else {
+					wt.SetupStatus = config.SetupStatusFailed
+				}
+			}
+		}
+		m.refreshWorktreeList()
+		if msg.Success {
+			m.setStatus("Retry successful: "+msg.WorktreeName, false)
+		} else {
+			errMsg := "unknown error"
+			if msg.Err != nil {
+				errMsg = msg.Err.Error()
+			}
+			m.setStatus("Retry failed: "+msg.WorktreeName+" - "+errMsg+" (press 'l' to view logs, 'R' to retry)", true)
 		}
 		return m, nil
 
@@ -184,20 +207,69 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case ClaudePRScanTickMsg:
+		// Schedule next scan regardless of current state
+		nextScan := m.scheduleClaudePRScan()
+
+		// Skip if already scanning or no projects
+		if m.claudePRScanning || len(m.config.Projects) == 0 {
+			return m, nextScan
+		}
+
+		// Scan all projects for Claude PRs
+		m.claudePRScanning = true
+		var scanCmds []tea.Cmd
+		scanCmds = append(scanCmds, nextScan)
+
+		for projectName := range m.config.Projects {
+			pName := projectName // capture for closure
+			scanCmds = append(scanCmds, func() tea.Msg {
+				result, err := m.wsManager.AutoSetupClaudePRs(pName)
+				if err != nil {
+					return AutoSetupClaudePRsMsg{
+						ProjectName: pName,
+						Err:         err,
+					}
+				}
+				return AutoSetupClaudePRsMsg{
+					ProjectName:    pName,
+					NewWorktrees:   result.NewWorktrees,
+					ExistingBranch: result.ExistingBranch,
+					Errors:         result.Errors,
+				}
+			})
+		}
+		return m, tea.Batch(scanCmds...)
+
 	case AutoSetupClaudePRsMsg:
+		m.claudePRScanning = false
 		if msg.Err != nil {
-			m.setStatus("Error auto-setting up Claude PRs: "+msg.Err.Error(), true)
-		} else {
-			// Build status message
-			statusMsg := fmt.Sprintf("✅ Created %d worktree(s)", len(msg.NewWorktrees))
-			if len(msg.ExistingBranch) > 0 {
-				statusMsg += fmt.Sprintf(", skipped %d existing", len(msg.ExistingBranch))
+			// Only show error for manual triggers
+			if msg.IsManual {
+				m.setStatus("Error auto-setting up Claude PRs: "+msg.Err.Error(), true)
 			}
-			if len(msg.Errors) > 0 {
-				statusMsg += fmt.Sprintf(", %d error(s)", len(msg.Errors))
-				m.setStatus(statusMsg, true)
-			} else {
-				m.setStatus(statusMsg, false)
+		} else {
+			if msg.IsManual {
+				// Manual trigger: always show results
+				statusMsg := fmt.Sprintf("✅ Created %d worktree(s)", len(msg.NewWorktrees))
+				if len(msg.ExistingBranch) > 0 {
+					statusMsg += fmt.Sprintf(", skipped %d existing", len(msg.ExistingBranch))
+				}
+				if len(msg.Errors) > 0 {
+					statusMsg += fmt.Sprintf(", %d error(s)", len(msg.Errors))
+					m.setStatus(statusMsg, true)
+				} else {
+					m.setStatus(statusMsg, false)
+				}
+			} else if len(msg.NewWorktrees) > 0 {
+				// Periodic scan: only show if new worktrees were created
+				statusMsg := fmt.Sprintf("🤖 Auto-created %d worktree(s) for Claude PRs", len(msg.NewWorktrees))
+				if len(msg.Errors) > 0 {
+					statusMsg += fmt.Sprintf(", %d error(s)", len(msg.Errors))
+					m.setStatus(statusMsg, true)
+				} else {
+					m.setStatus(statusMsg, false)
+				}
 			}
 
 			// Reload config to show new worktrees
@@ -459,7 +531,7 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keyMap.AutoSetupClaude):
-		// Auto-setup worktrees for all Claude PRs
+		// Auto-setup worktrees for all Claude PRs (manual trigger)
 		if m.selectedProject != "" {
 			m.statusMessage = "🔍 Scanning for Claude PRs..."
 			m.statusIsError = false
@@ -470,6 +542,7 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return AutoSetupClaudePRsMsg{
 						ProjectName: projectName,
 						Err:         err,
+						IsManual:    true,
 					}
 				}
 				return AutoSetupClaudePRsMsg{
@@ -478,6 +551,59 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					ExistingBranch: result.ExistingBranch,
 					Errors:         result.Errors,
 					Err:            nil,
+					IsManual:       true,
+				}
+			}
+		}
+
+	case key.Matches(msg, m.keyMap.Retry):
+		// Retry failed setup for selected worktree
+		if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
+			wtName := m.worktreeNames[m.cursor]
+			project := m.config.Projects[m.selectedProject]
+			if wt := project.Worktrees[wtName]; wt != nil {
+				if wt.SetupStatus != config.SetupStatusFailed {
+					m.setStatus("Can only retry failed setups", true)
+					return m, nil
+				}
+
+				projectName := m.selectedProject
+				worktreeName := wtName
+
+				// Check if worktree directory exists - if not, need to create it first
+				if !workspace.WorktreeExists(wt.Path) {
+					// Worktree creation failed, queue it for creation
+					wt.SetupStatus = config.SetupStatusCreating
+					m.setStatus("Retrying worktree creation: "+wtName+"...", false)
+
+					workspace.GetWorktreeQueue().Enqueue(&workspace.WorktreeJob{
+						ProjectName:  projectName,
+						WorktreeName: worktreeName,
+						Worktree:     wt,
+						Config:       m.config,
+						Manager:      m.wsManager,
+						OnComplete: func(success bool, err error) {
+							// This callback runs in background, TUI will update via refresh
+						},
+					})
+					return m, nil
+				}
+
+				// Worktree exists, just retry setup
+				wt.SetupStatus = config.SetupStatusRunning
+				m.setStatus("Retrying setup: "+wtName+"...", false)
+
+				return m, func() tea.Msg {
+					done := make(chan RetrySetupMsg)
+					_ = m.wsManager.RunSetupAsync(projectName, worktreeName, func(success bool, setupErr error) {
+						done <- RetrySetupMsg{
+							ProjectName:  projectName,
+							WorktreeName: worktreeName,
+							Success:      success,
+							Err:          setupErr,
+						}
+					})
+					return <-done
 				}
 			}
 		}

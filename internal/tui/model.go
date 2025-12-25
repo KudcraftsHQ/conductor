@@ -2,6 +2,7 @@ package tui
 
 import (
 	"sort"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -12,6 +13,9 @@ import (
 	"github.com/hammashamzah/conductor/internal/tui/styles"
 	"github.com/hammashamzah/conductor/internal/workspace"
 )
+
+// claudePRScanInterval is the interval between automatic Claude PR scans
+const claudePRScanInterval = 30 * time.Second
 
 // Model is the main TUI state
 type Model struct {
@@ -79,6 +83,9 @@ type Model struct {
 	prCursor     int             // Selected PR in modal
 	prWorktree   string          // Which worktree's PRs we're viewing
 	prLoading    bool            // Whether we're fetching PRs
+
+	// Claude PR auto-scan state
+	claudePRScanning bool // Whether we're currently scanning for Claude PRs
 }
 
 // NewModel creates a new TUI model
@@ -117,7 +124,17 @@ func NewModel(cfg *config.Config) *Model {
 
 // Init initializes the model
 func (m *Model) Init() tea.Cmd {
-	return m.spinner.Tick
+	return tea.Batch(
+		m.spinner.Tick,
+		m.scheduleClaudePRScan(),
+	)
+}
+
+// scheduleClaudePRScan returns a command that triggers a Claude PR scan after the interval
+func (m *Model) scheduleClaudePRScan() tea.Cmd {
+	return tea.Tick(claudePRScanInterval, func(t time.Time) tea.Msg {
+		return ClaudePRScanTickMsg{}
+	})
 }
 
 func (m *Model) refreshProjectList() {

@@ -124,4 +124,16 @@ type AutoSetupClaudePRsMsg struct {
 	ExistingBranch []string
 	Errors         []string
 	Err            error
+	IsManual       bool // true if triggered by user, false if periodic
+}
+
+// ClaudePRScanTickMsg triggers a periodic scan for Claude PRs
+type ClaudePRScanTickMsg struct{}
+
+// RetrySetupMsg indicates a retry of failed setup has completed
+type RetrySetupMsg struct {
+	ProjectName  string
+	WorktreeName string
+	Success      bool
+	Err          error
 }
