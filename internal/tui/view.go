@@ -58,6 +58,8 @@ func (m *Model) View() string {
 		sections = append(sections, m.renderLogsView())
 	case ViewPRs:
 		sections = append(sections, m.renderPRsPage())
+	case ViewAllPRs:
+		sections = append(sections, m.renderAllPRsPage())
 	}
 
 	// Footer
@@ -163,6 +165,9 @@ func (m *Model) renderTitleBar() string {
 	case ViewPRs:
 		title = "MERGE REQUESTS: " + m.prWorktree
 		count = len(m.prList)
+	case ViewAllPRs:
+		title = "ALL PULL REQUESTS"
+		count = len(m.allPRList)
 	}
 
 	// Build title: ─────── TITLE(count) ───────
@@ -512,6 +517,10 @@ func (m *Model) renderFooter() string {
 		breadcrumbs = append(breadcrumbs, m.selectedProject)
 		breadcrumbs = append(breadcrumbs, m.prWorktree)
 		breadcrumbs = append(breadcrumbs, "prs")
+	case ViewAllPRs:
+		breadcrumbs = append(breadcrumbs, "projects")
+		breadcrumbs = append(breadcrumbs, m.selectedProject)
+		breadcrumbs = append(breadcrumbs, "all-prs")
 	}
 
 	for i, bc := range breadcrumbs {
@@ -536,11 +545,13 @@ func (m *Model) renderFooter() string {
 		case ViewProjects:
 			hints = []string{"enter:select", "d:delete", "?:help", "q:quit"}
 		case ViewWorktrees:
-			hints = []string{"c:create", "o:open", "C:cursor", "a:archive", "m:PRs", "l:logs", "esc:back"}
+			hints = []string{"c:create", "o:open", "C:cursor", "a:archive", "m:PRs", "M:all PRs", "l:logs", "esc:back"}
 		case ViewPorts:
 			hints = []string{"esc:back"}
 		case ViewPRs:
 			hints = []string{"o:open in browser", "w:worktree", "r:refresh", "esc:back"}
+		case ViewAllPRs:
+			hints = []string{"enter:create worktree", "o:open in browser", "r:refresh", "esc:back"}
 		}
 		right = m.styles.Muted.Render(strings.Join(hints, "  "))
 	}
@@ -692,6 +703,7 @@ func (m *Model) renderHelpModal() string {
 				{"2", "Worktrees view"},
 				{"p", "Ports view"},
 				{"m", "Merge requests"},
+				{"M", "All PRs (create worktree)"},
 			},
 		},
 		{
@@ -868,6 +880,107 @@ func (m *Model) renderPRsPage() string {
 		rowContent = padRight(rowContent, m.width-2)
 
 		if i == m.prCursor {
+			rows = append(rows, m.styles.TableRowSelected.Width(m.width).Render("> "+rowContent))
+		} else {
+			rows = append(rows, "  "+rowContent)
+		}
+	}
+
+	return m.padContent(strings.Join(rows, "\n"))
+}
+
+func (m *Model) renderAllPRsPage() string {
+	if m.allPRLoading {
+		loading := m.spinner.View() + " Fetching all PRs from GitHub..."
+		return m.padContent(loading)
+	}
+
+	if len(m.allPRList) == 0 {
+		empty := m.styles.Muted.Render("No pull requests found for this repository.")
+		return m.padContent(empty)
+	}
+
+	// Column widths for PR table
+	numW := 8
+	stateW := 12
+	authorW := 15
+	branchW := 25
+	updatedW := 14
+	titleW := m.width - numW - stateW - authorW - branchW - updatedW - 14 // Remaining for title
+	if titleW < 15 {
+		titleW = 15
+	}
+
+	var rows []string
+
+	// Header
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+		numW, "NUMBER",
+		titleW, "TITLE",
+		branchW, "BRANCH",
+		stateW, "STATE",
+		authorW, "AUTHOR",
+		updatedW, "UPDATED")
+	rows = append(rows, m.styles.TableHeader.Render(header))
+
+	// Calculate visible rows
+	tableHeight := m.tableHeight()
+	start := m.offset
+	end := start + tableHeight
+	if end > len(m.allPRList) {
+		end = len(m.allPRList)
+	}
+
+	// Check which branches already have worktrees
+	project := m.config.Projects[m.selectedProject]
+	existingBranches := make(map[string]bool)
+	if project != nil {
+		for _, wt := range project.Worktrees {
+			if !wt.Archived {
+				existingBranches[wt.Branch] = true
+			}
+		}
+	}
+
+	// PR rows
+	for i := start; i < end; i++ {
+		pr := m.allPRList[i]
+		numStr := fmt.Sprintf("#%d", pr.Number)
+
+		// State with indicator
+		stateStr := pr.State
+		switch pr.State {
+		case "merged":
+			stateStr = "✓ merged"
+		case "closed":
+			stateStr = "✗ closed"
+		case "draft":
+			stateStr = "◦ draft"
+		case "open":
+			stateStr = "● open"
+		}
+
+		// Format updated date
+		updatedStr := pr.UpdatedAt.Format("Jan 2, 15:04")
+
+		// Check if worktree already exists for this branch
+		branchDisplay := truncate(pr.HeadBranch, branchW)
+		if existingBranches[pr.HeadBranch] {
+			branchDisplay = truncate(pr.HeadBranch, branchW-4) + " [✓]"
+		}
+
+		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+			numW, numStr,
+			titleW, truncate(pr.Title, titleW),
+			branchW, branchDisplay,
+			stateW, stateStr,
+			authorW, truncate(pr.Author, authorW),
+			updatedW, updatedStr)
+
+		// Pad to full width
+		rowContent = padRight(rowContent, m.width-2)
+
+		if i == m.allPRCursor {
 			rows = append(rows, m.styles.TableRowSelected.Width(m.width).Render("> "+rowContent))
 		} else {
 			rows = append(rows, "  "+rowContent)

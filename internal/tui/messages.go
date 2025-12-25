@@ -92,6 +92,7 @@ const (
 	ViewLogs View = iota + 100
 	ViewQuit
 	ViewPRs
+	ViewAllPRs // View all PRs for a project (not just one worktree's branch)
 )
 
 // ArchiveStartedMsg indicates archiving has started for a worktree
@@ -164,12 +165,18 @@ type GitStatusFetchedMsg struct {
 	Err         error
 }
 
+// AllProjectPRsFetchedMsg indicates all PRs have been fetched for a project
+type AllProjectPRsFetchedMsg struct {
+	ProjectName string
+	PRs         []config.PRInfo
+	Err         error
+}
+
 // WorktreeFromPRCreatedMsg indicates a worktree was created from a PR
 type WorktreeFromPRCreatedMsg struct {
-	ProjectName   string
-	WorktreeName  string
-	PRNumber      int
-	Branch        string
-	AlreadyExists bool
-	Err           error
+	ProjectName  string
+	WorktreeName string
+	PRNumber     int
+	Branch       string
+	Err          error
 }

@@ -205,14 +205,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case WorktreeFromPRCreatedMsg:
+		m.allPRCreating = false
 		if msg.Err != nil {
-			m.setStatus(fmt.Sprintf("Failed to create worktree for PR #%d: %s", msg.PRNumber, msg.Err.Error()), true)
+			if msg.PRNumber > 0 {
+				m.setStatus(fmt.Sprintf("Failed to create worktree for PR #%d: %s", msg.PRNumber, msg.Err.Error()), true)
+			} else {
+				m.setStatus("Error creating worktree: "+msg.Err.Error(), true)
+			}
 		} else {
-			m.setStatus(fmt.Sprintf("Creating worktree '%s' for PR #%d (%s)...", msg.WorktreeName, msg.PRNumber, msg.Branch), false)
+			if msg.PRNumber > 0 {
+				m.setStatus(fmt.Sprintf("Creating worktree '%s' for PR #%d (%s)...", msg.WorktreeName, msg.PRNumber, msg.Branch), false)
+			} else {
+				m.setStatus("Created worktree "+msg.WorktreeName+" for "+msg.Branch, false)
+			}
 			// Navigate back to worktrees view to see the new worktree
 			m.currentView = ViewWorktrees
 			m.prList = nil
 			m.prWorktree = ""
+			m.allPRList = nil
 			m.refreshWorktreeList()
 		}
 		return m, nil
@@ -313,6 +323,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(scanCmds...)
 
+	case AllProjectPRsFetchedMsg:
+		m.allPRLoading = false
+		if msg.Err != nil {
+			m.setStatus("Error fetching PRs: "+msg.Err.Error(), true)
+			m.allPRList = nil
+		} else {
+			m.allPRList = msg.PRs
+			m.allPRCursor = 0
+			m.offset = 0
+		}
+		return m, nil
+
 	case AutoSetupClaudePRsMsg:
 		m.claudePRScanning = false
 		if msg.Err != nil {
@@ -394,6 +416,11 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Handle PRs modal
 	if m.currentView == ViewPRs {
 		return m.handlePRsView(msg)
+	}
+
+	// Handle All PRs view
+	if m.currentView == ViewAllPRs {
+		return m.handleAllPRsView(msg)
 	}
 
 	// Global keys
@@ -617,6 +644,28 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					WorktreeName: wtName,
 					PRs:          prs,
 					Err:          err,
+				}
+			}
+		}
+
+	case key.Matches(msg, m.keyMap.AllPRs):
+		// Open all PRs view for the project
+		if m.selectedProject != "" {
+			m.allPRList = nil
+			m.allPRCursor = 0
+			m.allPRLoading = true
+			m.offset = 0
+			m.prevView = ViewWorktrees
+			m.currentView = ViewAllPRs
+
+			// Fetch all PRs asynchronously
+			projectName := m.selectedProject
+			return m, func() tea.Msg {
+				prs, err := m.wsManager.FetchAllProjectPRs(projectName)
+				return AllProjectPRsFetchedMsg{
+					ProjectName: projectName,
+					PRs:         prs,
+					Err:         err,
 				}
 			}
 		}
@@ -1253,6 +1302,72 @@ func (m *Model) handlePRsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					Branch:       pr.HeadBranch,
 					Err:          nil,
 				}
+			}
+		}
+	}
+
+	return m, nil
+}
+
+func (m *Model) handleAllPRsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keyMap.Back):
+		m.currentView = ViewWorktrees
+		m.allPRList = nil
+		m.offset = 0
+		return m, nil
+
+	case key.Matches(msg, m.keyMap.Up):
+		if m.allPRCursor > 0 {
+			m.allPRCursor--
+			m.ensureAllPRCursorVisible()
+		}
+
+	case key.Matches(msg, m.keyMap.Down):
+		if m.allPRCursor < len(m.allPRList)-1 {
+			m.allPRCursor++
+			m.ensureAllPRCursorVisible()
+		}
+
+	case key.Matches(msg, m.keyMap.Open):
+		// Open selected PR in browser
+		if len(m.allPRList) > 0 && m.allPRCursor >= 0 && m.allPRCursor < len(m.allPRList) {
+			pr := m.allPRList[m.allPRCursor]
+			return m, func() tea.Msg {
+				err := github.OpenInBrowser(pr.URL)
+				return PROpenedMsg{URL: pr.URL, Err: err}
+			}
+		}
+
+	case msg.Type == tea.KeyEnter, key.Matches(msg, m.keyMap.Create):
+		// Create worktree from selected PR
+		if len(m.allPRList) > 0 && m.allPRCursor >= 0 && m.allPRCursor < len(m.allPRList) && !m.allPRCreating {
+			pr := m.allPRList[m.allPRCursor]
+			m.allPRCreating = true
+			m.setStatus("Creating worktree for "+pr.HeadBranch+"...", false)
+			projectName := m.selectedProject
+			return m, func() tea.Msg {
+				name, _, err := m.wsManager.CreateWorktreeFromPR(projectName, pr)
+				return WorktreeFromPRCreatedMsg{
+					ProjectName:  projectName,
+					WorktreeName: name,
+					PRNumber:     pr.Number,
+					Branch:       pr.HeadBranch,
+					Err:          err,
+				}
+			}
+		}
+
+	case key.Matches(msg, m.keyMap.Refresh):
+		// Refresh all PRs
+		m.allPRLoading = true
+		projectName := m.selectedProject
+		return m, func() tea.Msg {
+			prs, err := m.wsManager.FetchAllProjectPRs(projectName)
+			return AllProjectPRsFetchedMsg{
+				ProjectName: projectName,
+				PRs:         prs,
+				Err:         err,
 			}
 		}
 	}
