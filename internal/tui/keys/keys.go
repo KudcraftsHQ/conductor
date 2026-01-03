@@ -4,29 +4,31 @@ import "github.com/charmbracelet/bubbles/key"
 
 // KeyMap defines all keybindings
 type KeyMap struct {
-	Up              key.Binding
-	Down            key.Binding
-	Enter           key.Binding
-	Back            key.Binding
-	Quit            key.Binding
-	Help            key.Binding
-	Filter          key.Binding
-	Create          key.Binding
-	Archive         key.Binding
-	Open            key.Binding
-	OpenCursor      key.Binding
-	OpenVSCode      key.Binding
-	OpenTerminal    key.Binding
-	Refresh         key.Binding
-	Add             key.Binding
-	Delete          key.Binding
-	Tab             key.Binding
+	Up                   key.Binding
+	Down                 key.Binding
+	Enter                key.Binding
+	Back                 key.Binding
+	Quit                 key.Binding
+	Help                 key.Binding
+	Filter               key.Binding
+	Create               key.Binding
+	Archive              key.Binding
+	Open                 key.Binding
+	OpenCursor           key.Binding
+	OpenVSCode           key.Binding
+	OpenTerminal         key.Binding
+	Refresh              key.Binding
+	Add                  key.Binding
+	Delete               key.Binding
+	Tab                  key.Binding
 	Ports                key.Binding
 	MergeReqs            key.Binding
 	AllPRs               key.Binding
 	AutoSetupClaude      key.Binding
 	Retry                key.Binding
 	CreateWorktreeFromPR key.Binding
+	Tunnel               key.Binding
+	CopyURL              key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings
@@ -124,6 +126,14 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("w"),
 			key.WithHelp("w", "create worktree"),
 		),
+		Tunnel: key.NewBinding(
+			key.WithKeys("T"),
+			key.WithHelp("T", "tunnel"),
+		),
+		CopyURL: key.NewBinding(
+			key.WithKeys("y"),
+			key.WithHelp("y", "copy URL"),
+		),
 	}
 }
 
@@ -139,6 +149,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Create, k.Archive, k.Delete, k.Retry},
 		{k.Open, k.OpenCursor, k.OpenVSCode, k.OpenTerminal},
 		{k.Filter, k.Refresh, k.Ports, k.MergeReqs, k.AllPRs, k.AutoSetupClaude},
+		{k.Tunnel, k.CopyURL},
 		{k.Help, k.Quit},
 	}
 }

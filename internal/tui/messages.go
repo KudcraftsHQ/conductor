@@ -180,3 +180,29 @@ type WorktreeFromPRCreatedMsg struct {
 	Branch       string
 	Err          error
 }
+
+// TunnelStartedMsg indicates a tunnel was started for a worktree
+type TunnelStartedMsg struct {
+	ProjectName  string
+	WorktreeName string
+	URL          string
+	Port         int
+	Mode         string // "quick" or "named"
+	Err          error
+}
+
+// TunnelStoppedMsg indicates a tunnel was stopped for a worktree
+type TunnelStoppedMsg struct {
+	ProjectName  string
+	WorktreeName string
+	Err          error
+}
+
+// TunnelRestoredMsg indicates tunnels were restored on TUI startup
+type TunnelRestoredMsg struct {
+	RestoredCount int
+	Err           error
+}
+
+// ViewTunnelModal is the view for tunnel mode selection
+const ViewTunnelModal View = iota + 200

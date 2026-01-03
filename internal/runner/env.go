@@ -53,6 +53,16 @@ func BuildEnv(projectName string, project *config.Project, worktreeName string, 
 		}
 	}
 
+	// Tunnel environment variables
+	if worktree.Tunnel != nil && worktree.Tunnel.Active {
+		env = append(env, "CONDUCTOR_TUNNEL_ACTIVE=true")
+		env = append(env, fmt.Sprintf("CONDUCTOR_TUNNEL_URL=%s", worktree.Tunnel.URL))
+		env = append(env, fmt.Sprintf("CONDUCTOR_TUNNEL_PORT=%d", worktree.Tunnel.Port))
+		env = append(env, fmt.Sprintf("CONDUCTOR_TUNNEL_MODE=%s", worktree.Tunnel.Mode))
+	} else {
+		env = append(env, "CONDUCTOR_TUNNEL_ACTIVE=false")
+	}
+
 	return env
 }
 
@@ -90,6 +100,16 @@ func GetEnvMap(projectName string, project *config.Project, worktreeName string,
 				}
 			}
 		}
+	}
+
+	// Tunnel environment variables
+	if worktree.Tunnel != nil && worktree.Tunnel.Active {
+		result["CONDUCTOR_TUNNEL_ACTIVE"] = "true"
+		result["CONDUCTOR_TUNNEL_URL"] = worktree.Tunnel.URL
+		result["CONDUCTOR_TUNNEL_PORT"] = strconv.Itoa(worktree.Tunnel.Port)
+		result["CONDUCTOR_TUNNEL_MODE"] = string(worktree.Tunnel.Mode)
+	} else {
+		result["CONDUCTOR_TUNNEL_ACTIVE"] = "false"
 	}
 
 	return result

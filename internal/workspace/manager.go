@@ -10,6 +10,7 @@ import (
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/github"
 	"github.com/hammashamzah/conductor/internal/tmux"
+	"github.com/hammashamzah/conductor/internal/tunnel"
 )
 
 // Manager handles worktree operations
@@ -198,6 +199,13 @@ func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 	// Run archive script first (logs are saved to file for debugging)
 	// We ignore the error - archiving proceeds regardless
 	_ = GetSetupManager().RunArchiveScript(project, projectName, worktreeName, worktree)
+
+	// Stop tunnel if active
+	if worktree.Tunnel != nil && worktree.Tunnel.Active {
+		_ = tunnel.KillProcess(worktree.Tunnel.PID)
+		_ = tunnel.DeletePIDFile(projectName, worktreeName)
+		worktree.Tunnel = nil
+	}
 
 	// Kill tmux window if it exists
 	_ = tmux.KillWindow(projectName, worktree.Branch)

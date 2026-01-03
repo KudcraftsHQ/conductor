@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3.0] - 2026-01-03
+
+### Added
+- **Cloudflare Tunnel Support**: Expose worktree dev servers to the internet via Cloudflare tunnels
+  - **Quick tunnels**: Random `*.trycloudflare.com` URLs with no setup required
+  - **Named tunnels**: Custom domains like `tokyo-3100.yourdomain.com` via Cloudflare API
+  - New `T` keybind in TUI to toggle tunnel for selected worktree
+  - New `y` keybind to copy tunnel URL to clipboard
+  - Tunnel URL displayed in worktrees table
+  - Tunnel state persists across TUI restarts via PID files
+  - Automatic tunnel cleanup when archiving worktrees
+  - New CLI commands: `conductor tunnel start|stop|list|status|logs|setup`
+  - Environment variables injected into scripts: `CONDUCTOR_TUNNEL_URL`, `CONDUCTOR_TUNNEL_PORT`, `CONDUCTOR_TUNNEL_MODE`
+
 ## [0.12.25.7] - 2025-12-25
 
 ### Added

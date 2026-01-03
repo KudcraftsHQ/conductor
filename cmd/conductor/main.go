@@ -42,6 +42,7 @@ func init() {
 	rootCmd.AddCommand(archiveCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(tuiCmd)
+	rootCmd.AddCommand(tunnelCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(migrateCmd)

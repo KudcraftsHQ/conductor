@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -345,7 +346,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			if msg.IsManual {
 				// Manual trigger: always show results
-				statusMsg := fmt.Sprintf("✅ Created %d worktree(s)", len(msg.NewWorktrees))
+				statusMsg := fmt.Sprintf("Created %d worktree(s)", len(msg.NewWorktrees))
 				if len(msg.ExistingBranch) > 0 {
 					statusMsg += fmt.Sprintf(", skipped %d existing", len(msg.ExistingBranch))
 				}
@@ -357,7 +358,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else if len(msg.NewWorktrees) > 0 {
 				// Periodic scan: only show if new worktrees were created
-				statusMsg := fmt.Sprintf("🤖 Auto-created %d worktree(s) for Claude PRs", len(msg.NewWorktrees))
+				statusMsg := fmt.Sprintf("Auto-created %d worktree(s) for Claude PRs", len(msg.NewWorktrees))
 				if len(msg.Errors) > 0 {
 					statusMsg += fmt.Sprintf(", %d error(s)", len(msg.Errors))
 					m.setStatus(statusMsg, true)
@@ -371,6 +372,50 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshWorktreeList()
 				_ = config.Save(m.config)
 			}
+		}
+		return m, nil
+
+	case TunnelStartedMsg:
+		m.tunnelStarting = false
+		if msg.Err != nil {
+			m.setStatus("Tunnel failed: "+msg.Err.Error(), true)
+		} else {
+			m.setStatus("Tunnel active: "+msg.URL, false)
+			// Update worktree state
+			if project := m.config.Projects[msg.ProjectName]; project != nil {
+				if wt := project.Worktrees[msg.WorktreeName]; wt != nil {
+					wt.Tunnel = &config.TunnelState{
+						Active:    true,
+						Mode:      config.TunnelMode(msg.Mode),
+						URL:       msg.URL,
+						Port:      msg.Port,
+					}
+					_ = config.Save(m.config)
+				}
+			}
+		}
+		return m, nil
+
+	case TunnelStoppedMsg:
+		if msg.Err != nil {
+			m.setStatus("Failed to stop tunnel: "+msg.Err.Error(), true)
+		} else {
+			m.setStatus("Tunnel stopped", false)
+			// Clear tunnel state
+			if project := m.config.Projects[msg.ProjectName]; project != nil {
+				if wt := project.Worktrees[msg.WorktreeName]; wt != nil {
+					wt.Tunnel = nil
+					_ = config.Save(m.config)
+				}
+			}
+		}
+		return m, nil
+
+	case TunnelRestoredMsg:
+		if msg.Err != nil {
+			// Silent error - don't disturb user on startup
+		} else if msg.RestoredCount > 0 {
+			m.setStatus(fmt.Sprintf("Restored %d tunnel(s)", msg.RestoredCount), false)
 		}
 		return m, nil
 	}
@@ -418,9 +463,14 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePRsView(msg)
 	}
 
-	// Handle All PRs view
+// Handle All PRs view
 	if m.currentView == ViewAllPRs {
 		return m.handleAllPRsView(msg)
+	}
+
+	// Handle tunnel modal
+	if m.currentView == ViewTunnelModal {
+		return m.handleTunnelModal(msg)
 	}
 
 	// Global keys
@@ -776,6 +826,62 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keyMap.Enter):
 		// Open in terminal on enter
 		return m.openWorktree(opener.TerminalITerm)
+
+	case key.Matches(msg, m.keyMap.Tunnel):
+		// Toggle tunnel for selected worktree
+		if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
+			wtName := m.worktreeNames[m.cursor]
+			project := m.config.Projects[m.selectedProject]
+			wt := project.Worktrees[wtName]
+			if wt == nil {
+				return m, nil
+			}
+
+			// Check if worktree is ready
+			if wt.SetupStatus != config.SetupStatusDone && wt.SetupStatus != "" {
+				m.setStatus("Worktree setup not complete", true)
+				return m, nil
+			}
+
+			// If tunnel is active, stop it
+			if wt.Tunnel != nil && wt.Tunnel.Active {
+				projectName := m.selectedProject
+				worktreeName := wtName
+				m.setStatus("Stopping tunnel...", false)
+				return m, func() tea.Msg {
+					err := m.tunnelManager.StopTunnel(projectName, worktreeName)
+					return TunnelStoppedMsg{
+						ProjectName:  projectName,
+						WorktreeName: worktreeName,
+						Err:          err,
+					}
+				}
+			}
+
+			// Open tunnel modal to choose mode
+			if len(wt.Ports) == 0 {
+				m.setStatus("No ports allocated for this worktree", true)
+				return m, nil
+			}
+
+			m.tunnelModalOpen = true
+			m.tunnelModalPort = wt.Ports[0] // Default to first port
+			m.tunnelModalMode = 0           // Default to quick tunnel
+			m.prevView = ViewWorktrees
+			m.currentView = ViewTunnelModal
+		}
+
+	case key.Matches(msg, m.keyMap.CopyURL):
+		// Copy tunnel URL to clipboard
+		if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
+			wtName := m.worktreeNames[m.cursor]
+			wt := m.config.Projects[m.selectedProject].Worktrees[wtName]
+			if wt != nil && wt.Tunnel != nil && wt.Tunnel.URL != "" {
+				return m, m.copyToClipboard(wt.Tunnel.URL)
+			} else {
+				m.setStatus("No active tunnel to copy URL from", true)
+			}
+		}
 	}
 
 	return m, nil
@@ -1373,4 +1479,95 @@ func (m *Model) handleAllPRsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) handleTunnelModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.Type == tea.KeyEsc:
+		m.tunnelModalOpen = false
+		m.currentView = m.prevView
+		return m, nil
+
+	case key.Matches(msg, m.keyMap.Up):
+		if m.tunnelModalMode > 0 {
+			m.tunnelModalMode--
+		}
+
+	case key.Matches(msg, m.keyMap.Down):
+		if m.tunnelModalMode < 1 {
+			m.tunnelModalMode++
+		}
+
+	case msg.Type == tea.KeyEnter:
+		// Start the tunnel
+		if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
+			wtName := m.worktreeNames[m.cursor]
+			projectName := m.selectedProject
+			port := m.tunnelModalPort
+
+			m.tunnelModalOpen = false
+			m.currentView = m.prevView
+			m.tunnelStarting = true
+
+			if m.tunnelModalMode == 0 {
+				// Quick tunnel
+				m.setStatus("Starting quick tunnel...", false)
+				return m, func() tea.Msg {
+					state, err := m.tunnelManager.StartQuickTunnel(projectName, wtName, port)
+					if err != nil {
+						return TunnelStartedMsg{
+							ProjectName:  projectName,
+							WorktreeName: wtName,
+							Err:          err,
+						}
+					}
+					return TunnelStartedMsg{
+						ProjectName:  projectName,
+						WorktreeName: wtName,
+						URL:          state.URL,
+						Port:         port,
+						Mode:         "quick",
+					}
+				}
+			} else {
+				// Named tunnel
+				m.setStatus("Starting named tunnel...", false)
+				project := m.config.Projects[projectName]
+				projectPath := project.Path
+				return m, func() tea.Msg {
+					// Load project config to get tunnel settings
+					projectConfig, _ := config.LoadProjectConfig(projectPath)
+					state, err := m.tunnelManager.StartNamedTunnel(projectName, wtName, port, projectConfig)
+					if err != nil {
+						return TunnelStartedMsg{
+							ProjectName:  projectName,
+							WorktreeName: wtName,
+							Err:          err,
+						}
+					}
+					return TunnelStartedMsg{
+						ProjectName:  projectName,
+						WorktreeName: wtName,
+						URL:          state.URL,
+						Port:         port,
+						Mode:         "named",
+					}
+				}
+			}
+		}
+	}
+
+	return m, nil
+}
+
+func (m *Model) copyToClipboard(text string) tea.Cmd {
+	return func() tea.Msg {
+		// Use pbcopy on macOS
+		cmd := exec.Command("pbcopy")
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err != nil {
+			return ErrorMsg{Err: fmt.Errorf("failed to copy to clipboard: %w", err)}
+		}
+		return OpenedMsg{Path: text} // Reuse OpenedMsg for success notification
+	}
 }

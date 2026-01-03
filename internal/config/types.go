@@ -13,11 +13,12 @@ type Config struct {
 
 // Defaults contains default settings
 type Defaults struct {
-	PortsPerWorktree int    `json:"portsPerWorktree"`
-	PortRangeStart   int    `json:"portRangeStart"`
-	PortRangeEnd     int    `json:"portRangeEnd"`
-	OpenWith         string `json:"openWith"`
-	IDECommand       string `json:"ideCommand"`
+	PortsPerWorktree int            `json:"portsPerWorktree"`
+	PortRangeStart   int            `json:"portRangeStart"`
+	PortRangeEnd     int            `json:"portRangeEnd"`
+	OpenWith         string         `json:"openWith"`
+	IDECommand       string         `json:"ideCommand"`
+	Tunnel           TunnelDefaults `json:"tunnel,omitempty"`
 }
 
 // PortAlloc represents a single port allocation
@@ -56,6 +57,40 @@ const (
 	ArchiveStatusRunning ArchiveStatus = "running"
 )
 
+// TunnelMode represents the type of tunnel
+type TunnelMode string
+
+const (
+	TunnelModeNone  TunnelMode = ""
+	TunnelModeQuick TunnelMode = "quick" // Random trycloudflare.com URL
+	TunnelModeNamed TunnelMode = "named" // Custom domain via Cloudflare API
+)
+
+// TunnelState represents the current state of a tunnel for a worktree
+type TunnelState struct {
+	Active    bool       `json:"active"`
+	Mode      TunnelMode `json:"mode"`
+	URL       string     `json:"url,omitempty"`
+	Port      int        `json:"port"`
+	PID       int        `json:"pid,omitempty"`
+	StartedAt time.Time  `json:"startedAt,omitempty"`
+}
+
+// TunnelDefaults contains global tunnel defaults
+type TunnelDefaults struct {
+	Domain          string `json:"domain,omitempty"`          // Fallback domain e.g., "kudcrafts.com"
+	CloudflareToken string `json:"cloudflareToken,omitempty"` // API token (or use CLOUDFLARE_API_TOKEN env)
+	AccountID       string `json:"accountId,omitempty"`       // Cloudflare account ID
+	ZoneID          string `json:"zoneId,omitempty"`          // DNS zone ID for the domain
+}
+
+// ProjectTunnelConfig contains project-level tunnel settings
+type ProjectTunnelConfig struct {
+	Domain     string `json:"domain,omitempty"`     // Override global domain
+	TunnelID   string `json:"tunnelId,omitempty"`   // Existing tunnel ID for named mode
+	TunnelName string `json:"tunnelName,omitempty"` // Human-readable tunnel name
+}
+
 // PRInfo represents a GitHub pull request linked to a worktree
 type PRInfo struct {
 	Number     int       `json:"number"`
@@ -79,12 +114,14 @@ type Worktree struct {
 	PRs           []PRInfo      `json:"prs,omitempty"`
 	SetupStatus   SetupStatus   `json:"setupStatus,omitempty"`
 	ArchiveStatus ArchiveStatus `json:"archiveStatus,omitempty"`
+	Tunnel        *TunnelState  `json:"tunnel,omitempty"`
 }
 
 // ProjectConfig represents project-level conductor.json
 type ProjectConfig struct {
-	Scripts map[string]string `json:"scripts"`
-	Ports   PortConfig        `json:"ports"`
+	Scripts map[string]string    `json:"scripts"`
+	Ports   PortConfig           `json:"ports"`
+	Tunnel  *ProjectTunnelConfig `json:"tunnel,omitempty"`
 }
 
 // PortConfig defines port settings for a project

@@ -60,6 +60,8 @@ func (m *Model) View() string {
 		sections = append(sections, m.renderPRsPage())
 	case ViewAllPRs:
 		sections = append(sections, m.renderAllPRsPage())
+	case ViewTunnelModal:
+		sections = append(sections, m.renderWorktreesTable())
 	}
 
 	// Footer
@@ -78,6 +80,8 @@ func (m *Model) View() string {
 		return m.overlayModal(baseView, m.renderHelpModal())
 	case ViewQuit:
 		return m.overlayModal(baseView, m.renderQuitModal())
+	case ViewTunnelModal:
+		return m.overlayModal(baseView, m.renderTunnelModal())
 	}
 
 	return baseView
@@ -352,6 +356,16 @@ func (m *Model) renderWorktreesTable() string {
 				status = "✗ failed"
 			case config.SetupStatusDone:
 				status = "ready"
+				// Add tunnel indicator for ready worktrees
+				if wt.Tunnel != nil && wt.Tunnel.Active {
+					// Truncate URL for display
+					tunnelURL := wt.Tunnel.URL
+					if len(tunnelURL) > 25 {
+						tunnelURL = tunnelURL[len(tunnelURL)-22:]
+						tunnelURL = "..." + tunnelURL
+					}
+					statusTags += " " + m.styles.StatusRunning.Render("["+tunnelURL+"]")
+				}
 				// Add git status tags for ready worktrees
 				if gitStatus, ok := m.gitStatusCache[name]; ok {
 					if gitStatus.IsDirty {
@@ -545,7 +559,7 @@ func (m *Model) renderFooter() string {
 		case ViewProjects:
 			hints = []string{"enter:select", "d:delete", "?:help", "q:quit"}
 		case ViewWorktrees:
-			hints = []string{"c:create", "o:open", "C:cursor", "a:archive", "m:PRs", "M:all PRs", "l:logs", "esc:back"}
+			hints = []string{"c:create", "o:open", "C:cursor", "a:archive", "T:tunnel", "m:PRs", "M:all PRs", "l:logs", "esc:back"}
 		case ViewPorts:
 			hints = []string{"esc:back"}
 		case ViewPRs:
@@ -1138,4 +1152,59 @@ func (m *Model) renderLogsView() string {
 	formatted = append(formatted, m.styles.Muted.Render(scrollInfo))
 
 	return strings.Join(formatted, "\n")
+}
+
+func (m *Model) renderTunnelModal() string {
+	width := 50
+	if width > m.width-4 {
+		width = m.width - 4
+	}
+
+	var content strings.Builder
+
+	content.WriteString(m.styles.ModalTitle.Render("Start Tunnel"))
+	content.WriteString("\n\n")
+
+	// Show selected worktree and port
+	if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
+		wtName := m.worktreeNames[m.cursor]
+		content.WriteString(fmt.Sprintf("  Worktree: %s\n", wtName))
+		content.WriteString(fmt.Sprintf("  Port: %d\n\n", m.tunnelModalPort))
+	}
+
+	// Mode selection
+	quickLabel := "Quick Tunnel (random URL)"
+	namedLabel := "Named Tunnel (custom domain)"
+
+	if m.tunnelModalMode == 0 {
+		content.WriteString(m.styles.Cursor.Render("► "))
+		content.WriteString(m.styles.TableRowSelected.Render(quickLabel))
+	} else {
+		content.WriteString("  ")
+		content.WriteString(quickLabel)
+	}
+	content.WriteString("\n")
+
+	if m.tunnelModalMode == 1 {
+		content.WriteString(m.styles.Cursor.Render("► "))
+		content.WriteString(m.styles.TableRowSelected.Render(namedLabel))
+	} else {
+		content.WriteString("  ")
+		content.WriteString(namedLabel)
+	}
+	content.WriteString("\n\n")
+
+	// Descriptions
+	content.WriteString(m.styles.Muted.Render("  Quick: No setup required, random trycloudflare.com URL"))
+	content.WriteString("\n")
+	content.WriteString(m.styles.Muted.Render("  Named: Requires Cloudflare API token (not yet implemented)"))
+	content.WriteString("\n\n")
+
+	// Actions
+	content.WriteString("  ")
+	content.WriteString(m.styles.RenderKeyHelp("enter", "start"))
+	content.WriteString("  ")
+	content.WriteString(m.styles.RenderKeyHelp("esc", "cancel"))
+
+	return m.styles.Modal.Width(width).Render(content.String())
 }

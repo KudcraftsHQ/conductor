@@ -11,6 +11,7 @@ import (
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/tui/keys"
 	"github.com/hammashamzah/conductor/internal/tui/styles"
+	"github.com/hammashamzah/conductor/internal/tunnel"
 	"github.com/hammashamzah/conductor/internal/workspace"
 )
 
@@ -105,6 +106,13 @@ type Model struct {
 	// Git status cache
 	gitStatusCache   map[string]*workspace.GitStatusInfo
 	gitStatusLoading bool
+
+	// Tunnel state
+	tunnelManager    *tunnel.Manager
+	tunnelModalOpen  bool
+	tunnelModalMode  int // 0 = quick, 1 = named
+	tunnelModalPort  int // Which port to tunnel
+	tunnelStarting   bool
 }
 
 // NewModel creates a new TUI model
@@ -142,6 +150,7 @@ func NewModelWithVersion(cfg *config.Config, version string) *Model {
 		wsManager:       workspace.NewManager(cfg),
 		spinner:         s,
 		gitStatusCache:  make(map[string]*workspace.GitStatusInfo),
+		tunnelManager:   tunnel.NewManager(cfg),
 	}
 
 	m.refreshProjectList()
@@ -155,7 +164,32 @@ func (m *Model) Init() tea.Cmd {
 		m.checkForUpdates(),
 		m.scheduleClaudePRScan(),
 		m.scheduleUpdateCheck(),
+		m.restoreTunnels(),
 	)
+}
+
+// restoreTunnels restores tunnel state from PID files on TUI startup
+func (m *Model) restoreTunnels() tea.Cmd {
+	return func() tea.Msg {
+		restored, err := m.tunnelManager.RestoreTunnels()
+		if err != nil {
+			return TunnelRestoredMsg{Err: err}
+		}
+
+		// Update config with restored tunnel states
+		for key, state := range restored {
+			// Parse project/worktree from key
+			for projectName, project := range m.config.Projects {
+				for worktreeName, wt := range project.Worktrees {
+					if projectName+"/"+worktreeName == key {
+						wt.Tunnel = state
+					}
+				}
+			}
+		}
+
+		return TunnelRestoredMsg{RestoredCount: len(restored)}
+	}
 }
 
 // checkForUpdates returns a command that checks for updates in the background
