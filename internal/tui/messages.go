@@ -206,3 +206,8 @@ type TunnelRestoredMsg struct {
 
 // ViewTunnelModal is the view for tunnel mode selection
 const ViewTunnelModal View = iota + 200
+
+// StatesRecoveredMsg indicates interrupted worktree states were recovered on startup
+type StatesRecoveredMsg struct {
+	RecoveredCount int
+}

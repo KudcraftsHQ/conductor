@@ -12,6 +12,7 @@ import (
 
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/runner"
+	"github.com/hammashamzah/conductor/internal/store"
 )
 
 // SetupManager handles background setup processes
@@ -19,18 +20,25 @@ type SetupManager struct {
 	mu      sync.RWMutex
 	logs    map[string]*bytes.Buffer // key: "project/worktree"
 	running map[string]bool
+	store   *store.Store
 }
 
 // NewSetupManager creates a new setup manager
-func NewSetupManager() *SetupManager {
+func NewSetupManager(s *store.Store) *SetupManager {
 	return &SetupManager{
 		logs:    make(map[string]*bytes.Buffer),
 		running: make(map[string]bool),
+		store:   s,
 	}
 }
 
-// Global setup manager instance
-var globalSetupManager = NewSetupManager()
+// Global setup manager instance (initialized via InitSetupManager)
+var globalSetupManager *SetupManager
+
+// InitSetupManager initializes the global setup manager with a store
+func InitSetupManager(s *store.Store) {
+	globalSetupManager = NewSetupManager(s)
+}
 
 // GetSetupManager returns the global setup manager
 func GetSetupManager() *SetupManager {
@@ -97,8 +105,10 @@ func (sm *SetupManager) RunSetupAsync(
 	sm.mu.Lock()
 	sm.logs[key] = &bytes.Buffer{}
 	sm.running[key] = true
-	worktree.SetupStatus = config.SetupStatusRunning
 	sm.mu.Unlock()
+
+	// Update status via store
+	_ = sm.store.SetWorktreeStatus(projectName, worktreeName, config.SetupStatusRunning)
 
 	go func() {
 		var success bool
@@ -127,12 +137,14 @@ func (sm *SetupManager) RunSetupAsync(
 
 			sm.mu.Lock()
 			sm.running[key] = false
-			if success {
-				worktree.SetupStatus = config.SetupStatusDone
-			} else {
-				worktree.SetupStatus = config.SetupStatusFailed
-			}
 			sm.mu.Unlock()
+
+			// Update status via store
+			if success {
+				_ = sm.store.SetWorktreeStatus(projectName, worktreeName, config.SetupStatusDone)
+			} else {
+				_ = sm.store.SetWorktreeStatus(projectName, worktreeName, config.SetupStatusFailed)
+			}
 
 			if onComplete != nil {
 				onComplete(success, setupErr)

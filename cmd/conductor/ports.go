@@ -6,6 +6,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -21,12 +22,13 @@ var portsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all allocated ports",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
 
-		portInfo := cfg.GetAllPortInfo()
+		portInfo := s.GetAllPortInfo()
 		if len(portInfo) == 0 {
 			fmt.Println("No ports allocated.")
 			return nil
@@ -67,13 +69,15 @@ var portsFreeCmd = &cobra.Command{
 	Short: "Manually free a port (use with caution)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
 
 		portStr := args[0]
-		alloc, ok := cfg.PortAllocations[portStr]
+		portAllocations := s.GetAllPortAllocations()
+		alloc, ok := portAllocations[portStr]
 		if !ok {
 			return fmt.Errorf("port %s is not allocated", portStr)
 		}
@@ -88,27 +92,28 @@ var portsFreeCmd = &cobra.Command{
 			return nil
 		}
 
-		delete(cfg.PortAllocations, portStr)
-
-		// Also remove from worktree's port list
-		if project, ok := cfg.Projects[alloc.Project]; ok {
-			if wt, ok := project.Worktrees[alloc.Worktree]; ok {
-				var port int
-				if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
-					return fmt.Errorf("invalid port number '%s': %w", portStr, err)
-				}
-				newPorts := make([]int, 0, len(wt.Ports)-1)
-				for _, p := range wt.Ports {
-					if p != port {
-						newPorts = append(newPorts, p)
-					}
-				}
-				wt.Ports = newPorts
-			}
+		// Parse the port number
+		var port int
+		if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
+			return fmt.Errorf("invalid port number '%s': %w", portStr, err)
 		}
 
-		if err := config.Save(cfg); err != nil {
-			return fmt.Errorf("failed to save config: %w", err)
+		// Remove from port allocations
+		s.RemovePortAllocation(port)
+
+		// Also remove from worktree's port list
+		currentPorts := s.GetWorktreePorts(alloc.Project, alloc.Worktree)
+		if len(currentPorts) > 0 {
+			newPorts := make([]int, 0, len(currentPorts)-1)
+			for _, p := range currentPorts {
+				if p != port {
+					newPorts = append(newPorts, p)
+				}
+			}
+			if err := s.SetWorktreePorts(alloc.Project, alloc.Worktree, newPorts); err != nil {
+				// Worktree might not exist anymore, that's ok
+				_ = err
+			}
 		}
 
 		fmt.Printf("Freed port %s\n", portStr)

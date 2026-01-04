@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -44,10 +45,11 @@ This command will:
 			fmt.Printf("Initialized conductor at %s\n\n", configPath)
 		}
 
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
 
 		path := "."
 		if len(args) > 0 {
@@ -59,16 +61,23 @@ This command will:
 			return fmt.Errorf("invalid path: %w", err)
 		}
 
-		name, err := cfg.AddProject(absPath, projectAddPorts)
+		// Use BatchMutate to call the config's AddProject method which handles
+		// git validation, branch detection, port allocation, and project creation
+		var name string
+		var project *config.Project
+		err = s.BatchMutate(func(cfg *config.Config) error {
+			var addErr error
+			name, addErr = cfg.AddProject(absPath, projectAddPorts)
+			if addErr != nil {
+				return addErr
+			}
+			project = cfg.Projects[name]
+			return nil
+		})
 		if err != nil {
 			return err
 		}
 
-		if err := config.Save(cfg); err != nil {
-			return fmt.Errorf("failed to save config: %w", err)
-		}
-
-		project := cfg.Projects[name]
 		rootWt := project.Worktrees["root"]
 
 		fmt.Printf("Added project '%s'\n", name)
@@ -102,18 +111,21 @@ var projectRemoveCmd = &cobra.Command{
 	Long:  "Remove a project from conductor (does not delete files)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
 
 		name := args[0]
-		if err := cfg.RemoveProject(name); err != nil {
-			return err
-		}
 
-		if err := config.Save(cfg); err != nil {
-			return fmt.Errorf("failed to save config: %w", err)
+		// Use BatchMutate to call the config's RemoveProject method which handles
+		// freeing all ports for all worktrees
+		err = s.BatchMutate(func(cfg *config.Config) error {
+			return cfg.RemoveProject(name)
+		})
+		if err != nil {
+			return err
 		}
 
 		fmt.Printf("Removed project '%s'\n", name)
@@ -125,20 +137,22 @@ var projectListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all projects",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
 
-		if len(cfg.Projects) == 0 {
+		projects := s.GetAllProjects()
+		if len(projects) == 0 {
 			fmt.Println("No projects registered.")
 			fmt.Println("Use 'conductor project add .' to add a project.")
 			return nil
 		}
 
 		// Sort projects by name
-		names := make([]string, 0, len(cfg.Projects))
-		for name := range cfg.Projects {
+		names := make([]string, 0, len(projects))
+		for name := range projects {
 			names = append(names, name)
 		}
 		sort.Strings(names)
@@ -148,8 +162,14 @@ var projectListCmd = &cobra.Command{
 		_, _ = fmt.Fprintln(w, "----\t----\t---------\t-----")
 
 		for _, name := range names {
-			proj := cfg.Projects[name]
-			ports := cfg.GetProjectPorts(name)
+			proj := projects[name]
+			// Collect all ports from worktrees
+			var ports []int
+			for _, wt := range proj.Worktrees {
+				ports = append(ports, wt.Ports...)
+			}
+			sort.Ints(ports)
+
 			portRange := "-"
 			if len(ports) > 0 {
 				if len(ports) == 1 {
@@ -249,13 +269,14 @@ var projectShowCmd = &cobra.Command{
 	Short: "Show project details",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
 
 		name := args[0]
-		project, ok := cfg.GetProject(name)
+		project, ok := s.GetProject(name)
 		if !ok {
 			return fmt.Errorf("project '%s' not found", name)
 		}

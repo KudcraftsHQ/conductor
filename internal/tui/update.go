@@ -43,16 +43,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.Success {
 			m.setStatus("Failed to create worktree: "+msg.Err.Error(), true)
 			// Mark as failed
-			if msg.Worktree != nil {
-				msg.Worktree.SetupStatus = config.SetupStatusFailed
-			}
+			_ = m.store.SetWorktreeStatus(msg.ProjectName, msg.WorktreeName, config.SetupStatusFailed)
 			return m, nil
 		}
 		// Git worktree created, now run setup
 		m.setStatus("Created "+msg.WorktreeName+", running setup...", false)
-		if msg.Worktree != nil {
-			msg.Worktree.SetupStatus = config.SetupStatusRunning
-		}
+		_ = m.store.SetWorktreeStatus(msg.ProjectName, msg.WorktreeName, config.SetupStatusRunning)
 		projectName := msg.ProjectName
 		worktreeName := msg.WorktreeName
 		return m, func() tea.Msg {
@@ -79,14 +75,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case RetrySetupMsg:
 		// Update worktree status
-		if project := m.config.Projects[msg.ProjectName]; project != nil {
-			if wt := project.Worktrees[msg.WorktreeName]; wt != nil {
-				if msg.Success {
-					wt.SetupStatus = config.SetupStatusDone
-				} else {
-					wt.SetupStatus = config.SetupStatusFailed
-				}
-			}
+		if msg.Success {
+			_ = m.store.SetWorktreeStatus(msg.ProjectName, msg.WorktreeName, config.SetupStatusDone)
+		} else {
+			_ = m.store.SetWorktreeStatus(msg.ProjectName, msg.WorktreeName, config.SetupStatusFailed)
 		}
 		m.refreshWorktreeList()
 		if msg.Success {
@@ -103,11 +95,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case WorktreeArchivedMsg:
 		// Clear archive status
 		if msg.ProjectName != "" && msg.WorktreeName != "" {
-			if project := m.config.Projects[msg.ProjectName]; project != nil {
-				if wt := project.Worktrees[msg.WorktreeName]; wt != nil {
-					wt.ArchiveStatus = config.ArchiveStatusNone
-				}
-			}
+			_ = m.store.SetWorktreeArchiveStatus(msg.ProjectName, msg.WorktreeName, config.ArchiveStatusNone)
 		}
 
 		if msg.Err != nil {
@@ -192,8 +180,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.prList = msg.PRs
 			m.prCursor = 0
-			// Save updated PR data to config
-			_ = config.Save(m.config)
 		}
 		return m, nil
 
@@ -233,8 +219,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus("Error syncing PRs: "+msg.Err.Error(), true)
 		} else {
 			m.setStatus("PRs refreshed", false)
-			// Save updated PR data to config
-			_ = config.Save(m.config)
 		}
 		return m, nil
 
@@ -271,8 +255,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateDownloaded = true
 			m.setStatus("Updated to "+msg.Version+"! Restart to use new version.", false)
 			// Update config
-			m.config.Updates.LastVersion = msg.Version
-			_ = config.Save(m.config)
+			m.store.SetLastVersion(msg.Version)
 		}
 		return m, nil
 
@@ -370,7 +353,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Reload config to show new worktrees
 			if len(msg.NewWorktrees) > 0 {
 				m.refreshWorktreeList()
-				_ = config.Save(m.config)
 			}
 		}
 		return m, nil
@@ -382,17 +364,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setStatus("Tunnel active: "+msg.URL, false)
 			// Update worktree state
-			if project := m.config.Projects[msg.ProjectName]; project != nil {
-				if wt := project.Worktrees[msg.WorktreeName]; wt != nil {
-					wt.Tunnel = &config.TunnelState{
-						Active:    true,
-						Mode:      config.TunnelMode(msg.Mode),
-						URL:       msg.URL,
-						Port:      msg.Port,
-					}
-					_ = config.Save(m.config)
-				}
-			}
+			_ = m.store.SetTunnelState(msg.ProjectName, msg.WorktreeName, &config.TunnelState{
+				Active: true,
+				Mode:   config.TunnelMode(msg.Mode),
+				URL:    msg.URL,
+				Port:   msg.Port,
+			})
 		}
 		return m, nil
 
@@ -402,12 +379,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setStatus("Tunnel stopped", false)
 			// Clear tunnel state
-			if project := m.config.Projects[msg.ProjectName]; project != nil {
-				if wt := project.Worktrees[msg.WorktreeName]; wt != nil {
-					wt.Tunnel = nil
-					_ = config.Save(m.config)
-				}
-			}
+			_ = m.store.ClearTunnelState(msg.ProjectName, msg.WorktreeName)
 		}
 		return m, nil
 
@@ -416,6 +388,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Silent error - don't disturb user on startup
 		} else if msg.RestoredCount > 0 {
 			m.setStatus(fmt.Sprintf("Restored %d tunnel(s)", msg.RestoredCount), false)
+		}
+		return m, nil
+
+	case StatesRecoveredMsg:
+		if msg.RecoveredCount > 0 {
+			// Refresh the worktree list to show updated states
+			m.refreshWorktreeList()
+			m.setStatus(fmt.Sprintf("Recovered %d interrupted worktree(s) - use 'R' to retry", msg.RecoveredCount), false)
 		}
 		return m, nil
 	}
@@ -763,14 +743,14 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Check if worktree directory exists - if not, need to create it first
 				if !workspace.WorktreeExists(wt.Path) {
 					// Worktree creation failed, queue it for creation
-					wt.SetupStatus = config.SetupStatusCreating
+					_ = m.store.SetWorktreeStatus(projectName, worktreeName, config.SetupStatusCreating)
 					m.setStatus("Retrying worktree creation: "+wtName+"...", false)
 
 					workspace.GetWorktreeQueue().Enqueue(&workspace.WorktreeJob{
 						ProjectName:  projectName,
 						WorktreeName: worktreeName,
 						Worktree:     wt,
-						Config:       m.config,
+						Store:        m.store,
 						Manager:      m.wsManager,
 						OnComplete: func(success bool, err error) {
 							// This callback runs in background, TUI will update via refresh
@@ -780,7 +760,7 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 
 				// Worktree exists, just retry setup
-				wt.SetupStatus = config.SetupStatusRunning
+				_ = m.store.SetWorktreeStatus(projectName, worktreeName, config.SetupStatusRunning)
 				m.setStatus("Retrying setup: "+wtName+"...", false)
 
 				return m, func() tea.Msg {
@@ -994,12 +974,6 @@ func (m *Model) createWorktree() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Save config immediately so the entry appears in the list
-	if err := config.Save(m.config); err != nil {
-		m.createError = "Failed to save config: " + err.Error()
-		return m, nil
-	}
-
 	// Success - close dialog and show worktree list immediately
 	m.createError = ""
 	m.currentView = ViewWorktrees
@@ -1031,10 +1005,7 @@ func (m *Model) executeDelete() (tea.Model, tea.Cmd) {
 		wtName := m.deleteTarget
 
 		// Mark worktree as archiving
-		project := m.config.Projects[projectName]
-		if wt := project.Worktrees[wtName]; wt != nil {
-			wt.ArchiveStatus = config.ArchiveStatusRunning
-		}
+		_ = m.store.SetWorktreeArchiveStatus(projectName, wtName, config.ArchiveStatusRunning)
 
 		m.currentView = ViewWorktrees
 		m.deleteTarget = ""
@@ -1044,10 +1015,6 @@ func (m *Model) executeDelete() (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			err := m.wsManager.ArchiveWorktree(projectName, wtName)
 			if err != nil {
-				return WorktreeArchivedMsg{Err: err}
-			}
-
-			if err := config.Save(m.config); err != nil {
 				return WorktreeArchivedMsg{Err: err}
 			}
 
@@ -1070,10 +1037,6 @@ func (m *Model) executeDelete() (tea.Model, tea.Cmd) {
 				return WorktreeDeletedMsg{Err: err}
 			}
 
-			if err := config.Save(m.config); err != nil {
-				return WorktreeDeletedMsg{Err: err}
-			}
-
 			return WorktreeDeletedMsg{
 				ProjectName:  projectName,
 				WorktreeName: wtName,
@@ -1086,12 +1049,8 @@ func (m *Model) executeDelete() (tea.Model, tea.Cmd) {
 		m.deleteTargetType = ""
 
 		return m, func() tea.Msg {
-			err := m.config.RemoveProject(projectName)
+			err := m.store.RemoveProject(projectName)
 			if err != nil {
-				return ErrorMsg{Err: err}
-			}
-
-			if err := config.Save(m.config); err != nil {
 				return ErrorMsg{Err: err}
 			}
 
@@ -1380,23 +1339,12 @@ func (m *Model) handlePRsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 
-				// Save config
-				if err := config.Save(m.config); err != nil {
-					return WorktreeFromPRCreatedMsg{
-						ProjectName:  projectName,
-						WorktreeName: name,
-						PRNumber:     pr.Number,
-						Branch:       pr.HeadBranch,
-						Err:          err,
-					}
-				}
-
 				// Queue worktree creation
 				workspace.GetWorktreeQueue().Enqueue(&workspace.WorktreeJob{
 					ProjectName:  projectName,
 					WorktreeName: name,
 					Worktree:     worktree,
-					Config:       m.config,
+					Store:        m.store,
 					Manager:      m.wsManager,
 					OnComplete:   nil,
 				})

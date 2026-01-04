@@ -6,6 +6,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/tunnel"
 	"github.com/spf13/cobra"
 )
@@ -27,10 +28,13 @@ var tunnelStartCmd = &cobra.Command{
 	Long:  "Start a Cloudflare tunnel to expose a worktree's dev server",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
+
+		cfg := s.GetConfigSnapshot()
 
 		// Detect current project
 		cwd, err := os.Getwd()
@@ -43,7 +47,7 @@ var tunnelStartCmd = &cobra.Command{
 		}
 
 		wtName := args[0]
-		wt, ok := project.Worktrees[wtName]
+		wt, ok := s.GetWorktree(projectName, wtName)
 		if !ok {
 			return fmt.Errorf("worktree '%s' not found", wtName)
 		}
@@ -73,10 +77,9 @@ var tunnelStartCmd = &cobra.Command{
 			return fmt.Errorf("failed to start tunnel: %w", err)
 		}
 
-		// Update worktree tunnel state
-		wt.Tunnel = state
-		if err := config.Save(cfg); err != nil {
-			return fmt.Errorf("failed to save config: %w", err)
+		// Update worktree tunnel state via store
+		if err := s.SetTunnelState(projectName, wtName, state); err != nil {
+			return fmt.Errorf("failed to update tunnel state: %w", err)
 		}
 
 		fmt.Printf("Tunnel started for %s\n", wtName)
@@ -95,24 +98,26 @@ var tunnelStopCmd = &cobra.Command{
 	Long:  "Stop a running Cloudflare tunnel for a worktree",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
+
+		cfg := s.GetConfigSnapshot()
 
 		// Detect current project
 		cwd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("failed to get current directory: %w", err)
 		}
-		projectName, project, _, err := cfg.DetectProject(cwd)
+		projectName, _, _, err := cfg.DetectProject(cwd)
 		if err != nil {
 			return fmt.Errorf("not in a registered project")
 		}
 
 		wtName := args[0]
-		wt, ok := project.Worktrees[wtName]
-		if !ok {
+		if !s.WorktreeExists(projectName, wtName) {
 			return fmt.Errorf("worktree '%s' not found", wtName)
 		}
 
@@ -123,10 +128,9 @@ var tunnelStopCmd = &cobra.Command{
 			return fmt.Errorf("failed to stop tunnel: %w", err)
 		}
 
-		// Update worktree tunnel state
-		wt.Tunnel = nil
-		if err := config.Save(cfg); err != nil {
-			return fmt.Errorf("failed to save config: %w", err)
+		// Clear worktree tunnel state via store
+		if err := s.ClearTunnelState(projectName, wtName); err != nil {
+			return fmt.Errorf("failed to clear tunnel state: %w", err)
 		}
 
 		fmt.Printf("Tunnel stopped for %s\n", wtName)
@@ -139,17 +143,20 @@ var tunnelListCmd = &cobra.Command{
 	Short: "List active tunnels",
 	Long:  "List all active tunnels for the current project",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
+
+		cfg := s.GetConfigSnapshot()
 
 		// Detect current project
 		cwd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("failed to get current directory: %w", err)
 		}
-		projectName, project, _, err := cfg.DetectProject(cwd)
+		projectName, _, _, err := cfg.DetectProject(cwd)
 		if err != nil {
 			return fmt.Errorf("not in a registered project")
 		}
@@ -161,7 +168,8 @@ var tunnelListCmd = &cobra.Command{
 		_, _ = fmt.Fprintln(w, "--------\t----\t----\t---\t---")
 
 		count := 0
-		for name, wt := range project.Worktrees {
+		worktrees := s.GetAllWorktrees(projectName)
+		for name, wt := range worktrees {
 			if wt.Tunnel != nil && wt.Tunnel.Active {
 				// Verify process is still running
 				if tunnel.IsProcessRunning(wt.Tunnel.PID) {
@@ -187,23 +195,26 @@ var tunnelStatusCmd = &cobra.Command{
 	Long:  "Show detailed tunnel status for a worktree",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
+
+		cfg := s.GetConfigSnapshot()
 
 		// Detect current project
 		cwd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("failed to get current directory: %w", err)
 		}
-		projectName, project, _, err := cfg.DetectProject(cwd)
+		projectName, _, _, err := cfg.DetectProject(cwd)
 		if err != nil {
 			return fmt.Errorf("not in a registered project")
 		}
 
 		wtName := args[0]
-		wt, ok := project.Worktrees[wtName]
+		wt, ok := s.GetWorktree(projectName, wtName)
 		if !ok {
 			return fmt.Errorf("worktree '%s' not found", wtName)
 		}
@@ -239,24 +250,26 @@ var tunnelLogsCmd = &cobra.Command{
 	Long:  "Show recent logs from a worktree's tunnel process",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
+
+		cfg := s.GetConfigSnapshot()
 
 		// Detect current project
 		cwd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("failed to get current directory: %w", err)
 		}
-		projectName, project, _, err := cfg.DetectProject(cwd)
+		projectName, _, _, err := cfg.DetectProject(cwd)
 		if err != nil {
 			return fmt.Errorf("not in a registered project")
 		}
 
 		wtName := args[0]
-		_, ok := project.Worktrees[wtName]
-		if !ok {
+		if !s.WorktreeExists(projectName, wtName) {
 			return fmt.Errorf("worktree '%s' not found", wtName)
 		}
 

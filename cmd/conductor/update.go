@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/updater"
 	"github.com/spf13/cobra"
 )
@@ -78,11 +79,10 @@ func runUpdate(cmd *cobra.Command, args []string) {
 
 	// Update config with last check time
 	if config.Exists() {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err == nil {
-			cfg.Updates.LastCheck = time.Now()
-			cfg.Updates.LastVersion = updateInfo.LatestVersion
-			_ = config.Save(cfg)
+			s.SetUpdateInfo(time.Now(), updateInfo.LatestVersion)
+			_, _ = s.Close()
 		}
 	}
 

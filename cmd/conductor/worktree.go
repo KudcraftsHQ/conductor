@@ -9,6 +9,7 @@ import (
 
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/opener"
+	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -28,19 +29,16 @@ var worktreeCreateCmd = &cobra.Command{
 	Long:  "Creates a new git worktree with allocated ports",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
 
 		// Detect current project
 		cwd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("failed to get current directory: %w", err)
-		}
-		projectName, _, _, err := cfg.DetectProject(cwd)
-		if err != nil {
-			return fmt.Errorf("not in a registered project. Run 'conductor project add .' first")
 		}
 
 		branch := ""
@@ -48,14 +46,22 @@ var worktreeCreateCmd = &cobra.Command{
 			branch = args[0]
 		}
 
-		mgr := workspace.NewManager(cfg)
-		name, wt, err := mgr.CreateWorktree(projectName, branch, worktreeCreatePorts)
+		// Use BatchMutate to wrap manager operations since manager still uses config directly
+		var name string
+		var wt *config.Worktree
+		err = s.BatchMutate(func(cfg *config.Config) error {
+			projectName, _, _, detectErr := cfg.DetectProject(cwd)
+			if detectErr != nil {
+				return fmt.Errorf("not in a registered project. Run 'conductor project add .' first")
+			}
+
+			mgr := workspace.NewManager(cfg)
+			var createErr error
+			name, wt, createErr = mgr.CreateWorktree(projectName, branch, worktreeCreatePorts)
+			return createErr
+		})
 		if err != nil {
 			return err
-		}
-
-		if err := config.Save(cfg); err != nil {
-			return fmt.Errorf("failed to save config: %w", err)
 		}
 
 		fmt.Printf("Created worktree '%s'\n", name)
@@ -71,10 +77,13 @@ var worktreeListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List worktrees for current project",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
+
+		cfg := s.GetConfigSnapshot()
 
 		// Detect current project
 		cwd, err := os.Getwd()
@@ -135,10 +144,13 @@ var worktreeOpenCmd = &cobra.Command{
 	Long:  "Open a worktree in terminal or IDE",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
+
+		cfg := s.GetConfigSnapshot()
 
 		// Detect current project
 		cwd, err := os.Getwd()
@@ -195,29 +207,32 @@ var worktreeArchiveCmd = &cobra.Command{
 	Long:  "Remove a worktree and free its allocated ports",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
 
 		// Detect current project
 		cwd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("failed to get current directory: %w", err)
 		}
-		projectName, _, _, err := cfg.DetectProject(cwd)
-		if err != nil {
-			return fmt.Errorf("not in a registered project")
-		}
 
 		name := args[0]
-		mgr := workspace.NewManager(cfg)
-		if err := mgr.ArchiveWorktree(projectName, name); err != nil {
-			return err
-		}
 
-		if err := config.Save(cfg); err != nil {
-			return fmt.Errorf("failed to save config: %w", err)
+		// Use BatchMutate to wrap manager operations since manager still uses config directly
+		err = s.BatchMutate(func(cfg *config.Config) error {
+			projectName, _, _, detectErr := cfg.DetectProject(cwd)
+			if detectErr != nil {
+				return fmt.Errorf("not in a registered project")
+			}
+
+			mgr := workspace.NewManager(cfg)
+			return mgr.ArchiveWorktree(projectName, name)
+		})
+		if err != nil {
+			return err
 		}
 
 		fmt.Printf("Archived worktree '%s'\n", name)
@@ -231,10 +246,13 @@ var worktreeStatusCmd = &cobra.Command{
 	Long:  "Show port and environment information for a worktree",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load()
+		s, err := store.Load()
 		if err != nil {
 			return err
 		}
+		defer func() { _, _ = s.Close() }()
+
+		cfg := s.GetConfigSnapshot()
 
 		// Detect current project
 		cwd, err := os.Getwd()

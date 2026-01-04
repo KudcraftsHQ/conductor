@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.5.0] - 2026-01-05
+
+### Added
+- **Store-Based State Management**: New centralized store pattern for all configuration state (`internal/store/`)
+  - Thread-safe RWMutex-based concurrency - multiple readers, exclusive writers
+  - Auto-persistence with 100ms debouncing to batch rapid mutations
+  - Copy-on-read semantics - all getters return deep copies to prevent external mutations
+  - Exponential backoff retry logic (up to 3 retries) for transient save failures
+  - Clean API for projects, worktrees, ports, tunnels, and settings
+  - Batch mutation support for atomic multi-field updates
+  - Recovery helpers for interrupted worktrees and stale tunnels
+
+### Changed
+- All CLI commands and TUI now use the centralized Store instead of direct config manipulation
+- Worktree setup status updates now go through Store for proper persistence
+- Improved code organization with separate reader and mutation files
+
 ## [1.1.4.0] - 2026-01-04
 
 ### Changed

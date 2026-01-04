@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/store"
 )
 
 // WorktreeJob represents a worktree creation job
@@ -11,7 +12,7 @@ type WorktreeJob struct {
 	ProjectName  string
 	WorktreeName string
 	Worktree     *config.Worktree
-	Config       *config.Config
+	Store        *store.Store
 	Manager      *Manager
 	OnComplete   func(success bool, err error)
 }
@@ -80,7 +81,7 @@ func (q *WorktreeQueue) processQueue() {
 
 // processJob executes a single worktree creation job
 func (q *WorktreeQueue) processJob(job *WorktreeJob) {
-	project, ok := job.Config.GetProject(job.ProjectName)
+	project, ok := job.Store.GetProject(job.ProjectName)
 	if !ok {
 		if job.OnComplete != nil {
 			job.OnComplete(false, nil)
@@ -99,8 +100,7 @@ func (q *WorktreeQueue) processJob(job *WorktreeJob) {
 	}
 
 	if createErr != nil {
-		worktree.SetupStatus = config.SetupStatusFailed
-		_ = config.Save(job.Config)
+		_ = job.Store.SetWorktreeStatus(job.ProjectName, job.WorktreeName, config.SetupStatusFailed)
 		if job.OnComplete != nil {
 			job.OnComplete(false, createErr)
 		}
@@ -108,17 +108,15 @@ func (q *WorktreeQueue) processJob(job *WorktreeJob) {
 	}
 
 	// Git worktree created successfully, now run setup
-	worktree.SetupStatus = config.SetupStatusRunning
-	_ = config.Save(job.Config)
+	_ = job.Store.SetWorktreeStatus(job.ProjectName, job.WorktreeName, config.SetupStatusRunning)
 
 	// Run setup asynchronously (setup scripts can run in parallel)
 	_ = job.Manager.RunSetupAsync(job.ProjectName, job.WorktreeName, func(setupSuccess bool, setupErr error) {
 		if setupSuccess {
-			worktree.SetupStatus = config.SetupStatusDone
+			_ = job.Store.SetWorktreeStatus(job.ProjectName, job.WorktreeName, config.SetupStatusDone)
 		} else {
-			worktree.SetupStatus = config.SetupStatusFailed
+			_ = job.Store.SetWorktreeStatus(job.ProjectName, job.WorktreeName, config.SetupStatusFailed)
 		}
-		_ = config.Save(job.Config)
 
 		if job.OnComplete != nil {
 			job.OnComplete(setupSuccess, setupErr)

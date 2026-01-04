@@ -425,6 +425,56 @@ conductor worktree archive tokyo
 
 - Go 1.24+
 
+### Architecture: Store-Based State Management
+
+Conductor uses a centralized Store pattern for all configuration state management (`internal/store/`). This provides thread-safe access to `~/.conductor/conductor.json` with automatic persistence.
+
+**Key Features:**
+
+- **Thread-safe**: RWMutex-based concurrency - multiple readers, exclusive writers
+- **Auto-persistence**: Changes are automatically saved with 100ms debouncing to batch rapid mutations
+- **Copy-on-read**: All getters return deep copies to prevent external mutations
+- **Retry logic**: Exponential backoff (up to 3 retries) for transient save failures
+
+**Usage Pattern:**
+
+```go
+// Load the store (typically once at startup)
+store, err := store.Load()
+defer store.Close()  // Flushes pending saves
+
+// Read operations (thread-safe, returns copies)
+project := store.GetProject("myproject")
+worktrees := store.ListWorktrees("myproject")
+ports := store.GetWorktreePorts("myproject", "tokyo")
+
+// Write operations (auto-saved with debouncing)
+store.AddProject(project)
+store.SetWorktreeStatus("myproject", "tokyo", config.StatusDone)
+store.AllocatePorts("myproject", "tokyo", []int{3100, 3101})
+
+// Batch mutations (single lock acquisition)
+store.BatchMutate(func(cfg *config.Config) error {
+    cfg.Projects["myproject"].Worktrees["tokyo"].Status = "done"
+    cfg.PortAllocations[3100] = "myproject/tokyo"
+    return nil
+})
+
+// Force immediate save (bypasses debounce)
+store.ForceSave()
+```
+
+**Store Methods:**
+
+| Category | Methods |
+|----------|---------|
+| Projects | `GetProject`, `AddProject`, `RemoveProject`, `ListProjects`, `ProjectExists` |
+| Worktrees | `GetWorktree`, `AddWorktree`, `RemoveWorktree`, `SetWorktreeStatus`, `ArchiveWorktree`, `ListWorktrees` |
+| Ports | `GetWorktreePorts`, `AllocatePorts`, `FreePorts`, `IsPortAvailable`, `GetAllPortAllocations` |
+| Tunnels | `GetTunnelState`, `SetTunnelState`, `ClearTunnelState`, `IsTunnelActive` |
+| Settings | `GetDefaults`, `GetTunnelDomain`, `GetOpenWith`, `GetIDECommand` |
+| Recovery | `RecoverInterruptedWorktrees`, `CleanupStaleTunnels` |
+
 ### Building
 
 ```bash

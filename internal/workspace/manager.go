@@ -9,6 +9,7 @@ import (
 
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/github"
+	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/tunnel"
 )
@@ -16,11 +17,22 @@ import (
 // Manager handles worktree operations
 type Manager struct {
 	config *config.Config
+	store  *store.Store
 }
 
 // NewManager creates a new workspace manager
 func NewManager(cfg *config.Config) *Manager {
 	return &Manager{config: cfg}
+}
+
+// NewManagerWithStore creates a new workspace manager with a store
+func NewManagerWithStore(cfg *config.Config, s *store.Store) *Manager {
+	return &Manager{config: cfg, store: s}
+}
+
+// SetStore sets the store for the manager
+func (m *Manager) SetStore(s *store.Store) {
+	m.store = s
 }
 
 // CreateWorktree creates a new git worktree synchronously (for CLI use)
@@ -53,7 +65,11 @@ func (m *Manager) CreateWorktree(projectName, branch string, portCount int) (str
 		return "", nil, fmt.Errorf("failed to create git worktree: %w", gitErr)
 	}
 
-	worktree.SetupStatus = config.SetupStatusDone
+	if m.store != nil {
+		_ = m.store.SetWorktreeStatus(projectName, name, config.SetupStatusDone)
+	} else {
+		worktree.SetupStatus = config.SetupStatusDone
+	}
 	return name, worktree, nil
 }
 
@@ -107,6 +123,11 @@ func (m *Manager) PrepareWorktree(projectName, branch string, portCount int) (st
 	worktree := config.NewWorktree(worktreePath, branch, false, ports)
 	worktree.SetupStatus = config.SetupStatusCreating
 	project.Worktrees[name] = worktree
+
+	// Also update via store if available (for consistency)
+	if m.store != nil {
+		_ = m.store.SetWorktreeStatus(projectName, name, config.SetupStatusCreating)
+	}
 
 	return name, worktree, nil
 }
@@ -204,7 +225,11 @@ func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 	if worktree.Tunnel != nil && worktree.Tunnel.Active {
 		_ = tunnel.KillProcess(worktree.Tunnel.PID)
 		_ = tunnel.DeletePIDFile(projectName, worktreeName)
-		worktree.Tunnel = nil
+		if m.store != nil {
+			_ = m.store.ClearTunnelState(projectName, worktreeName)
+		} else {
+			worktree.Tunnel = nil
+		}
 	}
 
 	// Kill tmux window if it exists
@@ -223,9 +248,13 @@ func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 	m.config.FreeWorktreePorts(projectName, worktreeName)
 
 	// Mark as archived (keep in config for log viewing)
-	worktree.Archived = true
-	worktree.ArchivedAt = time.Now()
-	worktree.Ports = nil // Clear ports since they're freed
+	if m.store != nil {
+		_ = m.store.ArchiveWorktree(projectName, worktreeName)
+	} else {
+		worktree.Archived = true
+		worktree.ArchivedAt = time.Now()
+		worktree.Ports = nil // Clear ports since they're freed
+	}
 
 	return nil
 }
@@ -324,8 +353,12 @@ func (m *Manager) EnsureGitHubConfig(projectName string) error {
 		if err != nil {
 			return err
 		}
-		project.GitHubOwner = owner
-		project.GitHubRepo = repo
+		if m.store != nil {
+			_ = m.store.SetGitHubConfig(projectName, owner, repo)
+		} else {
+			project.GitHubOwner = owner
+			project.GitHubRepo = repo
+		}
 	}
 
 	return nil
@@ -355,7 +388,11 @@ func (m *Manager) SyncPRsForWorktree(projectName, worktreeName string) ([]config
 	}
 
 	// Update worktree with fetched PRs
-	worktree.PRs = prs
+	if m.store != nil {
+		_ = m.store.SetWorktreePRs(projectName, worktreeName, prs)
+	} else {
+		worktree.PRs = prs
+	}
 
 	return prs, nil
 }
@@ -382,7 +419,11 @@ func (m *Manager) SyncAllPRs(projectName string) error {
 			// Log error but continue with other worktrees
 			continue
 		}
-		project.Worktrees[worktreeName].PRs = prs
+		if m.store != nil {
+			_ = m.store.SetWorktreePRs(projectName, worktreeName, prs)
+		} else {
+			project.Worktrees[worktreeName].PRs = prs
+		}
 	}
 
 	return nil
@@ -444,20 +485,14 @@ func (m *Manager) CreateWorktreeFromPR(projectName string, pr config.PRInfo) (st
 		return "", nil, fmt.Errorf("failed to prepare worktree: %w", err)
 	}
 
-	// Save config with the new worktree entry
-	if err := config.Save(m.config); err != nil {
-		// Cleanup on save failure
-		m.config.FreeWorktreePorts(projectName, name)
-		delete(project.Worktrees, name)
-		return "", nil, fmt.Errorf("failed to save config: %w", err)
-	}
+	// Store auto-saves, no need for explicit config.Save
 
 	// Queue worktree creation
 	GetWorktreeQueue().Enqueue(&WorktreeJob{
 		ProjectName:  projectName,
 		WorktreeName: name,
 		Worktree:     worktree,
-		Config:       m.config,
+		Store:        m.store,
 		Manager:      m,
 		OnComplete:   nil,
 	})
@@ -535,21 +570,14 @@ func (m *Manager) AutoSetupClaudePRs(projectName string) (*AutoSetupClaudePRsRes
 			continue
 		}
 
-		// Save config with the new worktree entry
-		if err := config.Save(m.config); err != nil {
-			// Cleanup on save failure
-			m.config.FreeWorktreePorts(projectName, name)
-			delete(project.Worktrees, name)
-			result.Errors = append(result.Errors, fmt.Sprintf("Failed to save config for %s: %v", pr.HeadBranch, err))
-			continue
-		}
+		// Store auto-saves, no need for explicit config.Save
 
 		// Queue worktree creation to avoid git lock conflicts when creating multiple worktrees
 		GetWorktreeQueue().Enqueue(&WorktreeJob{
 			ProjectName:  projectName,
 			WorktreeName: name,
 			Worktree:     worktree,
-			Config:       m.config,
+			Store:        m.store,
 			Manager:      m,
 			OnComplete:   nil, // We don't need individual callbacks for auto-setup
 		})
@@ -569,6 +597,75 @@ func isClaudeBranch(branch string) bool {
 type GitStatusInfo struct {
 	IsDirty       bool
 	CommitsBehind int
+}
+
+// RecoverInterruptedStates checks all worktrees and fixes states that were interrupted
+// (e.g., when TUI was closed during worktree creation or setup).
+// Returns the number of worktrees that were recovered to failed state.
+func (m *Manager) RecoverInterruptedStates() int {
+	// If store is available, use its recovery method (handles locking and auto-save)
+	if m.store != nil {
+		return m.store.RecoverInterruptedWorktrees()
+	}
+
+	// Fallback for when store is not available
+	recovered := 0
+
+	for _, project := range m.config.Projects {
+		for _, worktree := range project.Worktrees {
+			// Skip archived worktrees
+			if worktree.Archived {
+				continue
+			}
+
+			// Check for interrupted states
+			switch worktree.SetupStatus {
+			case config.SetupStatusCreating:
+				// Worktree was being created when TUI closed
+				if !WorktreeExists(worktree.Path) {
+					// Directory doesn't exist - creation was interrupted
+					worktree.SetupStatus = config.SetupStatusFailed
+					recovered++
+				} else {
+					// Directory exists - check if it's a valid git worktree
+					gitWorktrees, err := GitWorktreeList(project.Path)
+					if err != nil {
+						// Can't verify, mark as failed to be safe
+						worktree.SetupStatus = config.SetupStatusFailed
+						recovered++
+						continue
+					}
+
+					// Check if this path is in the git worktree list
+					isValidWorktree := false
+					for _, wtPath := range gitWorktrees {
+						if wtPath == worktree.Path {
+							isValidWorktree = true
+							break
+						}
+					}
+
+					if isValidWorktree {
+						// Git worktree exists, but setup never ran - mark as failed so user can retry
+						worktree.SetupStatus = config.SetupStatusFailed
+						recovered++
+					} else {
+						// Directory exists but not a valid git worktree - mark as failed
+						worktree.SetupStatus = config.SetupStatusFailed
+						recovered++
+					}
+				}
+
+			case config.SetupStatusRunning:
+				// Setup was running when TUI closed - mark as failed so user can retry
+				// The worktree exists but setup may be incomplete
+				worktree.SetupStatus = config.SetupStatusFailed
+				recovered++
+			}
+		}
+	}
+
+	return recovered
 }
 
 // FetchGitStatusForProject fetches git status for all worktrees in a project

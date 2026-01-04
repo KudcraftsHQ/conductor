@@ -161,8 +161,8 @@ func (m *NamedTunnelManager) AddRoute(worktreeName string, port int) (string, er
 		return "", fmt.Errorf("failed to save config: %w", err)
 	}
 
-	// Route DNS using cloudflared CLI
-	if err := m.cli.RouteDNS(m.tunnelName, hostname); err != nil {
+	// Route DNS using cloudflared CLI (use tunnel ID for reliability)
+	if err := m.cli.RouteDNS(m.tunnelID, hostname); err != nil {
 		return "", fmt.Errorf("failed to route DNS: %w", err)
 	}
 

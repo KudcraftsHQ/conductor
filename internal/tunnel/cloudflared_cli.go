@@ -90,7 +90,8 @@ func (c *CloudflaredCLI) FindTunnel(name string) (*CLITunnelInfo, error) {
 	}
 
 	for _, t := range tunnels {
-		if t.Name == name && t.DeletedAt == "" {
+		// DeletedAt is "0001-01-01T00:00:00Z" (Go zero time) when not deleted
+		if t.Name == name && (t.DeletedAt == "" || t.DeletedAt == "0001-01-01T00:00:00Z") {
 			return &t, nil
 		}
 	}

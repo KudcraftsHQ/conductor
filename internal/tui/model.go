@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/tui/keys"
 	"github.com/hammashamzah/conductor/internal/tui/styles"
 	"github.com/hammashamzah/conductor/internal/tunnel"
@@ -23,8 +24,9 @@ const updateCheckInterval = 6 * time.Hour
 
 // Model is the main TUI state
 type Model struct {
-	// Config
-	config *config.Config
+	// Config and Store
+	config *config.Config // Keep for reads during transition
+	store  *store.Store   // Store for state mutations
 
 	// Version info
 	version          string
@@ -122,6 +124,14 @@ func NewModel(cfg *config.Config) *Model {
 
 // NewModelWithVersion creates a new TUI model with version info
 func NewModelWithVersion(cfg *config.Config, version string) *Model {
+	return NewModelWithStore(cfg, store.New(cfg), version)
+}
+
+// NewModelWithStore creates a new TUI model with an existing store (for testing)
+func NewModelWithStore(cfg *config.Config, s *store.Store, version string) *Model {
+	// Initialize the global setup manager with the store
+	workspace.InitSetupManager(s)
+
 	ti := textinput.New()
 	ti.Placeholder = "branch-name"
 	ti.CharLimit = 100
@@ -135,11 +145,12 @@ func NewModelWithVersion(cfg *config.Config, version string) *Model {
 	h := help.New()
 	h.ShowAll = false
 
-	s := spinner.New()
-	s.Spinner = spinner.Dot
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
 
 	m := &Model{
 		config:          cfg,
+		store:           s,
 		version:         version,
 		styles:          styles.DefaultStyles(),
 		currentView:     ViewProjects,
@@ -148,7 +159,7 @@ func NewModelWithVersion(cfg *config.Config, version string) *Model {
 		createInput:     ti,
 		createPortInput: pi,
 		wsManager:       workspace.NewManager(cfg),
-		spinner:         s,
+		spinner:         sp,
 		gitStatusCache:  make(map[string]*workspace.GitStatusInfo),
 		tunnelManager:   tunnel.NewManager(cfg),
 	}
@@ -165,7 +176,17 @@ func (m *Model) Init() tea.Cmd {
 		m.scheduleClaudePRScan(),
 		m.scheduleUpdateCheck(),
 		m.restoreTunnels(),
+		m.recoverInterruptedStates(),
 	)
+}
+
+// recoverInterruptedStates checks for worktrees that were left in creating/running state
+// when the TUI was closed, and marks them as failed so users can retry
+func (m *Model) recoverInterruptedStates() tea.Cmd {
+	return func() tea.Msg {
+		recovered := m.wsManager.RecoverInterruptedStates()
+		return StatesRecoveredMsg{RecoveredCount: recovered}
+	}
 }
 
 // restoreTunnels restores tunnel state from PID files on TUI startup
@@ -176,17 +197,17 @@ func (m *Model) restoreTunnels() tea.Cmd {
 			return TunnelRestoredMsg{Err: err}
 		}
 
-		// Update config with restored tunnel states
-		for key, state := range restored {
-			// Parse project/worktree from key
-			for projectName, project := range m.config.Projects {
-				for worktreeName, wt := range project.Worktrees {
-					if projectName+"/"+worktreeName == key {
-						wt.Tunnel = state
-					}
-				}
-			}
+		// Restore active tunnel states using the store
+		m.store.RestoreTunnelStates(restored)
+
+		// Build map of active tunnels for cleanup
+		activeTunnels := make(map[string]bool, len(restored))
+		for key := range restored {
+			activeTunnels[key] = true
 		}
+
+		// Clean up stale tunnels (marked active but no longer running)
+		m.store.CleanupStaleTunnels(activeTunnels)
 
 		return TunnelRestoredMsg{RestoredCount: len(restored)}
 	}

@@ -3,7 +3,6 @@ package tui
 import (
 	"time"
 
-	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/updater"
 )
 
@@ -16,12 +15,12 @@ func (m *Model) performUpdateCheckImpl() UpdateCheckMsg {
 		return UpdateCheckMsg{Err: err}
 	}
 
-	// Update last check time in config
-	m.config.Updates.LastCheck = time.Now()
+	// Update last check time in config using store (auto-saves)
 	if updateInfo.UpdateAvailable {
-		m.config.Updates.LastVersion = updateInfo.LatestVersion
+		m.store.SetUpdateInfo(time.Now(), updateInfo.LatestVersion)
+	} else {
+		m.store.SetLastUpdateCheck(time.Now())
 	}
-	_ = config.Save(m.config)
 
 	// If auto-download is enabled and update is available, download it
 	if updateInfo.UpdateAvailable && m.config.Updates.AutoDownload {
@@ -48,8 +47,7 @@ func (m *Model) downloadAndInstallUpdate(updateInfo *updater.UpdateInfo) {
 	// So we'll just update the config here. The actual notification will happen
 	// on next update check or manual refresh.
 	if err == nil {
-		m.config.Updates.LastVersion = updateInfo.LatestVersion
+		m.store.SetLastVersion(updateInfo.LatestVersion)
 		m.updateDownloaded = true
-		_ = config.Save(m.config)
 	}
 }
