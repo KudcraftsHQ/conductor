@@ -14,6 +14,7 @@ type Manager struct {
 	mu            sync.RWMutex
 	activeTunnels map[string]*QuickTunnel        // key: "project/worktree"
 	namedManagers map[string]*NamedTunnelManager // key: projectName
+	cli           *CloudflaredCLI
 	ctx           context.Context
 	cancel        context.CancelFunc
 }
@@ -25,6 +26,7 @@ func NewManager(cfg *config.Config) *Manager {
 		config:        cfg,
 		activeTunnels: make(map[string]*QuickTunnel),
 		namedManagers: make(map[string]*NamedTunnelManager),
+		cli:           NewCloudflaredCLI(),
 		ctx:           ctx,
 		cancel:        cancel,
 	}
@@ -69,17 +71,9 @@ func (m *Manager) StartNamedTunnel(projectName, worktreeName string, port int, p
 		return nil, fmt.Errorf("no domain configured. Set tunnel.domain in conductor.json or global config")
 	}
 
-	// Get API token
-	apiToken := GetAPIToken(m.config.Defaults.Tunnel.CloudflareToken)
-	if apiToken == "" {
-		return nil, fmt.Errorf("no Cloudflare API token. Set CLOUDFLARE_API_TOKEN env var or tunnel.cloudflareToken in config")
-	}
-
-	// Get account and zone IDs
-	accountID := m.config.Defaults.Tunnel.AccountID
-	zoneID := m.config.Defaults.Tunnel.ZoneID
-	if accountID == "" || zoneID == "" {
-		return nil, fmt.Errorf("cloudflare account ID and zone ID required: set tunnel.accountId and tunnel.zoneId in config")
+	// Validate cloudflared auth
+	if err := m.cli.ValidateAuth(); err != nil {
+		return nil, err
 	}
 
 	m.mu.Lock()
@@ -96,11 +90,8 @@ func (m *Manager) StartNamedTunnel(projectName, worktreeName string, port int, p
 			tunnelName = projectConfig.Tunnel.TunnelName
 		}
 
-		// Create Cloudflare client
-		cfClient := NewCloudflareClient(accountID, zoneID, apiToken)
-
 		var err error
-		namedMgr, err = NewNamedTunnelManager(projectName, tunnelID, tunnelName, domain, cfClient)
+		namedMgr, err = NewNamedTunnelManager(projectName, tunnelID, tunnelName, domain, m.cli)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create named tunnel manager: %w", err)
 		}
@@ -334,4 +325,19 @@ func GenerateTunnelHostname(worktreeName string, port int, domain string) string
 		return ""
 	}
 	return fmt.Sprintf("%s-%d.%s", worktreeName, port, domain)
+}
+
+// IsCloudflaredAuthenticated checks if cloudflared is authenticated
+func (m *Manager) IsCloudflaredAuthenticated() bool {
+	return m.cli.IsAuthenticated()
+}
+
+// IsCloudflaredInstalled checks if cloudflared is installed
+func (m *Manager) IsCloudflaredInstalled() bool {
+	return m.cli.IsInstalled()
+}
+
+// GetCloudflaredAuthError returns a descriptive error for auth issues
+func (m *Manager) GetCloudflaredAuthError() error {
+	return m.cli.ValidateAuth()
 }

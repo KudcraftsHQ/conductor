@@ -33,6 +33,7 @@ internal/
 ├── runner/        Script execution with environment injection
 ├── opener/        IDE & terminal launchers (Cursor, VS Code, iTerm)
 ├── tmux/          Tmux session management
+├── tunnel/        Cloudflare tunnel management (quick & named tunnels)
 └── github/        GitHub PR integration via gh CLI
 ```
 
@@ -72,6 +73,10 @@ Tests use `testify` for assertions. Test files exist in:
 - `internal/config/ports_test.go` - port allocation algorithm
 - `internal/runner/env_test.go` - environment variable building
 - `internal/workspace/cities_test.go` - city name generation
+- `internal/tunnel/config_test.go` - tunnel config and ingress rules
+- `internal/tunnel/process_test.go` - PID file operations
+- `internal/tunnel/cloudflared_cli_test.go` - cloudflared CLI wrapper
+- `internal/tunnel/manager_test.go` - tunnel manager functions
 
 ## Dependencies
 

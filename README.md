@@ -27,6 +27,7 @@ Conductor solves these problems by:
 - **tmux** - Required for the TUI to work
 - **git** - For worktree operations
 - **gh** (optional) - GitHub CLI for PR integration
+- **cloudflared** (optional) - For Cloudflare tunnel support
 
 ## Installation
 
@@ -133,6 +134,8 @@ conductor
 - `m` - View merge requests/PRs
 - `w` - Create worktree from PR (in PR view)
 - `A` - Auto-setup Claude PRs
+- `T` - Toggle tunnel for worktree
+- `y` - Copy tunnel URL to clipboard
 - `p` - View ports
 - `r` - Refresh
 - `/` - Filter
@@ -216,6 +219,54 @@ conductor run
 conductor status
 ```
 
+#### Cloudflare Tunnels
+
+Expose your local dev server to the internet via Cloudflare tunnels:
+
+```bash
+# Quick tunnel (random URL, no setup required)
+conductor tunnel start tokyo
+
+# Named tunnel (custom domain)
+conductor tunnel start tokyo --named
+
+# Stop a tunnel
+conductor tunnel stop tokyo
+
+# List active tunnels
+conductor tunnel list
+
+# View tunnel logs
+conductor tunnel logs tokyo
+
+# Setup guide
+conductor tunnel setup
+```
+
+**Quick Tunnels** require no configuration - just start one and get a random `*.trycloudflare.com` URL.
+
+**Named Tunnels** require one-time setup:
+
+```bash
+# 1. Install cloudflared
+brew install cloudflared
+
+# 2. Login to Cloudflare (opens browser)
+cloudflared tunnel login
+
+# 3. Configure your domain in conductor
+# Add to ~/.conductor/conductor.json:
+{
+  "defaults": {
+    "tunnel": {
+      "domain": "yourdomain.com"
+    }
+  }
+}
+```
+
+Named tunnel URLs follow the pattern: `<worktree>-<port>.<domain>` (e.g., `tokyo-3100.yourdomain.com`)
+
 ## Configuration
 
 ### Global Configuration
@@ -285,6 +336,10 @@ Conductor injects these environment variables when running scripts:
 | `CONDUCTOR_PORT_0` | First port | `3100` |
 | `CONDUCTOR_PORT_1` | Second port | `3101` |
 | `CONDUCTOR_PORT_WEB` | Labeled port (if configured) | `3100` |
+| `CONDUCTOR_TUNNEL_ACTIVE` | Tunnel is active | `true` or `false` |
+| `CONDUCTOR_TUNNEL_URL` | Tunnel URL | `https://tokyo-3100.example.com` |
+| `CONDUCTOR_TUNNEL_PORT` | Tunneled port | `3100` |
+| `CONDUCTOR_TUNNEL_MODE` | Tunnel mode | `quick` or `named` |
 
 ## How It Works
 

@@ -22,7 +22,7 @@ type NamedTunnelManager struct {
 	configPath   string
 	credsPath    string
 	process      *NamedTunnelProcess
-	cfClient     *CloudflareClient
+	cli          *CloudflaredCLI
 	activeRoutes map[string]*RouteInfo // key: worktreeName
 }
 
@@ -40,7 +40,6 @@ type RouteInfo struct {
 	WorktreeName string
 	Hostname     string
 	Port         int
-	DNSRecordID  string
 	CreatedAt    time.Time
 }
 
@@ -50,16 +49,17 @@ func NewNamedTunnelManager(
 	tunnelID string,
 	tunnelName string,
 	domain string,
-	cfClient *CloudflareClient,
+	cli *CloudflaredCLI,
 ) (*NamedTunnelManager, error) {
 	configPath, err := ConfigPath(projectName)
 	if err != nil {
 		return nil, err
 	}
 
-	credsPath, err := CredentialsPath(projectName, tunnelID)
-	if err != nil {
-		return nil, err
+	// Credentials path will be set when we know the tunnel ID
+	credsPath := ""
+	if tunnelID != "" {
+		credsPath = cli.GetCredentialsPath(tunnelID)
 	}
 
 	return &NamedTunnelManager{
@@ -69,7 +69,7 @@ func NewNamedTunnelManager(
 		domain:       domain,
 		configPath:   configPath,
 		credsPath:    credsPath,
-		cfClient:     cfClient,
+		cli:          cli,
 		activeRoutes: make(map[string]*RouteInfo),
 	}, nil
 }
@@ -79,29 +79,50 @@ func (m *NamedTunnelManager) EnsureTunnel() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if tunnel exists
-	if m.tunnelID != "" {
-		_, err := m.cfClient.GetTunnel(m.tunnelID)
-		if err == nil {
-			return nil // Tunnel exists
-		}
-		// Tunnel doesn't exist, will create new one
+	// Check if cloudflared is authenticated
+	if err := m.cli.ValidateAuth(); err != nil {
+		return err
 	}
 
-	// Create new tunnel
-	tunnelName := fmt.Sprintf("conductor-%s", m.projectName)
-	tunnel, creds, err := m.cfClient.CreateTunnel(tunnelName)
+	// Generate tunnel name if not set
+	if m.tunnelName == "" {
+		m.tunnelName = fmt.Sprintf("conductor-%s", m.projectName)
+	}
+
+	// Check if tunnel already exists by ID or name
+	if m.tunnelID != "" {
+		// Verify tunnel still exists
+		tunnel, err := m.cli.FindTunnel(m.tunnelName)
+		if err == nil && tunnel != nil && tunnel.ID == m.tunnelID {
+			// Update credentials path
+			m.credsPath = m.cli.GetCredentialsPath(m.tunnelID)
+			return nil
+		}
+		// Tunnel doesn't exist anymore, will create new one
+		m.tunnelID = ""
+	}
+
+	// Try to find existing tunnel by name
+	tunnel, err := m.cli.FindTunnel(m.tunnelName)
+	if err != nil {
+		return fmt.Errorf("failed to check existing tunnels: %w", err)
+	}
+
+	if tunnel != nil {
+		// Use existing tunnel
+		m.tunnelID = tunnel.ID
+		m.credsPath = m.cli.GetCredentialsPath(m.tunnelID)
+		return nil
+	}
+
+	// Create new tunnel using CLI
+	tunnelID, err := m.cli.CreateTunnel(m.tunnelName)
 	if err != nil {
 		return fmt.Errorf("failed to create tunnel: %w", err)
 	}
 
-	m.tunnelID = tunnel.ID
-	m.tunnelName = tunnel.Name
-
-	// Save credentials file
-	if err := m.saveCredentials(creds); err != nil {
-		return fmt.Errorf("failed to save credentials: %w", err)
-	}
+	m.tunnelID = tunnelID
+	m.credsPath = m.cli.GetCredentialsPath(m.tunnelID)
 
 	// Initialize config file
 	cfg := NewTunnelConfig(m.tunnelID, m.credsPath)
@@ -140,15 +161,9 @@ func (m *NamedTunnelManager) AddRoute(worktreeName string, port int) (string, er
 		return "", fmt.Errorf("failed to save config: %w", err)
 	}
 
-	// Create DNS record
-	record, err := m.cfClient.CreateDNSRecord(hostname, m.tunnelID)
-	if err != nil {
-		// Try to find existing record
-		existing, findErr := m.cfClient.FindDNSRecord(hostname)
-		if findErr != nil || existing == nil {
-			return "", fmt.Errorf("failed to create DNS record: %w", err)
-		}
-		record = existing
+	// Route DNS using cloudflared CLI
+	if err := m.cli.RouteDNS(m.tunnelName, hostname); err != nil {
+		return "", fmt.Errorf("failed to route DNS: %w", err)
 	}
 
 	// Track the route
@@ -156,7 +171,6 @@ func (m *NamedTunnelManager) AddRoute(worktreeName string, port int) (string, er
 		WorktreeName: worktreeName,
 		Hostname:     hostname,
 		Port:         port,
-		DNSRecordID:  record.ID,
 		CreatedAt:    time.Now(),
 	}
 
@@ -198,10 +212,8 @@ func (m *NamedTunnelManager) RemoveRoute(worktreeName string) error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	// Delete DNS record
-	if route.DNSRecordID != "" {
-		_ = m.cfClient.DeleteDNSRecord(route.DNSRecordID)
-	}
+	// Note: We don't delete DNS records - they're managed by cloudflared
+	// and will be cleaned up when the tunnel is deleted
 
 	delete(m.activeRoutes, worktreeName)
 
@@ -224,7 +236,7 @@ func (m *NamedTunnelManager) StartTunnel(ctx context.Context) error {
 	}
 
 	// Check if cloudflared is installed
-	if _, err := exec.LookPath("cloudflared"); err != nil {
+	if !m.cli.IsInstalled() {
 		return fmt.Errorf("cloudflared not found. Install with: brew install cloudflared")
 	}
 
@@ -356,29 +368,6 @@ func (m *NamedTunnelManager) reloadTunnel() error {
 	return m.StartTunnel(context.Background())
 }
 
-// saveCredentials saves the tunnel credentials to a JSON file
-func (m *NamedTunnelManager) saveCredentials(creds *TunnelCredentials) error {
-	configDir, err := ConfigDir(m.projectName)
-	if err != nil {
-		return err
-	}
-
-	// Ensure directory exists
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return err
-	}
-
-	// Write credentials file
-	data := fmt.Sprintf(`{
-  "AccountTag": "%s",
-  "TunnelID": "%s",
-  "TunnelName": "%s",
-  "TunnelSecret": "%s"
-}`, creds.AccountTag, creds.TunnelID, creds.TunnelName, creds.TunnelSecret)
-
-	return os.WriteFile(m.credsPath, []byte(data), 0600)
-}
-
 // GetLogs returns the tunnel process logs
 func (m *NamedTunnelManager) GetLogs() []string {
 	m.mu.RLock()
@@ -388,4 +377,18 @@ func (m *NamedTunnelManager) GetLogs() []string {
 		return nil
 	}
 	return m.process.LogBuffer.Lines()
+}
+
+// GetTunnelID returns the tunnel ID
+func (m *NamedTunnelManager) GetTunnelID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.tunnelID
+}
+
+// GetTunnelName returns the tunnel name
+func (m *NamedTunnelManager) GetTunnelName() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.tunnelName
 }

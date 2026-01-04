@@ -78,10 +78,12 @@ type TunnelState struct {
 
 // TunnelDefaults contains global tunnel defaults
 type TunnelDefaults struct {
-	Domain          string `json:"domain,omitempty"`          // Fallback domain e.g., "kudcrafts.com"
-	CloudflareToken string `json:"cloudflareToken,omitempty"` // API token (or use CLOUDFLARE_API_TOKEN env)
-	AccountID       string `json:"accountId,omitempty"`       // Cloudflare account ID
-	ZoneID          string `json:"zoneId,omitempty"`          // DNS zone ID for the domain
+	Domain string `json:"domain,omitempty"` // Fallback domain e.g., "kudcrafts.com"
+	// Note: Authentication is handled by cloudflared CLI via `cloudflared tunnel login`
+	// The following fields are deprecated and kept for backwards compatibility
+	CloudflareToken string `json:"cloudflareToken,omitempty"` // Deprecated: use cloudflared tunnel login
+	AccountID       string `json:"accountId,omitempty"`       // Deprecated: use cloudflared tunnel login
+	ZoneID          string `json:"zoneId,omitempty"`          // Deprecated: use cloudflared tunnel login
 }
 
 // ProjectTunnelConfig contains project-level tunnel settings

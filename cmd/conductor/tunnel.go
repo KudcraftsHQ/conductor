@@ -280,39 +280,68 @@ var tunnelLogsCmd = &cobra.Command{
 
 var tunnelSetupCmd = &cobra.Command{
 	Use:   "setup",
-	Short: "Configure Cloudflare credentials",
-	Long:  "Configure Cloudflare API token and other credentials for named tunnels",
+	Short: "Setup cloudflared for named tunnels",
+	Long:  "Guide to setup cloudflared authentication for named tunnels",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("To use named tunnels, you need to configure Cloudflare credentials.")
+		cli := tunnel.NewCloudflaredCLI()
+
+		// Check if cloudflared is installed
+		if !cli.IsInstalled() {
+			fmt.Println("cloudflared is not installed.")
+			fmt.Println("")
+			fmt.Println("Install with:")
+			fmt.Println("  brew install cloudflared")
+			fmt.Println("")
+			return nil
+		}
+
+		fmt.Println("cloudflared is installed.")
 		fmt.Println("")
-		fmt.Println("1. Create a Cloudflare API token with these permissions:")
-		fmt.Println("   - Zone:Zone:Read")
-		fmt.Println("   - Zone:DNS:Edit")
-		fmt.Println("   - Account:Cloudflare Tunnel:Edit")
-		fmt.Println("")
-		fmt.Println("2. Set the environment variable:")
-		fmt.Println("   export CLOUDFLARE_API_TOKEN=your_token_here")
-		fmt.Println("")
-		fmt.Println("3. Add to your global conductor config (~/.conductor/conductor.json):")
-		fmt.Println("   {")
-		fmt.Println("     \"defaults\": {")
-		fmt.Println("       \"tunnel\": {")
-		fmt.Println("         \"domain\": \"your-domain.com\",")
-		fmt.Println("         \"accountId\": \"your_account_id\",")
-		fmt.Println("         \"zoneId\": \"your_zone_id\"")
-		fmt.Println("       }")
-		fmt.Println("     }")
-		fmt.Println("   }")
-		fmt.Println("")
-		fmt.Println("4. Or configure per-project in conductor.json:")
-		fmt.Println("   {")
-		fmt.Println("     \"tunnel\": {")
-		fmt.Println("       \"domain\": \"your-domain.com\"")
-		fmt.Println("     }")
-		fmt.Println("   }")
-		fmt.Println("")
-		fmt.Println("Named tunnel URLs follow the pattern: <worktree>-<port>.<domain>")
-		fmt.Println("Example: tokyo-3100.your-domain.com")
+
+		// Check if authenticated
+		if cli.IsAuthenticated() {
+			fmt.Println("cloudflared is authenticated.")
+			fmt.Println("")
+			fmt.Println("You're all set! To use named tunnels, just configure your domain:")
+			fmt.Println("")
+			fmt.Println("  Add to ~/.conductor/conductor.json:")
+			fmt.Println("  {")
+			fmt.Println("    \"defaults\": {")
+			fmt.Println("      \"tunnel\": {")
+			fmt.Println("        \"domain\": \"your-domain.com\"")
+			fmt.Println("      }")
+			fmt.Println("    }")
+			fmt.Println("  }")
+			fmt.Println("")
+			fmt.Println("  Or per-project in conductor.json:")
+			fmt.Println("  {")
+			fmt.Println("    \"tunnel\": {")
+			fmt.Println("      \"domain\": \"your-domain.com\"")
+			fmt.Println("    }")
+			fmt.Println("  }")
+			fmt.Println("")
+			fmt.Println("Named tunnel URLs follow the pattern: <worktree>-<port>.<domain>")
+			fmt.Println("Example: tokyo-3100.your-domain.com")
+		} else {
+			fmt.Println("cloudflared is NOT authenticated.")
+			fmt.Println("")
+			fmt.Println("To authenticate, run:")
+			fmt.Println("  cloudflared tunnel login")
+			fmt.Println("")
+			fmt.Println("This will open a browser where you can authorize cloudflared")
+			fmt.Println("to access your Cloudflare account and manage tunnels/DNS.")
+			fmt.Println("")
+			fmt.Println("After login, configure your domain in conductor:")
+			fmt.Println("")
+			fmt.Println("  Add to ~/.conductor/conductor.json:")
+			fmt.Println("  {")
+			fmt.Println("    \"defaults\": {")
+			fmt.Println("      \"tunnel\": {")
+			fmt.Println("        \"domain\": \"your-domain.com\"")
+			fmt.Println("      }")
+			fmt.Println("    }")
+			fmt.Println("  }")
+		}
 
 		return nil
 	},

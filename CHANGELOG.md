@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4.0] - 2026-01-04
+
+### Changed
+- **Simplified Named Tunnel Authentication**: Named tunnels now use `cloudflared tunnel login` instead of manual API token setup
+  - No more manual API token, account ID, or zone ID configuration
+  - Uses existing cloudflared authentication from `~/.cloudflared/cert.pem`
+  - Just run `cloudflared tunnel login` once and configure your domain
+  - TUI tunnel modal now shows authentication status and helpful hints
+  - Deprecated `cloudflareToken`, `accountId`, `zoneId` config fields (kept for backwards compatibility)
+
+### Added
+- **Tunnel Package Tests**: Comprehensive test coverage for the tunnel package
+  - Tests for tunnel config (ingress rules, hostname generation)
+  - Tests for PID file operations and process management
+  - Tests for cloudflared CLI wrapper (CI-safe with skip when not installed)
+  - Tests for tunnel manager helper functions
+
 ## [1.1.3.0] - 2026-01-03
 
 ### Added

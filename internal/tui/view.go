@@ -1155,7 +1155,7 @@ func (m *Model) renderLogsView() string {
 }
 
 func (m *Model) renderTunnelModal() string {
-	width := 50
+	width := 55
 	if width > m.width-4 {
 		width = m.width - 4
 	}
@@ -1171,6 +1171,10 @@ func (m *Model) renderTunnelModal() string {
 		content.WriteString(fmt.Sprintf("  Worktree: %s\n", wtName))
 		content.WriteString(fmt.Sprintf("  Port: %d\n\n", m.tunnelModalPort))
 	}
+
+	// Check cloudflared auth status for named tunnel
+	namedAvailable := m.tunnelManager.IsCloudflaredAuthenticated()
+	domainConfigured := m.config.Defaults.Tunnel.Domain != ""
 
 	// Mode selection
 	quickLabel := "Quick Tunnel (random URL)"
@@ -1192,12 +1196,27 @@ func (m *Model) renderTunnelModal() string {
 		content.WriteString("  ")
 		content.WriteString(namedLabel)
 	}
+
+	// Show named tunnel status
+	if !namedAvailable {
+		content.WriteString(" ")
+		content.WriteString(lipgloss.NewStyle().Foreground(styles.ErrorColor).Render("(not logged in)"))
+	} else if !domainConfigured {
+		content.WriteString(" ")
+		content.WriteString(lipgloss.NewStyle().Foreground(styles.ErrorColor).Render("(no domain)"))
+	}
 	content.WriteString("\n\n")
 
 	// Descriptions
-	content.WriteString(m.styles.Muted.Render("  Quick: No setup required, random trycloudflare.com URL"))
+	content.WriteString(m.styles.Muted.Render("  Quick: No setup, random trycloudflare.com URL"))
 	content.WriteString("\n")
-	content.WriteString(m.styles.Muted.Render("  Named: Requires Cloudflare API token (not yet implemented)"))
+	if namedAvailable && domainConfigured {
+		content.WriteString(m.styles.Muted.Render(fmt.Sprintf("  Named: Uses %s domain", m.config.Defaults.Tunnel.Domain)))
+	} else if !namedAvailable {
+		content.WriteString(m.styles.Muted.Render("  Named: Run 'cloudflared tunnel login' first"))
+	} else {
+		content.WriteString(m.styles.Muted.Render("  Named: Set tunnel.domain in config"))
+	}
 	content.WriteString("\n\n")
 
 	// Actions
