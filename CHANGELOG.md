@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.7.0] - 2026-01-07
+
+### Fixed
+- **Archived Worktree Logs**: Setup logs are now shown by default when viewing logs for archived worktrees (previously showed empty archive logs)
+- **Worktree Deletion Persistence**: Deleting an archived worktree now properly persists to disk (previously only deleted in memory)
+- **PR Refresh After Deletion**: Refreshing PRs after deleting an archived worktree now correctly creates a new worktree for the same branch
+- **GitHub API Update Check**: Added proper User-Agent header to GitHub API requests for update checks
+
+### Added
+- **Log Type Toggle**: Press `t` in logs view to toggle between setup and archive logs for archived worktrees
+
 ## [1.1.5.0] - 2026-01-05
 
 ### Added

@@ -130,6 +130,7 @@ conductor
 - `C` - Open in Cursor
 - `V` - Open in VS Code
 - `l` - View logs
+  - In logs view: `t` to toggle between setup/archive logs (archived worktrees only)
 - `R` - Retry failed setup
 - `m` - View merge requests/PRs
 - `w` - Create worktree from PR (in PR view)

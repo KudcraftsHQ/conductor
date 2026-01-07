@@ -280,7 +280,12 @@ func (m *Manager) DeleteWorktree(projectName, worktreeName string) error {
 		return fmt.Errorf("worktree '%s' must be archived before deletion", worktreeName)
 	}
 
-	// Remove from config
+	// Remove from config using store (persists to disk)
+	if m.store != nil {
+		return m.store.RemoveWorktree(projectName, worktreeName)
+	}
+
+	// Fallback for cases without store (e.g., CLI)
 	delete(project.Worktrees, worktreeName)
 
 	return nil

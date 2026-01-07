@@ -794,12 +794,8 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.prevView = ViewWorktrees
 			m.currentView = ViewLogs
 
-			// Show archive logs for archived worktrees, setup logs otherwise
-			if wt.Archived {
-				m.logsType = "archive"
-			} else {
-				m.logsType = "setup"
-			}
+			// Always show setup logs by default (users can toggle with 't' for archived worktrees)
+			m.logsType = "setup"
 		}
 		// Note: Don't reset cursor here - preserve selection for when we return
 
@@ -1162,6 +1158,18 @@ func (m *Model) handleLogsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.logsAutoScroll = !m.logsAutoScroll
 		if m.logsAutoScroll {
 			m.logsScroll = maxScroll
+		}
+
+	case msg.String() == "t":
+		// Toggle between setup and archive logs (only for archived worktrees)
+		project := m.config.Projects[m.selectedProject]
+		if wt, ok := project.Worktrees[m.logsWorktree]; ok && wt.Archived {
+			if m.logsType == "setup" {
+				m.logsType = "archive"
+			} else {
+				m.logsType = "setup"
+			}
+			m.logsScroll = 0
 		}
 	}
 

@@ -42,7 +42,16 @@ func (u *Updater) CheckForUpdate() (*UpdateInfo, error) {
 		Timeout: updateCheckTimeout,
 	}
 
-	resp, err := client.Get(githubAPIURL)
+	req, err := http.NewRequest("GET", githubAPIURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// GitHub API requires a User-Agent header
+	req.Header.Set("User-Agent", "conductor/"+u.currentVersion)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check for updates: %w", err)
 	}

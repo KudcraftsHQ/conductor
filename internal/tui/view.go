@@ -1147,7 +1147,13 @@ func (m *Model) renderLogsView() string {
 	if m.logsAutoScroll {
 		autoScrollStatus = " [AUTO-SCROLL ON]"
 	}
-	scrollInfo := fmt.Sprintf("Lines %d-%d of %d%s (j/k/mouse: scroll, a: toggle auto-scroll, esc: close)", start+1, end, len(lines), autoScrollStatus)
+	// Check if this is an archived worktree to show toggle hint
+	toggleHint := ""
+	project := m.config.Projects[m.selectedProject]
+	if wt, ok := project.Worktrees[m.logsWorktree]; ok && wt.Archived {
+		toggleHint = ", t: toggle setup/archive"
+	}
+	scrollInfo := fmt.Sprintf("Lines %d-%d of %d%s (j/k/mouse: scroll, a: toggle auto-scroll%s, esc: close)", start+1, end, len(lines), autoScrollStatus, toggleHint)
 	formatted = append(formatted, "")
 	formatted = append(formatted, m.styles.Muted.Render(scrollInfo))
 
