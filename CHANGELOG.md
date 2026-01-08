@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.8.0] - 2026-01-08
+
+### Fixed
+- **Worktree State Persistence**: All worktree operations (create, archive, delete) now properly persist to disk via the Store
+  - Fixed `wsManager` not having store reference, causing mutations to be lost
+  - `PrepareWorktree` now uses store for port allocation and worktree creation
+  - `ArchiveWorktree` now uses store for port freeing
+  - `SyncWorktrees` now uses store for removing stale worktrees
+- **Project Detection for Worktrees**: `conductor run` now works correctly inside worktrees that are outside the main project directory
+  - Added prefix check in `DetectProject()` to match worktree paths before walking up directory tree
+- **TUI Config Staleness**: `refreshWorktreeList()` now reloads config from disk to show latest persisted state
+  - Fixes stale state display after archive/delete operations
+  - Pressing 'r' to refresh now shows updated worktree status
+
 ## [1.1.7.0] - 2026-01-07
 
 ### Fixed

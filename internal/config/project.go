@@ -102,6 +102,16 @@ func (c *Config) DetectProject(path string) (string, *Project, *Worktree, error)
 		return "", nil, nil, err
 	}
 
+	// First: Check if we're inside any registered worktree path
+	// This handles worktrees that are outside the main project directory
+	for projName, proj := range c.Projects {
+		for wtName, wt := range proj.Worktrees {
+			if wt.Path != "" && (absPath == wt.Path || strings.HasPrefix(absPath, wt.Path+string(filepath.Separator))) {
+				return projName, proj, proj.Worktrees[wtName], nil
+			}
+		}
+	}
+
 	// Walk up the directory tree
 	for {
 		name, proj, ok := c.GetProjectByPath(absPath)

@@ -158,7 +158,7 @@ func NewModelWithStore(cfg *config.Config, s *store.Store, version string) *Mode
 		keyMap:          keys.DefaultKeyMap(),
 		createInput:     ti,
 		createPortInput: pi,
-		wsManager:       workspace.NewManager(cfg),
+		wsManager:       workspace.NewManagerWithStore(cfg, s),
 		spinner:         sp,
 		gitStatusCache:  make(map[string]*workspace.GitStatusInfo),
 		tunnelManager:   tunnel.NewManager(cfg),
@@ -277,6 +277,11 @@ func (m *Model) refreshProjectList() {
 }
 
 func (m *Model) refreshWorktreeList() {
+	// Reload config from disk to get latest state (store auto-saves)
+	if cfg, err := config.Load(); err == nil {
+		m.config = cfg
+	}
+
 	if m.selectedProject == "" {
 		m.worktreeNames = nil
 		return

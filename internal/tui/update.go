@@ -148,7 +148,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.config = cfg
-		m.wsManager = workspace.NewManager(cfg)
+		m.wsManager = workspace.NewManagerWithStore(cfg, m.store)
 		m.refreshProjectList()
 		if m.selectedProject != "" {
 			m.refreshWorktreeList()

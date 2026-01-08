@@ -116,3 +116,10 @@ When releasing a new feature or fix:
    - Update any relevant documentation sections
 
 4. **Commit and push** with a descriptive release message
+
+5. **Create and push the git tag** to trigger the release CI:
+   ```bash
+   git tag -a vX.X.X.X -m "Release vX.X.X.X - Description"
+   git push origin vX.X.X.X
+   ```
+   The release workflow (`.github/workflows/release.yml`) only triggers on tag pushes matching `v*`.

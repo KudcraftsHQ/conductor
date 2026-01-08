@@ -44,10 +44,20 @@ func (m *Manager) CreateWorktree(projectName, branch string, portCount int) (str
 
 	project, _ := m.config.GetProject(projectName)
 
+	// Helper to cleanup on error
+	cleanup := func() {
+		if m.store != nil {
+			m.store.FreeWorktreePorts(projectName, name)
+			_ = m.store.RemoveWorktree(projectName, name)
+		} else {
+			m.config.FreeWorktreePorts(projectName, name)
+			delete(project.Worktrees, name)
+		}
+	}
+
 	// Create worktree directory
 	if err := os.MkdirAll(filepath.Dir(worktree.Path), 0755); err != nil {
-		m.config.FreeWorktreePorts(projectName, name)
-		delete(project.Worktrees, name)
+		cleanup()
 		return "", nil, fmt.Errorf("failed to create worktrees directory: %w", err)
 	}
 
@@ -60,8 +70,7 @@ func (m *Manager) CreateWorktree(projectName, branch string, portCount int) (str
 	}
 
 	if gitErr != nil {
-		m.config.FreeWorktreePorts(projectName, name)
-		delete(project.Worktrees, name)
+		cleanup()
 		return "", nil, fmt.Errorf("failed to create git worktree: %w", gitErr)
 	}
 
@@ -101,8 +110,14 @@ func (m *Manager) PrepareWorktree(projectName, branch string, portCount int) (st
 		portCount = project.DefaultPortsPerWorktree
 	}
 
-	// Allocate ports
-	ports, err := m.config.AllocatePorts(projectName, name, portCount)
+	// Allocate ports (use store if available for persistence)
+	var ports []int
+	var err error
+	if m.store != nil {
+		ports, err = m.store.AllocatePorts(projectName, name, portCount)
+	} else {
+		ports, err = m.config.AllocatePorts(projectName, name, portCount)
+	}
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to allocate ports: %w", err)
 	}
@@ -110,7 +125,11 @@ func (m *Manager) PrepareWorktree(projectName, branch string, portCount int) (st
 	// Get worktree path in ~/.conductor/<project>/<worktree>
 	worktreePath, err := config.WorktreePath(projectName, name)
 	if err != nil {
-		m.config.FreePorts(ports)
+		if m.store != nil {
+			m.store.FreePorts(ports)
+		} else {
+			m.config.FreePorts(ports)
+		}
 		return "", nil, fmt.Errorf("failed to get worktree path: %w", err)
 	}
 
@@ -122,11 +141,15 @@ func (m *Manager) PrepareWorktree(projectName, branch string, portCount int) (st
 	// Create worktree entry with "creating" status
 	worktree := config.NewWorktree(worktreePath, branch, false, ports)
 	worktree.SetupStatus = config.SetupStatusCreating
-	project.Worktrees[name] = worktree
 
-	// Also update via store if available (for consistency)
+	// Add worktree (use store if available for persistence)
 	if m.store != nil {
-		_ = m.store.SetWorktreeStatus(projectName, name, config.SetupStatusCreating)
+		if err := m.store.AddWorktree(projectName, name, worktree); err != nil {
+			m.store.FreePorts(ports)
+			return "", nil, fmt.Errorf("failed to add worktree: %w", err)
+		}
+	} else {
+		project.Worktrees[name] = worktree
 	}
 
 	return name, worktree, nil
@@ -244,13 +267,12 @@ func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 	// Delete the branch (ignore error - branch may not exist)
 	_ = GitBranchDelete(project.Path, worktree.Branch)
 
-	// Free ports
-	m.config.FreeWorktreePorts(projectName, worktreeName)
-
-	// Mark as archived (keep in config for log viewing)
+	// Free ports and mark as archived
 	if m.store != nil {
+		m.store.FreeWorktreePorts(projectName, worktreeName)
 		_ = m.store.ArchiveWorktree(projectName, worktreeName)
 	} else {
+		m.config.FreeWorktreePorts(projectName, worktreeName)
 		worktree.Archived = true
 		worktree.ArchivedAt = time.Now()
 		worktree.Ports = nil // Clear ports since they're freed
@@ -338,8 +360,13 @@ func (m *Manager) SyncWorktrees(projectName string) error {
 	// Remove worktrees that no longer exist in git
 	for name, wt := range project.Worktrees {
 		if !gitSet[wt.Path] && !wt.IsRoot {
-			m.config.FreeWorktreePorts(projectName, name)
-			delete(project.Worktrees, name)
+			if m.store != nil {
+				m.store.FreeWorktreePorts(projectName, name)
+				_ = m.store.RemoveWorktree(projectName, name)
+			} else {
+				m.config.FreeWorktreePorts(projectName, name)
+				delete(project.Worktrees, name)
+			}
 		}
 	}
 
