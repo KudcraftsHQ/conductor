@@ -13,7 +13,13 @@ const (
 )
 
 // ConductorDir returns the main conductor directory path (~/.conductor)
+// Can be overridden via CONDUCTOR_CONFIG_DIR environment variable (for testing)
 func ConductorDir() (string, error) {
+	// Allow override via environment variable (for testing)
+	if dir := os.Getenv("CONDUCTOR_CONFIG_DIR"); dir != "" {
+		return dir, nil
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)

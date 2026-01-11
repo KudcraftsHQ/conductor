@@ -29,6 +29,8 @@ type KeyMap struct {
 	CreateWorktreeFromPR key.Binding
 	Tunnel               key.Binding
 	CopyURL              key.Binding
+	ArchivedList         key.Binding
+	StatusHistory        key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings
@@ -133,6 +135,14 @@ func DefaultKeyMap() KeyMap {
 		CopyURL: key.NewBinding(
 			key.WithKeys("y"),
 			key.WithHelp("y", "copy URL"),
+		),
+		ArchivedList: key.NewBinding(
+			key.WithKeys("D"),
+			key.WithHelp("D", "archived list"),
+		),
+		StatusHistory: key.NewBinding(
+			key.WithKeys("H"),
+			key.WithHelp("H", "message history"),
 		),
 	}
 }

@@ -30,3 +30,6 @@ Thumbs.db
 
 # Local conductor config (for testing)
 .conductor/
+
+# Test repos
+conductor-test-repo/

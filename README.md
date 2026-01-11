@@ -137,6 +137,8 @@ conductor
 - `A` - Auto-setup Claude PRs
 - `T` - Toggle tunnel for worktree
 - `y` - Copy tunnel URL to clipboard
+- `D` - View archived worktrees and orphaned branches
+- `H` - View status message history
 - `p` - View ports
 - `r` - Refresh
 - `/` - Filter

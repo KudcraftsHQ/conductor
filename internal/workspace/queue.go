@@ -15,6 +15,7 @@ type WorktreeJob struct {
 	Store        *store.Store
 	Manager      *Manager
 	OnComplete   func(success bool, err error)
+	BaseBranch   string // If set, create new branch based on this instead of using Worktree.Branch directly
 }
 
 // WorktreeQueue serializes worktree creation to avoid git lock conflicts
@@ -93,7 +94,10 @@ func (q *WorktreeQueue) processJob(job *WorktreeJob) {
 
 	// Create git worktree synchronously
 	var createErr error
-	if GitBranchExists(project.Path, worktree.Branch) {
+	if job.BaseBranch != "" {
+		// Create new branch based on another branch (used when original branch is already checked out)
+		createErr = GitWorktreeAddNewBranch(project.Path, worktree.Path, worktree.Branch, job.BaseBranch)
+	} else if GitBranchExists(project.Path, worktree.Branch) {
 		createErr = GitWorktreeAddExisting(project.Path, worktree.Path, worktree.Branch)
 	} else {
 		createErr = GitWorktreeAdd(project.Path, worktree.Path, worktree.Branch)
@@ -111,7 +115,7 @@ func (q *WorktreeQueue) processJob(job *WorktreeJob) {
 	_ = job.Store.SetWorktreeStatus(job.ProjectName, job.WorktreeName, config.SetupStatusRunning)
 
 	// Run setup asynchronously (setup scripts can run in parallel)
-	_ = job.Manager.RunSetupAsync(job.ProjectName, job.WorktreeName, func(setupSuccess bool, setupErr error) {
+	err := job.Manager.RunSetupAsync(job.ProjectName, job.WorktreeName, func(setupSuccess bool, setupErr error) {
 		if setupSuccess {
 			_ = job.Store.SetWorktreeStatus(job.ProjectName, job.WorktreeName, config.SetupStatusDone)
 		} else {
@@ -122,6 +126,15 @@ func (q *WorktreeQueue) processJob(job *WorktreeJob) {
 			job.OnComplete(setupSuccess, setupErr)
 		}
 	})
+
+	// If RunSetupAsync failed to start (e.g., worktree not found in config),
+	// mark as failed and call the completion callback
+	if err != nil {
+		_ = job.Store.SetWorktreeStatus(job.ProjectName, job.WorktreeName, config.SetupStatusFailed)
+		if job.OnComplete != nil {
+			job.OnComplete(false, err)
+		}
+	}
 }
 
 // QueueSize returns the current number of jobs in the queue

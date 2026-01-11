@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/workspace"
 )
@@ -211,3 +213,46 @@ const ViewTunnelModal View = iota + 200
 type StatesRecoveredMsg struct {
 	RecoveredCount int
 }
+
+// ViewBranchRename is the view for branch rename dialog when branch is already checked out
+const ViewBranchRename View = iota + 300
+
+// BranchConflictMsg indicates the branch is already checked out in another worktree
+type BranchConflictMsg struct {
+	ProjectName    string
+	OriginalBranch string
+	ExistingPath   string
+	PRNumber       int
+	PR             config.PRInfo
+}
+
+// ViewArchivedList is the view for showing archived worktrees with their logs
+const ViewArchivedList View = iota + 400
+
+// OrphanedBranchesScannedMsg indicates orphaned branches have been scanned
+type OrphanedBranchesScannedMsg struct {
+	ProjectName string
+	Branches    []workspace.OrphanedBranchInfo
+	Err         error
+}
+
+// BranchDeletedMsg indicates a branch was deleted
+type BranchDeletedMsg struct {
+	ProjectName string
+	Branch      string
+	Err         error
+}
+
+// ViewStatusHistory is the view for showing status message history
+const ViewStatusHistory View = iota + 500
+
+// StatusTimeoutMsg indicates the status message should be cleared
+type StatusTimeoutMsg struct {
+	SetAt time.Time // The timestamp when the message was set (to verify it hasn't changed)
+}
+
+// ConfigWatchTickMsg triggers periodic config file check (fallback for external changes)
+type ConfigWatchTickMsg struct{}
+
+// ConfigFileChangedMsg indicates the config file was modified externally
+type ConfigFileChangedMsg struct{}

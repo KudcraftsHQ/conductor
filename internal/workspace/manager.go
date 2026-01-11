@@ -74,6 +74,24 @@ func (m *Manager) CreateWorktree(projectName, branch string, portCount int) (str
 		return "", nil, fmt.Errorf("failed to create git worktree: %w", gitErr)
 	}
 
+	// Run setup script synchronously (for CLI use)
+	if m.store != nil {
+		_ = m.store.SetWorktreeStatus(projectName, name, config.SetupStatusRunning)
+	} else {
+		worktree.SetupStatus = config.SetupStatusRunning
+	}
+
+	setupErr := runSetupSync(project, projectName, name, worktree)
+	if setupErr != nil {
+		if m.store != nil {
+			_ = m.store.SetWorktreeStatus(projectName, name, config.SetupStatusFailed)
+		} else {
+			worktree.SetupStatus = config.SetupStatusFailed
+		}
+		// Don't cleanup - worktree was created, just setup failed
+		return name, worktree, fmt.Errorf("setup script failed: %w", setupErr)
+	}
+
 	if m.store != nil {
 		_ = m.store.SetWorktreeStatus(projectName, name, config.SetupStatusDone)
 	} else {
@@ -158,14 +176,29 @@ func (m *Manager) PrepareWorktree(projectName, branch string, portCount int) (st
 // CreateWorktreeAsync creates the git worktree in background
 // Call this after PrepareWorktree and saving the config
 func (m *Manager) CreateWorktreeAsync(projectName, worktreeName string, onComplete func(success bool, err error)) error {
-	project, ok := m.config.GetProject(projectName)
-	if !ok {
-		return fmt.Errorf("project '%s' not found", projectName)
-	}
+	// Use store if available (has latest state), otherwise fall back to config
+	var project *config.Project
+	var worktree *config.Worktree
+	var ok bool
 
-	worktree, exists := project.Worktrees[worktreeName]
-	if !exists {
-		return fmt.Errorf("worktree '%s' not found", worktreeName)
+	if m.store != nil {
+		project, ok = m.store.GetProject(projectName)
+		if !ok {
+			return fmt.Errorf("project '%s' not found", projectName)
+		}
+		worktree, ok = m.store.GetWorktree(projectName, worktreeName)
+		if !ok {
+			return fmt.Errorf("worktree '%s' not found", worktreeName)
+		}
+	} else {
+		project, ok = m.config.GetProject(projectName)
+		if !ok {
+			return fmt.Errorf("project '%s' not found", projectName)
+		}
+		worktree, ok = project.Worktrees[worktreeName]
+		if !ok {
+			return fmt.Errorf("worktree '%s' not found", worktreeName)
+		}
 	}
 
 	go func() {
@@ -204,14 +237,29 @@ func (m *Manager) CreateWorktreeAsync(projectName, worktreeName string, onComple
 
 // RunSetupAsync starts the setup script in the background
 func (m *Manager) RunSetupAsync(projectName, worktreeName string, onComplete func(success bool, err error)) error {
-	project, ok := m.config.GetProject(projectName)
-	if !ok {
-		return fmt.Errorf("project '%s' not found", projectName)
-	}
+	// Use store if available (has latest state), otherwise fall back to config
+	var project *config.Project
+	var worktree *config.Worktree
+	var ok bool
 
-	worktree, exists := project.Worktrees[worktreeName]
-	if !exists {
-		return fmt.Errorf("worktree '%s' not found", worktreeName)
+	if m.store != nil {
+		project, ok = m.store.GetProject(projectName)
+		if !ok {
+			return fmt.Errorf("project '%s' not found", projectName)
+		}
+		worktree, ok = m.store.GetWorktree(projectName, worktreeName)
+		if !ok {
+			return fmt.Errorf("worktree '%s' not found", worktreeName)
+		}
+	} else {
+		project, ok = m.config.GetProject(projectName)
+		if !ok {
+			return fmt.Errorf("project '%s' not found", projectName)
+		}
+		worktree, ok = project.Worktrees[worktreeName]
+		if !ok {
+			return fmt.Errorf("worktree '%s' not found", worktreeName)
+		}
 	}
 
 	GetSetupManager().RunSetupAsync(project, projectName, worktreeName, worktree, onComplete)
@@ -527,6 +575,48 @@ func (m *Manager) CreateWorktreeFromPR(projectName string, pr config.PRInfo) (st
 		Store:        m.store,
 		Manager:      m,
 		OnComplete:   nil,
+	})
+
+	return name, worktree, nil
+}
+
+// CreateWorktreeWithNewBranch creates a worktree for a PR but using a new branch name
+// This is used when the original branch is already checked out in another worktree
+// The new branch will be created based on the original branch from origin
+func (m *Manager) CreateWorktreeWithNewBranch(projectName string, pr config.PRInfo, originalBranch, newBranch string) (string, *config.Worktree, error) {
+	project, ok := m.config.GetProject(projectName)
+	if !ok {
+		return "", nil, fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	// Check if worktree for this new branch already exists
+	for _, wt := range project.Worktrees {
+		if wt.Branch == newBranch && !wt.Archived {
+			return "", nil, fmt.Errorf("worktree for branch '%s' already exists", newBranch)
+		}
+	}
+
+	// Create worktree with the new branch name
+	name, worktree, err := m.PrepareWorktree(projectName, newBranch, project.DefaultPortsPerWorktree)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to prepare worktree: %w", err)
+	}
+
+	// Associate the PR with this worktree
+	worktree.PRs = append(worktree.PRs, pr)
+	if m.store != nil {
+		_ = m.store.SetWorktreePRs(projectName, name, worktree.PRs)
+	}
+
+	// Queue worktree creation with special handling for new branch based on original
+	GetWorktreeQueue().Enqueue(&WorktreeJob{
+		ProjectName:    projectName,
+		WorktreeName:   name,
+		Worktree:       worktree,
+		Store:          m.store,
+		Manager:        m,
+		OnComplete:     nil,
+		BaseBranch:     originalBranch, // Create new branch based on this
 	})
 
 	return name, worktree, nil

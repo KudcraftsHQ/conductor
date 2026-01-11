@@ -7,6 +7,7 @@ import (
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/tui"
+	"github.com/hammashamzah/conductor/internal/tui/ipc"
 	"github.com/spf13/cobra"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -54,8 +55,18 @@ func runTUIDirectly() {
 		os.Exit(1)
 	}
 
+	// Disable IPC notifications from the TUI's own store to prevent self-notification loops
+	ipc.DisableNotifications()
+
 	m := tui.NewModelWithVersion(cfg, version)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+
+	// Start IPC server for CLI-to-TUI notifications (from external CLI commands)
+	ipcServer, err := ipc.NewServer(p)
+	if err == nil {
+		go ipcServer.Start()
+		defer func() { _ = ipcServer.Close() }()
+	}
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)

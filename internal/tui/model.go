@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"os"
 	"sort"
 	"time"
 
@@ -19,8 +20,37 @@ import (
 // claudePRScanInterval is the interval between automatic Claude PR scans
 const claudePRScanInterval = 30 * time.Second
 
+// archivedWorktreeInfo contains info about an archived worktree for display
+type archivedWorktreeInfo struct {
+	Name         string
+	Branch       string
+	ArchivedAt   time.Time
+	HasSetupLogs bool
+	HasArchLogs  bool
+	ArchiveError string // If archive failed, the error message
+}
+
+// StatusHistoryItem represents a single status message in history
+type StatusHistoryItem struct {
+	Message   string
+	IsError   bool
+	Timestamp time.Time
+}
+
+// statusTimeout is the default timeout for status messages
+const statusTimeout = 5 * time.Second
+
+// statusTimeoutError is the timeout for error messages (longer)
+const statusTimeoutError = 8 * time.Second
+
+// maxStatusHistory is the maximum number of status messages to keep
+const maxStatusHistory = 50
+
 // updateCheckInterval is the interval between automatic update checks
 const updateCheckInterval = 6 * time.Hour
+
+// configWatchInterval is the interval for polling config file changes (fallback for IPC)
+const configWatchInterval = 5 * time.Second
 
 // Model is the main TUI state
 type Model struct {
@@ -71,9 +101,15 @@ type Model struct {
 	deleteTarget     string
 	deleteTargetType string // "project" or "worktree"
 
-	// Status message
+	// Status message with history and timeout
 	statusMessage string
 	statusIsError bool
+	statusSetAt   time.Time           // When current status was set
+	statusHistory []StatusHistoryItem // History of all messages
+
+	// Status history view state
+	statusHistoryCursor int
+	statusHistoryOffset int
 
 	// Workspace manager
 	wsManager *workspace.Manager
@@ -115,6 +151,24 @@ type Model struct {
 	tunnelModalMode  int // 0 = quick, 1 = named
 	tunnelModalPort  int // Which port to tunnel
 	tunnelStarting   bool
+
+	// Branch rename dialog state (when branch is already checked out)
+	branchRenameInput    textinput.Model
+	branchRenameOriginal string        // Original branch name
+	branchRenamePR       config.PRInfo // PR info for creating worktree
+	branchRenameConflict string        // Path where branch is already checked out
+
+	// Archived worktrees list state
+	archivedListCursor   int
+	archivedListOffset   int
+	archivedListMode     int                           // 0 = archived worktrees, 1 = orphaned branches
+	orphanedBranches     []workspace.OrphanedBranchInfo // Cached orphaned branches
+	orphanedLoading      bool                          // Loading orphaned branches
+	archivedWorktrees    []archivedWorktreeInfo
+
+	// Config file watching (for CLI-to-TUI updates)
+	configModTime    time.Time // Last known modification time of config file
+	lastConfigReload time.Time // For debouncing rapid reloads
 }
 
 // NewModel creates a new TUI model
@@ -142,6 +196,11 @@ func NewModelWithStore(cfg *config.Config, s *store.Store, version string) *Mode
 	pi.CharLimit = 2
 	pi.Width = 10
 
+	bri := textinput.New()
+	bri.Placeholder = "new-branch-name"
+	bri.CharLimit = 100
+	bri.Width = 50
+
 	h := help.New()
 	h.ShowAll = false
 
@@ -149,19 +208,20 @@ func NewModelWithStore(cfg *config.Config, s *store.Store, version string) *Mode
 	sp.Spinner = spinner.Dot
 
 	m := &Model{
-		config:          cfg,
-		store:           s,
-		version:         version,
-		styles:          styles.DefaultStyles(),
-		currentView:     ViewProjects,
-		help:            h,
-		keyMap:          keys.DefaultKeyMap(),
-		createInput:     ti,
-		createPortInput: pi,
-		wsManager:       workspace.NewManagerWithStore(cfg, s),
-		spinner:         sp,
-		gitStatusCache:  make(map[string]*workspace.GitStatusInfo),
-		tunnelManager:   tunnel.NewManager(cfg),
+		config:            cfg,
+		store:             s,
+		version:           version,
+		styles:            styles.DefaultStyles(),
+		currentView:       ViewProjects,
+		help:              h,
+		keyMap:            keys.DefaultKeyMap(),
+		createInput:       ti,
+		createPortInput:   pi,
+		branchRenameInput: bri,
+		wsManager:         workspace.NewManagerWithStore(cfg, s),
+		spinner:           sp,
+		gitStatusCache:    make(map[string]*workspace.GitStatusInfo),
+		tunnelManager:     tunnel.NewManager(cfg),
 	}
 
 	m.refreshProjectList()
@@ -177,6 +237,7 @@ func (m *Model) Init() tea.Cmd {
 		m.scheduleUpdateCheck(),
 		m.restoreTunnels(),
 		m.recoverInterruptedStates(),
+		m.initConfigWatch(),
 	)
 }
 
@@ -268,6 +329,40 @@ func (m *Model) scheduleUpdateCheck() tea.Cmd {
 	})
 }
 
+// initConfigWatch initializes config watching by storing current mod time and starting the watch loop
+func (m *Model) initConfigWatch() tea.Cmd {
+	path, err := config.ConfigPath()
+	if err == nil {
+		if info, err := os.Stat(path); err == nil {
+			m.configModTime = info.ModTime()
+		}
+	}
+	return m.scheduleConfigWatch()
+}
+
+// scheduleConfigWatch returns a command that triggers a config check after interval
+func (m *Model) scheduleConfigWatch() tea.Cmd {
+	return tea.Tick(configWatchInterval, func(t time.Time) tea.Msg {
+		return ConfigWatchTickMsg{}
+	})
+}
+
+// checkConfigFile checks if config was modified and returns appropriate message
+func (m *Model) checkConfigFile() tea.Msg {
+	path, err := config.ConfigPath()
+	if err != nil {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	if info.ModTime().After(m.configModTime) {
+		return ConfigFileChangedMsg{}
+	}
+	return nil
+}
+
 func (m *Model) refreshProjectList() {
 	m.projectNames = make([]string, 0, len(m.config.Projects))
 	for name := range m.config.Projects {
@@ -277,10 +372,9 @@ func (m *Model) refreshProjectList() {
 }
 
 func (m *Model) refreshWorktreeList() {
-	// Reload config from disk to get latest state (store auto-saves)
-	if cfg, err := config.Load(); err == nil {
-		m.config = cfg
-	}
+	// Get config from store (which has the latest in-memory state)
+	// Don't reload from disk - store may not have saved yet due to debounce
+	m.config = m.store.GetConfigSnapshot()
 
 	if m.selectedProject == "" {
 		m.worktreeNames = nil
@@ -304,6 +398,43 @@ func (m *Model) refreshWorktreeList() {
 func (m *Model) setStatus(msg string, isError bool) {
 	m.statusMessage = msg
 	m.statusIsError = isError
+	m.statusSetAt = time.Now()
+
+	// Add to history if message is not empty
+	if msg != "" {
+		item := StatusHistoryItem{
+			Message:   msg,
+			IsError:   isError,
+			Timestamp: m.statusSetAt,
+		}
+		// Prepend to history (most recent first)
+		m.statusHistory = append([]StatusHistoryItem{item}, m.statusHistory...)
+
+		// Trim history to max size
+		if len(m.statusHistory) > maxStatusHistory {
+			m.statusHistory = m.statusHistory[:maxStatusHistory]
+		}
+	}
+}
+
+// setStatusWithTimeout sets a status message and returns a command to clear it after timeout
+func (m *Model) setStatusWithTimeout(msg string, isError bool) tea.Cmd {
+	m.setStatus(msg, isError)
+
+	if msg == "" {
+		return nil
+	}
+
+	// Use longer timeout for errors
+	timeout := statusTimeout
+	if isError {
+		timeout = statusTimeoutError
+	}
+
+	setAt := m.statusSetAt
+	return tea.Tick(timeout, func(t time.Time) tea.Msg {
+		return StatusTimeoutMsg{SetAt: setAt}
+	})
 }
 
 // tableHeight returns available height for table content

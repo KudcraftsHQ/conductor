@@ -62,6 +62,10 @@ func (m *Model) View() string {
 		sections = append(sections, m.renderAllPRsPage())
 	case ViewTunnelModal:
 		sections = append(sections, m.renderWorktreesTable())
+	case ViewArchivedList:
+		sections = append(sections, m.renderArchivedListPage())
+	case ViewStatusHistory:
+		sections = append(sections, m.renderStatusHistoryPage())
 	}
 
 	// Footer
@@ -82,6 +86,8 @@ func (m *Model) View() string {
 		return m.overlayModal(baseView, m.renderQuitModal())
 	case ViewTunnelModal:
 		return m.overlayModal(baseView, m.renderTunnelModal())
+	case ViewBranchRename:
+		return m.overlayModal(baseView, m.renderBranchRenameModal())
 	}
 
 	return baseView
@@ -172,6 +178,17 @@ func (m *Model) renderTitleBar() string {
 	case ViewAllPRs:
 		title = "ALL PULL REQUESTS"
 		count = len(m.allPRList)
+	case ViewArchivedList:
+		if m.archivedListMode == 0 {
+			title = "ARCHIVED WORKTREES"
+			count = len(m.archivedWorktrees)
+		} else {
+			title = "ORPHANED BRANCHES"
+			count = len(m.orphanedBranches)
+		}
+	case ViewStatusHistory:
+		title = "MESSAGE HISTORY"
+		count = len(m.statusHistory)
 	}
 
 	// Build title: ─────── TITLE(count) ───────
@@ -535,6 +552,16 @@ func (m *Model) renderFooter() string {
 		breadcrumbs = append(breadcrumbs, "projects")
 		breadcrumbs = append(breadcrumbs, m.selectedProject)
 		breadcrumbs = append(breadcrumbs, "all-prs")
+	case ViewArchivedList:
+		breadcrumbs = append(breadcrumbs, "projects")
+		breadcrumbs = append(breadcrumbs, m.selectedProject)
+		if m.archivedListMode == 0 {
+			breadcrumbs = append(breadcrumbs, "archived")
+		} else {
+			breadcrumbs = append(breadcrumbs, "orphaned-branches")
+		}
+	case ViewStatusHistory:
+		breadcrumbs = append(breadcrumbs, "history")
 	}
 
 	for i, bc := range breadcrumbs {
@@ -566,6 +593,14 @@ func (m *Model) renderFooter() string {
 			hints = []string{"o:open in browser", "w:worktree", "r:refresh", "esc:back"}
 		case ViewAllPRs:
 			hints = []string{"enter:create worktree", "o:open in browser", "r:refresh", "esc:back"}
+		case ViewArchivedList:
+			if m.archivedListMode == 0 {
+				hints = []string{"tab:orphaned branches", "l:logs", "d:delete", "r:refresh", "esc:back"}
+			} else {
+				hints = []string{"tab:archived worktrees", "d:delete branch", "r:refresh", "esc:back"}
+			}
+		case ViewStatusHistory:
+			hints = []string{"c:clear history", "esc:back"}
 		}
 		right = m.styles.Muted.Render(strings.Join(hints, "  "))
 	}
@@ -1232,4 +1267,273 @@ func (m *Model) renderTunnelModal() string {
 	content.WriteString(m.styles.RenderKeyHelp("esc", "cancel"))
 
 	return m.styles.Modal.Width(width).Render(content.String())
+}
+
+func (m *Model) renderBranchRenameModal() string {
+	width := 70
+	if width > m.width-4 {
+		width = m.width - 4
+	}
+
+	var content strings.Builder
+
+	content.WriteString(m.styles.ModalTitle.Render("Branch Already Checked Out"))
+	content.WriteString("\n\n")
+
+	// Show conflict info
+	content.WriteString(m.styles.Muted.Render("  The branch '"))
+	content.WriteString(m.styles.TableRowSelected.Render(m.branchRenameOriginal))
+	content.WriteString(m.styles.Muted.Render("' is already checked out at:\n"))
+	content.WriteString("  ")
+	content.WriteString(m.styles.Muted.Render(m.branchRenameConflict))
+	content.WriteString("\n\n")
+
+	content.WriteString(m.styles.Muted.Render("  Enter a new branch name to create a worktree based on the original branch:\n\n"))
+
+	// Input field
+	content.WriteString("  ")
+	content.WriteString(m.branchRenameInput.View())
+	content.WriteString("\n\n")
+
+	// Actions
+	content.WriteString("  ")
+	content.WriteString(m.styles.RenderKeyHelp("enter", "create"))
+	content.WriteString("  ")
+	content.WriteString(m.styles.RenderKeyHelp("esc", "cancel"))
+
+	return m.styles.Modal.Width(width).Render(content.String())
+}
+
+func (m *Model) renderArchivedListPage() string {
+	if m.archivedListMode == 0 {
+		return m.renderArchivedWorktreesTable()
+	}
+	return m.renderOrphanedBranchesTable()
+}
+
+func (m *Model) renderArchivedWorktreesTable() string {
+	if len(m.archivedWorktrees) == 0 {
+		empty := m.styles.Muted.Render("No archived worktrees found.")
+		return m.padContent(empty)
+	}
+
+	// Column widths
+	nameW := 15
+	branchW := 30
+	archivedW := 16
+	logsW := 12
+	errorW := m.width - nameW - branchW - archivedW - logsW - 12
+
+	if errorW < 20 {
+		errorW = 20
+	}
+
+	var rows []string
+
+	// Header
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s",
+		nameW, "NAME",
+		branchW, "BRANCH",
+		archivedW, "ARCHIVED AT",
+		logsW, "LOGS",
+		errorW, "ERROR")
+	rows = append(rows, m.styles.TableHeader.Render(header))
+
+	// Calculate visible rows
+	tableHeight := m.tableHeight()
+	start := m.archivedListOffset
+	end := start + tableHeight
+	if end > len(m.archivedWorktrees) {
+		end = len(m.archivedWorktrees)
+	}
+
+	// Rows
+	for i := start; i < end; i++ {
+		wt := m.archivedWorktrees[i]
+
+		// Format archived date
+		archivedStr := wt.ArchivedAt.Format("Jan 2, 15:04")
+
+		// Format logs column
+		logsStr := ""
+		if wt.HasSetupLogs {
+			logsStr += "S"
+		}
+		if wt.HasArchLogs {
+			if logsStr != "" {
+				logsStr += "/"
+			}
+			logsStr += "A"
+		}
+		if logsStr == "" {
+			logsStr = "-"
+		}
+
+		// Error column
+		errorStr := "-"
+		if wt.ArchiveError != "" {
+			errorStr = truncate(wt.ArchiveError, errorW)
+		}
+
+		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s",
+			nameW, truncate(wt.Name, nameW),
+			branchW, truncate(wt.Branch, branchW),
+			archivedW, archivedStr,
+			logsW, logsStr,
+			errorW, errorStr)
+
+		// Pad to full width
+		rowContent = padRight(rowContent, m.width-2)
+
+		if i == m.archivedListCursor {
+			rows = append(rows, m.styles.TableRowSelected.Width(m.width).Render("> "+rowContent))
+		} else if wt.ArchiveError != "" {
+			// Highlight error rows
+			rows = append(rows, lipgloss.NewStyle().Foreground(styles.ErrorColor).Render("  "+rowContent))
+		} else {
+			rows = append(rows, "  "+rowContent)
+		}
+	}
+
+	return m.padContent(strings.Join(rows, "\n"))
+}
+
+func (m *Model) renderOrphanedBranchesTable() string {
+	if m.orphanedLoading {
+		loading := m.spinner.View() + " Scanning for orphaned branches..."
+		return m.padContent(loading)
+	}
+
+	if len(m.orphanedBranches) == 0 {
+		empty := m.styles.Muted.Render("No orphaned branches found. All local branches have associated worktrees.")
+		return m.padContent(empty)
+	}
+
+	// Column widths
+	branchW := 40
+	commitW := 10
+	dateW := 20
+	statusW := m.width - branchW - commitW - dateW - 10
+
+	if statusW < 20 {
+		statusW = 20
+	}
+
+	var rows []string
+
+	// Header
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s",
+		branchW, "BRANCH",
+		commitW, "COMMIT",
+		dateW, "DATE",
+		statusW, "STATUS")
+	rows = append(rows, m.styles.TableHeader.Render(header))
+
+	// Calculate visible rows
+	tableHeight := m.tableHeight()
+	start := m.archivedListOffset
+	end := start + tableHeight
+	if end > len(m.orphanedBranches) {
+		end = len(m.orphanedBranches)
+	}
+
+	// Rows
+	for i := start; i < end; i++ {
+		branch := m.orphanedBranches[i]
+
+		// Status column
+		statusStr := "orphaned"
+		if branch.CheckedOutAt != "" {
+			statusStr = "checked out at " + truncate(branch.CheckedOutAt, statusW-15)
+		}
+
+		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s",
+			branchW, truncate(branch.Branch, branchW),
+			commitW, branch.LastCommit,
+			dateW, truncate(branch.CommitDate, dateW),
+			statusW, truncate(statusStr, statusW))
+
+		// Pad to full width
+		rowContent = padRight(rowContent, m.width-2)
+
+		if i == m.archivedListCursor {
+			rows = append(rows, m.styles.TableRowSelected.Width(m.width).Render("> "+rowContent))
+		} else if branch.CheckedOutAt != "" {
+			// Highlight checked out branches
+			rows = append(rows, lipgloss.NewStyle().Foreground(styles.ErrorColor).Render("  "+rowContent))
+		} else {
+			rows = append(rows, "  "+rowContent)
+		}
+	}
+
+	return m.padContent(strings.Join(rows, "\n"))
+}
+
+func (m *Model) renderStatusHistoryPage() string {
+	if len(m.statusHistory) == 0 {
+		empty := m.styles.Muted.Render("No message history.")
+		return m.padContent(empty)
+	}
+
+	// Column widths
+	timeW := 14
+	typeW := 8
+	msgW := m.width - timeW - typeW - 8
+
+	if msgW < 30 {
+		msgW = 30
+	}
+
+	var rows []string
+
+	// Header
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s",
+		timeW, "TIME",
+		typeW, "TYPE",
+		msgW, "MESSAGE")
+	rows = append(rows, m.styles.TableHeader.Render(header))
+
+	// Calculate visible rows
+	tableHeight := m.tableHeight()
+	start := m.statusHistoryOffset
+	end := start + tableHeight
+	if end > len(m.statusHistory) {
+		end = len(m.statusHistory)
+	}
+
+	// Rows
+	for i := start; i < end; i++ {
+		item := m.statusHistory[i]
+
+		// Format time (show relative time)
+		timeStr := item.Timestamp.Format("15:04:05")
+
+		// Type column
+		typeStr := "info"
+		if item.IsError {
+			typeStr = "error"
+		}
+
+		// Message (truncate if needed)
+		msgStr := truncate(item.Message, msgW)
+
+		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s",
+			timeW, timeStr,
+			typeW, typeStr,
+			msgW, msgStr)
+
+		// Pad to full width
+		rowContent = padRight(rowContent, m.width-2)
+
+		if i == m.statusHistoryCursor {
+			rows = append(rows, m.styles.TableRowSelected.Width(m.width).Render("> "+rowContent))
+		} else if item.IsError {
+			// Highlight error messages
+			rows = append(rows, lipgloss.NewStyle().Foreground(styles.ErrorColor).Render("  "+rowContent))
+		} else {
+			rows = append(rows, "  "+rowContent)
+		}
+	}
+
+	return m.padContent(strings.Join(rows, "\n"))
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/tui/ipc"
 )
 
 // SaveError represents an error that occurred during save
@@ -150,6 +151,9 @@ func (s *Store) performSave() {
 		s.dirty = false
 		s.saveErr = nil
 		s.mu.Unlock()
+
+		// Notify TUI of config change (if running)
+		_ = ipc.NotifyTUI()
 		return
 	}
 

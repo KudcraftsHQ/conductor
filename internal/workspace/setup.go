@@ -325,3 +325,87 @@ func (sm *SetupManager) GetArchiveLogs(projectName, worktreeName string) string 
 	}
 	return string(data)
 }
+
+// runSetupSync runs the setup script synchronously (for CLI use)
+// This is a standalone function that doesn't require SetupManager
+func runSetupSync(project *config.Project, projectName, worktreeName string, worktree *config.Worktree) error {
+	// Create log file
+	conductorDir, err := config.ConductorDir()
+	if err != nil {
+		return fmt.Errorf("failed to get conductor dir: %w", err)
+	}
+	logPath := filepath.Join(conductorDir, "logs", projectName, worktreeName+"-setup.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to create log directory: %v\n", err)
+	}
+
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		logFile = nil
+	}
+	defer func() {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+	}()
+
+	// Load project config for environment variables
+	projectConfig, _ := config.LoadProjectConfig(project.Path)
+
+	// Check for setup script in .conductor-scripts/setup.sh
+	scriptPath := filepath.Join(project.Path, ".conductor-scripts", "setup.sh")
+	var cmd *exec.Cmd
+
+	if _, err := os.Stat(scriptPath); err == nil {
+		cmd = exec.Command("bash", scriptPath)
+	} else {
+		// Check for inline setup script in conductor.json
+		if projectConfig == nil || projectConfig.Scripts == nil {
+			return nil // No setup script, consider it success
+		}
+
+		script, ok := projectConfig.Scripts["setup"]
+		if !ok {
+			return nil // No setup script, consider it success
+		}
+
+		cmd = exec.Command("bash", "-c", script)
+	}
+
+	cmd.Dir = worktree.Path
+
+	// Build environment variables using the same function as CLI runner
+	cmd.Env = runner.BuildEnv(projectName, project, worktreeName, worktree, projectConfig)
+
+	// Write header to log and stdout
+	header := fmt.Sprintf("=== Setup started at %s ===\n", time.Now().Format(time.RFC3339))
+	fmt.Print(header)
+	if logFile != nil {
+		_, _ = logFile.WriteString(header)
+	}
+
+	// Capture output to both stdout and file
+	if logFile != nil {
+		cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+		cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+
+	setupErr := cmd.Run()
+
+	// Write footer to log and stdout
+	var footer string
+	if setupErr == nil {
+		footer = fmt.Sprintf("\n=== Setup completed successfully at %s ===\n", time.Now().Format(time.RFC3339))
+	} else {
+		footer = fmt.Sprintf("\n=== Setup FAILED at %s: %v ===\n", time.Now().Format(time.RFC3339), setupErr)
+	}
+	fmt.Print(footer)
+	if logFile != nil {
+		_, _ = logFile.WriteString(footer)
+	}
+
+	return setupErr
+}

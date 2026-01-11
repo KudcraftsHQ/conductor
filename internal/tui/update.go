@@ -2,17 +2,22 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/github"
 	"github.com/hammashamzah/conductor/internal/opener"
 	"github.com/hammashamzah/conductor/internal/tmux"
+	"github.com/hammashamzah/conductor/internal/tui/ipc"
 	"github.com/hammashamzah/conductor/internal/workspace"
 )
 
@@ -98,11 +103,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.store.SetWorktreeArchiveStatus(msg.ProjectName, msg.WorktreeName, config.ArchiveStatusNone)
 		}
 
+		// Always refresh to show updated status
+		m.refreshWorktreeList()
+
 		if msg.Err != nil {
 			m.setStatus("Error: "+msg.Err.Error(), true)
 		} else {
 			m.setStatus("Archived worktree: "+msg.WorktreeName, false)
-			m.refreshWorktreeList()
 			if m.cursor >= len(m.worktreeNames) {
 				m.cursor = len(m.worktreeNames) - 1
 			}
@@ -113,11 +120,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case WorktreeDeletedMsg:
+		// Always refresh to show updated status
+		m.refreshWorktreeList()
+
 		if msg.Err != nil {
 			m.setStatus("Error: "+msg.Err.Error(), true)
 		} else {
 			m.setStatus("Deleted worktree: "+msg.WorktreeName, false)
-			m.refreshWorktreeList()
 			if m.cursor >= len(m.worktreeNames) {
 				m.cursor = len(m.worktreeNames) - 1
 			}
@@ -210,6 +219,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prList = nil
 			m.prWorktree = ""
 			m.allPRList = nil
+			m.cursor = 0
+			m.offset = 0
 			m.refreshWorktreeList()
 		}
 		return m, nil
@@ -370,6 +381,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				URL:    msg.URL,
 				Port:   msg.Port,
 			})
+			// Refresh to show tunnel status
+			m.refreshWorktreeList()
 		}
 		return m, nil
 
@@ -380,6 +393,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus("Tunnel stopped", false)
 			// Clear tunnel state
 			_ = m.store.ClearTunnelState(msg.ProjectName, msg.WorktreeName)
+			// Refresh to clear tunnel status
+			m.refreshWorktreeList()
 		}
 		return m, nil
 
@@ -388,6 +403,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Silent error - don't disturb user on startup
 		} else if msg.RestoredCount > 0 {
 			m.setStatus(fmt.Sprintf("Restored %d tunnel(s)", msg.RestoredCount), false)
+			// Refresh to show restored tunnel states
+			m.refreshWorktreeList()
 		}
 		return m, nil
 
@@ -398,6 +415,88 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus(fmt.Sprintf("Recovered %d interrupted worktree(s) - use 'R' to retry", msg.RecoveredCount), false)
 		}
 		return m, nil
+
+	case OrphanedBranchesScannedMsg:
+		m.orphanedLoading = false
+		if msg.Err != nil {
+			m.setStatus("Error scanning branches: "+msg.Err.Error(), true)
+			m.orphanedBranches = nil
+		} else {
+			m.orphanedBranches = msg.Branches
+			if len(msg.Branches) == 0 {
+				m.setStatus("No orphaned branches found", false)
+			} else {
+				m.setStatus(fmt.Sprintf("Found %d orphaned branch(es)", len(msg.Branches)), false)
+			}
+		}
+		return m, nil
+
+	case BranchDeletedMsg:
+		if msg.Err != nil {
+			m.setStatus("Error deleting branch: "+msg.Err.Error(), true)
+		} else {
+			m.setStatus("Deleted branch: "+msg.Branch, false)
+			// Remove from list
+			for i, b := range m.orphanedBranches {
+				if b.Branch == msg.Branch {
+					m.orphanedBranches = append(m.orphanedBranches[:i], m.orphanedBranches[i+1:]...)
+					break
+				}
+			}
+			// Adjust cursor if needed
+			if m.archivedListCursor >= len(m.orphanedBranches) && m.archivedListCursor > 0 {
+				m.archivedListCursor--
+			}
+		}
+		return m, nil
+
+	case StatusTimeoutMsg:
+		// Only clear if the message hasn't been replaced
+		if msg.SetAt.Equal(m.statusSetAt) {
+			m.statusMessage = ""
+			m.statusIsError = false
+		}
+		return m, nil
+
+	case ipc.RefreshRequestMsg:
+		// Immediate refresh from CLI via IPC
+		return m, func() tea.Msg { return ConfigFileChangedMsg{} }
+
+	case ConfigWatchTickMsg:
+		// Polling fallback - schedule next check and verify file
+		nextCheck := m.scheduleConfigWatch()
+		return m, tea.Batch(nextCheck, func() tea.Msg {
+			return m.checkConfigFile()
+		})
+
+	case ConfigFileChangedMsg:
+		// Debounce: skip if we reloaded very recently
+		if time.Since(m.lastConfigReload) < 500*time.Millisecond {
+			return m, nil
+		}
+		m.lastConfigReload = time.Now()
+
+		// Update stored mod time
+		if path, err := config.ConfigPath(); err == nil {
+			if info, err := os.Stat(path); err == nil {
+				m.configModTime = info.ModTime()
+			}
+		}
+
+		// Reload config
+		cfg, err := config.Load()
+		if err != nil {
+			return m, nil
+		}
+
+		m.config = cfg
+		m.wsManager = workspace.NewManagerWithStore(cfg, m.store)
+		m.refreshProjectList()
+		if m.selectedProject != "" {
+			m.refreshWorktreeList()
+		}
+
+		return m, m.setStatusWithTimeout("Config reloaded", false)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -453,6 +552,21 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleTunnelModal(msg)
 	}
 
+	// Handle branch rename dialog
+	if m.currentView == ViewBranchRename {
+		return m.handleBranchRenameDialog(msg)
+	}
+
+	// Handle archived list view
+	if m.currentView == ViewArchivedList {
+		return m.handleArchivedListView(msg)
+	}
+
+	// Handle status history view
+	if m.currentView == ViewStatusHistory {
+		return m.handleStatusHistoryView(msg)
+	}
+
 	// Global keys
 	switch {
 	case key.Matches(msg, m.keyMap.Quit):
@@ -464,6 +578,17 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keyMap.Help):
 		m.prevView = m.currentView
 		m.currentView = ViewHelp
+		return m, nil
+
+	case key.Matches(msg, m.keyMap.StatusHistory):
+		if len(m.statusHistory) > 0 {
+			m.statusHistoryCursor = 0
+			m.statusHistoryOffset = 0
+			m.prevView = m.currentView
+			m.currentView = ViewStatusHistory
+		} else {
+			m.setStatus("No message history", false)
+		}
 		return m, nil
 
 	case key.Matches(msg, m.keyMap.Filter):
@@ -858,6 +983,22 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.setStatus("No active tunnel to copy URL from", true)
 			}
 		}
+
+	case key.Matches(msg, m.keyMap.ArchivedList):
+		// Show archived worktrees and orphaned branches dialog
+		if m.selectedProject != "" {
+			m.archivedListCursor = 0
+			m.archivedListOffset = 0
+			m.archivedListMode = 0 // Start with archived worktrees
+			m.orphanedBranches = nil
+			m.orphanedLoading = false
+
+			// Build list of archived worktrees
+			m.buildArchivedWorktreesList()
+
+			m.prevView = ViewWorktrees
+			m.currentView = ViewArchivedList
+		}
 	}
 
 	return m, nil
@@ -981,7 +1122,7 @@ func (m *Model) createWorktree() (tea.Model, tea.Cmd) {
 	worktreeName := name
 	return m, func() tea.Msg {
 		done := make(chan WorktreeCreatedMsg)
-		_ = m.wsManager.CreateWorktreeAsync(projectName, worktreeName, func(success bool, createErr error) {
+		err := m.wsManager.CreateWorktreeAsync(projectName, worktreeName, func(success bool, createErr error) {
 			done <- WorktreeCreatedMsg{
 				ProjectName:  projectName,
 				WorktreeName: worktreeName,
@@ -990,6 +1131,17 @@ func (m *Model) createWorktree() (tea.Model, tea.Cmd) {
 				Err:          createErr,
 			}
 		})
+		// If CreateWorktreeAsync failed to start (e.g., worktree not found in config due to race),
+		// return an error message immediately instead of waiting forever
+		if err != nil {
+			return WorktreeCreatedMsg{
+				ProjectName:  projectName,
+				WorktreeName: worktreeName,
+				Worktree:     worktree,
+				Success:      false,
+				Err:          err,
+			}
+		}
 		return <-done
 	}
 }
@@ -1002,6 +1154,8 @@ func (m *Model) executeDelete() (tea.Model, tea.Cmd) {
 
 		// Mark worktree as archiving
 		_ = m.store.SetWorktreeArchiveStatus(projectName, wtName, config.ArchiveStatusRunning)
+		// Refresh to show archiving status immediately
+		m.refreshWorktreeList()
 
 		m.currentView = ViewWorktrees
 		m.deleteTarget = ""
@@ -1405,9 +1559,27 @@ func (m *Model) handleAllPRsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Create worktree from selected PR
 		if len(m.allPRList) > 0 && m.allPRCursor >= 0 && m.allPRCursor < len(m.allPRList) && !m.allPRCreating {
 			pr := m.allPRList[m.allPRCursor]
+			projectName := m.selectedProject
+
+			// Check if branch is already checked out in another worktree
+			project, ok := m.config.Projects[projectName]
+			if ok {
+				if existingPath := workspace.GitBranchCheckedOutAt(project.Path, pr.HeadBranch); existingPath != "" {
+					// Branch is already checked out - show rename dialog
+					suggestedName := workspace.SuggestNewBranchName(project.Path, pr.HeadBranch)
+					m.branchRenameOriginal = pr.HeadBranch
+					m.branchRenamePR = pr
+					m.branchRenameConflict = existingPath
+					m.branchRenameInput.SetValue(suggestedName)
+					m.branchRenameInput.Focus()
+					m.prevView = m.currentView
+					m.currentView = ViewBranchRename
+					return m, textinput.Blink
+				}
+			}
+
 			m.allPRCreating = true
 			m.setStatus("Creating worktree for "+pr.HeadBranch+"...", false)
-			projectName := m.selectedProject
 			return m, func() tea.Msg {
 				name, _, err := m.wsManager.CreateWorktreeFromPR(projectName, pr)
 				return WorktreeFromPRCreatedMsg{
@@ -1525,5 +1697,298 @@ func (m *Model) copyToClipboard(text string) tea.Cmd {
 			return ErrorMsg{Err: fmt.Errorf("failed to copy to clipboard: %w", err)}
 		}
 		return OpenedMsg{Path: text} // Reuse OpenedMsg for success notification
+	}
+}
+
+func (m *Model) handleBranchRenameDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		// Cancel
+		m.currentView = m.prevView
+		m.branchRenameInput.Blur()
+		return m, nil
+
+	case tea.KeyEnter:
+		// Create worktree with new branch name
+		newBranch := m.branchRenameInput.Value()
+		if newBranch == "" {
+			m.setStatus("Branch name cannot be empty", true)
+			return m, nil
+		}
+
+		// Check if the new branch is also in use
+		projectName := m.selectedProject
+		project, ok := m.config.Projects[projectName]
+		if ok {
+			if existingPath := workspace.GitBranchCheckedOutAt(project.Path, newBranch); existingPath != "" {
+				m.setStatus(fmt.Sprintf("Branch '%s' is also already checked out", newBranch), true)
+				return m, nil
+			}
+		}
+
+		// Create worktree with the new branch name (based on original branch)
+		m.currentView = m.prevView
+		m.branchRenameInput.Blur()
+		m.allPRCreating = true
+		m.setStatus("Creating worktree with new branch "+newBranch+"...", false)
+
+		pr := m.branchRenamePR
+		originalBranch := m.branchRenameOriginal
+		return m, func() tea.Msg {
+			name, _, err := m.wsManager.CreateWorktreeWithNewBranch(projectName, pr, originalBranch, newBranch)
+			return WorktreeFromPRCreatedMsg{
+				ProjectName:  projectName,
+				WorktreeName: name,
+				PRNumber:     pr.Number,
+				Branch:       newBranch,
+				Err:          err,
+			}
+		}
+	}
+
+	// Handle text input
+	var cmd tea.Cmd
+	m.branchRenameInput, cmd = m.branchRenameInput.Update(msg)
+	return m, cmd
+}
+
+// buildArchivedWorktreesList populates the archived worktrees list for the current project
+func (m *Model) buildArchivedWorktreesList() {
+	m.archivedWorktrees = nil
+
+	project, ok := m.config.Projects[m.selectedProject]
+	if !ok {
+		return
+	}
+
+	for name, wt := range project.Worktrees {
+		if !wt.Archived {
+			continue
+		}
+
+		info := archivedWorktreeInfo{
+			Name:       name,
+			Branch:     wt.Branch,
+			ArchivedAt: wt.ArchivedAt,
+		}
+
+		// Check if logs exist
+		setupLogs := workspace.GetSetupManager().GetLogs(m.selectedProject, name)
+		archLogs := workspace.GetSetupManager().GetArchiveLogs(m.selectedProject, name)
+		info.HasSetupLogs = setupLogs != ""
+		info.HasArchLogs = archLogs != ""
+
+		// Check for errors in archive logs
+		if archLogs != "" && strings.Contains(archLogs, "FAILED") {
+			// Extract error from logs
+			lines := strings.Split(archLogs, "\n")
+			for _, line := range lines {
+				if strings.Contains(line, "error") || strings.Contains(line, "Error") || strings.Contains(line, "FAILED") {
+					info.ArchiveError = strings.TrimSpace(line)
+					break
+				}
+			}
+		}
+
+		m.archivedWorktrees = append(m.archivedWorktrees, info)
+	}
+
+	// Sort by archived date (most recent first)
+	sort.Slice(m.archivedWorktrees, func(i, j int) bool {
+		return m.archivedWorktrees[i].ArchivedAt.After(m.archivedWorktrees[j].ArchivedAt)
+	})
+}
+
+// handleArchivedListView handles key events in the archived list view
+func (m *Model) handleArchivedListView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keyMap.Back):
+		m.currentView = m.prevView
+		return m, nil
+
+	case msg.String() == "tab":
+		// Toggle between archived worktrees and orphaned branches
+		if m.archivedListMode == 0 {
+			m.archivedListMode = 1
+			m.archivedListCursor = 0
+			m.archivedListOffset = 0
+			// Load orphaned branches if not already loaded
+			if m.orphanedBranches == nil && !m.orphanedLoading {
+				m.orphanedLoading = true
+				projectName := m.selectedProject
+				return m, func() tea.Msg {
+					project, ok := m.config.Projects[projectName]
+					if !ok {
+						return OrphanedBranchesScannedMsg{ProjectName: projectName, Err: fmt.Errorf("project not found")}
+					}
+
+					// Build map of known branches from worktrees
+					knownBranches := make(map[string]bool)
+					for _, wt := range project.Worktrees {
+						knownBranches[wt.Branch] = true
+					}
+
+					branches, err := workspace.GitListOrphanedBranches(project.Path, knownBranches)
+					return OrphanedBranchesScannedMsg{
+						ProjectName: projectName,
+						Branches:    branches,
+						Err:         err,
+					}
+				}
+			}
+		} else {
+			m.archivedListMode = 0
+			m.archivedListCursor = 0
+			m.archivedListOffset = 0
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keyMap.Up):
+		if m.archivedListCursor > 0 {
+			m.archivedListCursor--
+			m.ensureArchivedListCursorVisible()
+		}
+
+	case key.Matches(msg, m.keyMap.Down):
+		maxItems := m.getArchivedListItemCount()
+		if m.archivedListCursor < maxItems-1 {
+			m.archivedListCursor++
+			m.ensureArchivedListCursorVisible()
+		}
+
+	case msg.String() == "l":
+		// View logs for selected archived worktree
+		if m.archivedListMode == 0 && m.archivedListCursor < len(m.archivedWorktrees) {
+			wt := m.archivedWorktrees[m.archivedListCursor]
+			m.logsWorktree = wt.Name
+			m.logsScroll = 0
+			m.logsAutoScroll = true
+			m.logsType = "archive" // Default to archive logs for archived worktrees
+			m.prevView = ViewArchivedList
+			m.currentView = ViewLogs
+		}
+
+	case key.Matches(msg, m.keyMap.Delete):
+		// Delete selected item
+		if m.archivedListMode == 0 {
+			// Delete archived worktree
+			if m.archivedListCursor < len(m.archivedWorktrees) {
+				wt := m.archivedWorktrees[m.archivedListCursor]
+				m.deleteTarget = wt.Name
+				m.deleteTargetType = "worktree-delete"
+				m.prevView = ViewArchivedList
+				m.currentView = ViewConfirmDelete
+			}
+		} else {
+			// Delete orphaned branch
+			if m.archivedListCursor < len(m.orphanedBranches) {
+				branch := m.orphanedBranches[m.archivedListCursor]
+				if branch.CheckedOutAt != "" {
+					m.setStatus("Cannot delete: branch is checked out at "+branch.CheckedOutAt, true)
+					return m, nil
+				}
+				projectName := m.selectedProject
+				branchName := branch.Branch
+				m.setStatus("Deleting branch "+branchName+"...", false)
+				return m, func() tea.Msg {
+					project, ok := m.config.Projects[projectName]
+					if !ok {
+						return BranchDeletedMsg{ProjectName: projectName, Branch: branchName, Err: fmt.Errorf("project not found")}
+					}
+					err := workspace.GitDeleteBranchForce(project.Path, branchName)
+					return BranchDeletedMsg{ProjectName: projectName, Branch: branchName, Err: err}
+				}
+			}
+		}
+
+	case key.Matches(msg, m.keyMap.Refresh):
+		// Refresh the list
+		if m.archivedListMode == 0 {
+			m.buildArchivedWorktreesList()
+		} else {
+			m.orphanedBranches = nil
+			m.orphanedLoading = true
+			projectName := m.selectedProject
+			return m, func() tea.Msg {
+				project, ok := m.config.Projects[projectName]
+				if !ok {
+					return OrphanedBranchesScannedMsg{ProjectName: projectName, Err: fmt.Errorf("project not found")}
+				}
+				knownBranches := make(map[string]bool)
+				for _, wt := range project.Worktrees {
+					knownBranches[wt.Branch] = true
+				}
+				branches, err := workspace.GitListOrphanedBranches(project.Path, knownBranches)
+				return OrphanedBranchesScannedMsg{ProjectName: projectName, Branches: branches, Err: err}
+			}
+		}
+	}
+
+	return m, nil
+}
+
+// getArchivedListItemCount returns the number of items in the current archived list mode
+func (m *Model) getArchivedListItemCount() int {
+	if m.archivedListMode == 0 {
+		return len(m.archivedWorktrees)
+	}
+	return len(m.orphanedBranches)
+}
+
+// ensureArchivedListCursorVisible adjusts offset to keep cursor visible
+func (m *Model) ensureArchivedListCursorVisible() {
+	tableHeight := m.tableHeight()
+	if tableHeight <= 0 {
+		return
+	}
+
+	if m.archivedListCursor < m.archivedListOffset {
+		m.archivedListOffset = m.archivedListCursor
+	} else if m.archivedListCursor >= m.archivedListOffset+tableHeight {
+		m.archivedListOffset = m.archivedListCursor - tableHeight + 1
+	}
+}
+
+// handleStatusHistoryView handles key events in the status history view
+func (m *Model) handleStatusHistoryView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keyMap.Back):
+		m.currentView = m.prevView
+		return m, nil
+
+	case key.Matches(msg, m.keyMap.Up):
+		if m.statusHistoryCursor > 0 {
+			m.statusHistoryCursor--
+			m.ensureStatusHistoryCursorVisible()
+		}
+
+	case key.Matches(msg, m.keyMap.Down):
+		if m.statusHistoryCursor < len(m.statusHistory)-1 {
+			m.statusHistoryCursor++
+			m.ensureStatusHistoryCursorVisible()
+		}
+
+	case msg.String() == "c":
+		// Clear history
+		m.statusHistory = nil
+		m.currentView = m.prevView
+		m.setStatus("History cleared", false)
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// ensureStatusHistoryCursorVisible adjusts offset to keep cursor visible
+func (m *Model) ensureStatusHistoryCursorVisible() {
+	tableHeight := m.tableHeight()
+	if tableHeight <= 0 {
+		return
+	}
+
+	if m.statusHistoryCursor < m.statusHistoryOffset {
+		m.statusHistoryOffset = m.statusHistoryCursor
+	} else if m.statusHistoryCursor >= m.statusHistoryOffset+tableHeight {
+		m.statusHistoryOffset = m.statusHistoryCursor - tableHeight + 1
 	}
 }

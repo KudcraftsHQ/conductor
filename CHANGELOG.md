@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.11.0] - 2026-01-11
+
+### Added
+- **Archived Worktrees List View**: New `D` keybind to view archived worktrees and orphaned branches
+  - Shows archived worktrees with their dates, log availability, and error status
+  - Detects orphaned branches (branches without worktrees)
+  - Delete orphaned branches directly from the list
+- **Status Message History**: New `H` keybind to view history of all status messages
+  - Shows timestamps, message types (info/error/success), and messages
+  - Helpful for debugging and tracking what happened during a session
+- **Branch Conflict Resolution**: When creating a worktree for a PR whose branch is already checked out elsewhere
+  - Shows modal explaining the conflict and where the branch is checked out
+  - Offers to create worktree with a renamed branch (e.g., `branch-2`)
+  - User can customize the new branch name via text input
+- **Config File Watching**: TUI now detects external config file changes and auto-refreshes
+  - Useful when multiple conductor instances are running
+
+### Fixed
+- **Git Fetch Refspec**: Improved `git fetch` to properly update remote tracking branches using explicit refspec
+
 ## [1.1.8.0] - 2026-01-08
 
 ### Fixed
