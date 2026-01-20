@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Auto-Release CI Workflow**: Automatic versioning and releases on push to main
+  - Calculates version based on date format `YEAR.MONTH.DAY.PATCH`
+  - Updates Makefile VERSION automatically
+  - Creates git tags and triggers GitHub releases
+- **Database Sync Feature**: Clone and sync databases between worktrees
+  - New `3` keybind to view database list
+  - `S` to sync database from source worktree
+  - `F` to force sync (drops and recreates)
+  - `I` to reinitialize database
+  - `B` to view migration status
+  - `l` to view sync logs
+  - CLI: `conductor db clone`, `conductor db analyze`, `conductor db list`
+- **Database Configuration**: New `database` section in project config
+  - Configure source database, naming patterns, and connection settings
+  - Support for PostgreSQL database cloning
+
+### Changed
+- **Release Documentation**: Updated CLAUDE.md with auto-release workflow instructions
+
 ## [1.1.11.2] - 2026-01-11
 
 ### Fixed

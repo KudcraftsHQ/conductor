@@ -102,24 +102,22 @@ Examples:
 
 ## Releasing New Features
 
-When releasing a new feature or fix:
+Releases are **automatic** when code is pushed/merged to `main`:
 
-1. **Update version numbers** in all locations:
-   - `Makefile` - Update `VERSION ?= X.X.X.X`
+1. `.github/workflows/auto-release.yml` calculates version based on date
+2. Updates `Makefile` VERSION automatically
+3. Creates git tag (e.g., `v1.1.20.0`)
+4. `.github/workflows/release.yml` builds binaries and publishes GitHub Release
 
-2. **Update CHANGELOG.md**: Add a new version entry following Keep a Changelog format
-   - Check `git log` to determine the correct version number (increment PATCH)
-   - Document all changes under appropriate headers (Added, Fixed, Changed, etc.)
+**Before merging a PR:**
 
-3. **Update README.md**: If the feature adds new keybindings or user-facing changes
-   - Update the Navigation section with new keybindings
-   - Update any relevant documentation sections
+1. **Update CHANGELOG.md**: Add entry under `[Unreleased]` section
+   - Document changes under appropriate headers (Added, Fixed, Changed, etc.)
 
-4. **Commit and push** with a descriptive release message
+2. **Update README.md**: If the feature adds new keybindings or user-facing changes
 
-5. **Create and push the git tag** to trigger the release CI:
-   ```bash
-   git tag -a vX.X.X.X -m "Release vX.X.X.X - Description"
-   git push origin vX.X.X.X
-   ```
-   The release workflow (`.github/workflows/release.yml`) only triggers on tag pushes matching `v*`.
+**Manual release** (if needed):
+```bash
+git tag -a vX.X.X.X -m "Release vX.X.X.X - Description"
+git push origin vX.X.X.X
+```

@@ -418,3 +418,66 @@ func (s *Store) RestoreTunnelStates(tunnelStates map[string]*config.TunnelState)
 		s.markDirty()
 	}
 }
+
+
+// SetDatabaseConfig sets the database configuration for a project
+func (s *Store) SetDatabaseConfig(projectName string, dbConfig *config.DatabaseConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	project, ok := s.config.Projects[projectName]
+	if !ok {
+		return fmt.Errorf("project %q not found", projectName)
+	}
+
+	project.Database = dbConfig
+	s.markDirty()
+	return nil
+}
+
+// SetLocalPostgresURL sets the local PostgreSQL URL in defaults
+func (s *Store) SetLocalPostgresURL(url string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.config.Defaults.LocalPostgresURL = url
+	s.markDirty()
+	return nil
+}
+
+// ClearDatabaseConfig removes database configuration from a project
+func (s *Store) ClearDatabaseConfig(projectName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	project, ok := s.config.Projects[projectName]
+	if !ok {
+		return fmt.Errorf("project %q not found", projectName)
+	}
+
+	project.Database = nil
+	s.markDirty()
+	return nil
+}
+
+// SetWorktreeDatabase sets the database info for a worktree
+func (s *Store) SetWorktreeDatabase(projectName, worktreeName, dbName, dbURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	project, ok := s.config.Projects[projectName]
+	if !ok {
+		return fmt.Errorf("project %q not found", projectName)
+	}
+
+	wt, ok := project.Worktrees[worktreeName]
+	if !ok {
+		return fmt.Errorf("worktree %q not found", worktreeName)
+	}
+
+	wt.DatabaseName = dbName
+	wt.DatabaseURL = dbURL
+	s.markDirty()
+	return nil
+}
+

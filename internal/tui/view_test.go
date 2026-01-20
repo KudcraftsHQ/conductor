@@ -151,7 +151,7 @@ func TestView_HelpModal(t *testing.T) {
 	m.currentView = ViewHelp
 	m.prevView = ViewWorktrees
 	m.width = 80
-	m.height = 24
+	m.height = 60 // Tall enough to show all help content without scrolling
 
 	view := strings.ToLower(m.View())
 

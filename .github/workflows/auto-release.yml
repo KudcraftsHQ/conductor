@@ -1,0 +1,97 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  auto-release:
+    name: Auto Version & Release
+    runs-on: ubuntu-latest
+    # Skip if this is a version bump commit (prevents infinite loop)
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calculate version
+        id: version
+        run: |
+          # Get current date components
+          YEAR_OFFSET=$(($(date +%Y) - 2025))
+          MONTH=$(date +%-m)
+          DAY=$(date +%-d)
+
+          # Find existing tags for today to determine patch number
+          DATE_PREFIX="v${YEAR_OFFSET}.${MONTH}.${DAY}."
+
+          # Get all tags matching today's date and find the highest patch
+          HIGHEST_PATCH=-1
+          for tag in $(git tag -l "${DATE_PREFIX}*" 2>/dev/null); do
+            # Extract patch number from tag like v1.1.20.3
+            PATCH=$(echo "$tag" | sed "s/${DATE_PREFIX}//")
+            if [[ "$PATCH" =~ ^[0-9]+$ ]] && [ "$PATCH" -gt "$HIGHEST_PATCH" ]; then
+              HIGHEST_PATCH=$PATCH
+            fi
+          done
+
+          # Increment patch number
+          NEW_PATCH=$((HIGHEST_PATCH + 1))
+
+          # Construct new version
+          NEW_VERSION="${YEAR_OFFSET}.${MONTH}.${DAY}.${NEW_PATCH}"
+          NEW_TAG="v${NEW_VERSION}"
+
+          echo "VERSION=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "TAG=${NEW_TAG}" >> $GITHUB_OUTPUT
+          echo "Calculated version: ${NEW_VERSION}"
+
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          if git rev-parse "${{ steps.version.outputs.TAG }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update Makefile version
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          # Update VERSION in Makefile
+          sed -i 's/^VERSION ?= .*/VERSION ?= ${{ steps.version.outputs.VERSION }}/' Makefile
+          echo "Updated Makefile to version ${{ steps.version.outputs.VERSION }}"
+
+      - name: Commit version bump
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Check if there are changes to commit
+          if git diff --quiet Makefile; then
+            echo "No version changes needed"
+          else
+            git add Makefile
+            git commit -m "chore: bump version to ${{ steps.version.outputs.VERSION }} [skip ci]"
+            git push origin main
+            echo "Committed version bump"
+          fi
+
+      - name: Create and push tag
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          git tag -a "${{ steps.version.outputs.TAG }}" -m "Release ${{ steps.version.outputs.TAG }}"
+          git push origin "${{ steps.version.outputs.TAG }}"
+
+          echo "Created and pushed tag: ${{ steps.version.outputs.TAG }}"
+
+      - name: Skip - tag exists
+        if: steps.check_tag.outputs.exists == 'true'
+        run: |
+          echo "Tag ${{ steps.version.outputs.TAG }} already exists, skipping release"

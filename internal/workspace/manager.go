@@ -1,6 +1,8 @@
 package workspace
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/tunnel"
+	_ "github.com/lib/pq"
 )
 
 // Manager handles worktree operations
@@ -160,6 +163,16 @@ func (m *Manager) PrepareWorktree(projectName, branch string, portCount int) (st
 	worktree := config.NewWorktree(worktreePath, branch, false, ports)
 	worktree.SetupStatus = config.SetupStatusCreating
 
+	// Generate database name if database is configured for project
+	if project.Database != nil && m.config.Defaults.LocalPostgresURL != "" && len(ports) > 0 {
+		pattern := project.Database.DBNamePattern
+		if pattern == "" {
+			pattern = "{project}-{port}"
+		}
+		worktree.DatabaseName = generateDBName(projectName, ports[0], pattern)
+		worktree.DatabaseURL = buildWorktreeDBURL(m.config.Defaults.LocalPostgresURL, worktree.DatabaseName)
+	}
+
 	// Add worktree (use store if available for persistence)
 	if m.store != nil {
 		if err := m.store.AddWorktree(projectName, name, worktree); err != nil {
@@ -291,6 +304,11 @@ func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 	// Run archive script first (logs are saved to file for debugging)
 	// We ignore the error - archiving proceeds regardless
 	_ = GetSetupManager().RunArchiveScript(project, projectName, worktreeName, worktree)
+
+	// Drop database if one was created for this worktree
+	if worktree.DatabaseName != "" && m.config.Defaults.LocalPostgresURL != "" {
+		_ = dropWorktreeDB(m.config.Defaults.LocalPostgresURL, worktree.DatabaseName)
+	}
 
 	// Stop tunnel if active
 	if worktree.Tunnel != nil && worktree.Tunnel.Active {
@@ -834,5 +852,94 @@ func (m *Manager) FetchGitStatusForProject(projectName string) (map[string]*GitS
 	}
 
 	return result, nil
+}
+
+
+
+// generateDBName generates a database name from project and port using a pattern
+func generateDBName(projectName string, port int, pattern string) string {
+	name := pattern
+	name = strings.ReplaceAll(name, "{project}", projectName)
+	name = strings.ReplaceAll(name, "{port}", fmt.Sprintf("%d", port))
+	return sanitizeDBName(name)
+}
+
+// sanitizeDBName sanitizes a database name to be a valid PostgreSQL identifier
+func sanitizeDBName(name string) string {
+	// Replace invalid characters with underscores
+	var result strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			result.WriteRune(r)
+		} else {
+			result.WriteRune('_')
+		}
+	}
+	name = result.String()
+
+	// Ensure it starts with a letter or underscore
+	if len(name) > 0 && name[0] >= '0' && name[0] <= '9' {
+		name = "_" + name
+	}
+
+	// Truncate to 63 characters (PostgreSQL limit)
+	if len(name) > 63 {
+		name = name[:63]
+	}
+
+	// Lowercase
+	return strings.ToLower(name)
+}
+
+// buildWorktreeDBURL creates a connection URL for a worktree database
+func buildWorktreeDBURL(localURL, dbName string) string {
+	// Parse the local URL to replace the database name
+	// Simple approach: find the last slash and replace everything after it
+	lastSlash := strings.LastIndex(localURL, "/")
+	if lastSlash == -1 {
+		return localURL + "/" + dbName
+	}
+
+	// Check for query parameters
+	baseURL := localURL[:lastSlash+1]
+	remainder := localURL[lastSlash+1:]
+
+	// If there are query params, preserve them
+	queryIdx := strings.Index(remainder, "?")
+	if queryIdx != -1 {
+		return baseURL + dbName + remainder[queryIdx:]
+	}
+
+	return baseURL + dbName
+}
+
+// dropWorktreeDB drops a worktree database
+func dropWorktreeDB(localURL, dbName string) error {
+	// Connect to postgres database to drop
+	adminURL := buildWorktreeDBURL(localURL, "postgres")
+
+	db, err := sql.Open("postgres", adminURL)
+	if err != nil {
+		return fmt.Errorf("failed to connect: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Terminate existing connections
+	_, _ = db.ExecContext(ctx, `
+		SELECT pg_terminate_backend(pid)
+		FROM pg_stat_activity
+		WHERE datname = $1 AND pid <> pg_backend_pid()
+	`, dbName)
+
+	// Drop database
+	_, err = db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %q", dbName))
+	if err != nil {
+		return fmt.Errorf("failed to drop database: %w", err)
+	}
+
+	return nil
 }
 

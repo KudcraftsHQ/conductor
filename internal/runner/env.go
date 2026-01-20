@@ -63,6 +63,18 @@ func BuildEnv(projectName string, project *config.Project, worktreeName string, 
 		env = append(env, "CONDUCTOR_TUNNEL_ACTIVE=false")
 	}
 
+	// Database environment variables (only if database is configured for worktree)
+	if worktree.DatabaseName != "" {
+		env = append(env, fmt.Sprintf("CONDUCTOR_DB_NAME=%s", worktree.DatabaseName))
+		env = append(env, fmt.Sprintf("CONDUCTOR_DB_URL=%s", worktree.DatabaseURL))
+		env = append(env, fmt.Sprintf("DATABASE_URL=%s", worktree.DatabaseURL)) // Common convention
+	}
+
+	// Source database reference (read-only, for reference in scripts)
+	if project.Database != nil && project.Database.Source != "" {
+		env = append(env, fmt.Sprintf("CONDUCTOR_DB_SOURCE=%s", project.Database.Source))
+	}
+
 	return env
 }
 
@@ -110,6 +122,18 @@ func GetEnvMap(projectName string, project *config.Project, worktreeName string,
 		result["CONDUCTOR_TUNNEL_MODE"] = string(worktree.Tunnel.Mode)
 	} else {
 		result["CONDUCTOR_TUNNEL_ACTIVE"] = "false"
+	}
+
+	// Database environment variables (only if database is configured for worktree)
+	if worktree.DatabaseName != "" {
+		result["CONDUCTOR_DB_NAME"] = worktree.DatabaseName
+		result["CONDUCTOR_DB_URL"] = worktree.DatabaseURL
+		result["DATABASE_URL"] = worktree.DatabaseURL
+	}
+
+	// Source database reference
+	if project.Database != nil && project.Database.Source != "" {
+		result["CONDUCTOR_DB_SOURCE"] = project.Database.Source
 	}
 
 	return result

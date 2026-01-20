@@ -19,6 +19,9 @@ type Defaults struct {
 	OpenWith         string         `json:"openWith"`
 	IDECommand       string         `json:"ideCommand"`
 	Tunnel           TunnelDefaults `json:"tunnel,omitempty"`
+	// LocalPostgresURL is the connection string for local PostgreSQL
+	// Format: postgresql://user:pass@localhost:5432
+	LocalPostgresURL string `json:"localPostgresUrl,omitempty"`
 }
 
 // PortAlloc represents a single port allocation
@@ -36,6 +39,8 @@ type Project struct {
 	GitHubOwner             string               `json:"github_owner,omitempty"`
 	GitHubRepo              string               `json:"github_repo,omitempty"`
 	Worktrees               map[string]*Worktree `json:"worktrees"`
+	// Database contains database sync configuration (optional)
+	Database *DatabaseConfig `json:"database,omitempty"`
 }
 
 // SetupStatus represents the state of worktree setup
@@ -117,6 +122,45 @@ type Worktree struct {
 	SetupStatus   SetupStatus   `json:"setupStatus,omitempty"`
 	ArchiveStatus ArchiveStatus `json:"archiveStatus,omitempty"`
 	Tunnel        *TunnelState  `json:"tunnel,omitempty"`
+	// DatabaseName is the name of the worktree's database (e.g., "myapp-3100")
+	DatabaseName string `json:"databaseName,omitempty"`
+	// DatabaseURL is the full connection string for the worktree's database
+	DatabaseURL string `json:"databaseUrl,omitempty"`
+}
+
+// DatabaseConfig is the configuration for database sync
+type DatabaseConfig struct {
+	// Source is the connection string to the source database (production/staging)
+	// Format: postgresql://user:pass@host:port/dbname
+	Source string `json:"source"`
+	// ExcludeTables is a list of tables to exclude from data sync (schema only)
+	ExcludeTables []string `json:"excludeTables,omitempty"`
+	// SizeThresholdMB auto-excludes tables larger than this size (0 = disabled)
+	SizeThresholdMB int `json:"sizeThresholdMB,omitempty"`
+	// SyncSchedule is a cron expression for automatic sync (empty = manual only)
+	SyncSchedule string `json:"syncSchedule,omitempty"`
+	// DBNamePattern is the pattern for worktree database names
+	// Default: "{project}-{port}"
+	// Available variables: {project}, {port}, {worktree}
+	DBNamePattern string `json:"dbNamePattern,omitempty"`
+	// SyncStatus tracks the last sync state (persisted)
+	SyncStatus *DatabaseSyncStatus `json:"syncStatus,omitempty"`
+}
+
+// DatabaseSyncStatus tracks the status of database synchronization
+type DatabaseSyncStatus struct {
+	// LastSyncAt is when the golden copy was last updated from source
+	LastSyncAt string `json:"lastSyncAt,omitempty"`
+	// GoldenCopySize is the size of the golden copy in bytes
+	GoldenCopySize int64 `json:"goldenCopySize,omitempty"`
+	// TableCount is the number of tables in the source database
+	TableCount int `json:"tableCount,omitempty"`
+	// ExcludedCount is the number of tables excluded from data sync
+	ExcludedCount int `json:"excludedCount,omitempty"`
+	// LastError is the last sync error message (empty if successful)
+	LastError string `json:"lastError,omitempty"`
+	// Status is the current sync status: "synced", "syncing", "failed", "never"
+	Status string `json:"status,omitempty"`
 }
 
 // ProjectConfig represents project-level conductor.json

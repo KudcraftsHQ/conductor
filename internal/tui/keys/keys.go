@@ -31,6 +31,12 @@ type KeyMap struct {
 	CopyURL              key.Binding
 	ArchivedList         key.Binding
 	StatusHistory        key.Binding
+	DatabaseSync            key.Binding
+	DatabaseSyncForce       key.Binding
+	DatabaseList            key.Binding
+	DatabaseReinit          key.Binding
+	DatabaseMigrationStatus key.Binding
+	DatabaseLogs            key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings
@@ -144,6 +150,30 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("H"),
 			key.WithHelp("H", "message history"),
 		),
+		DatabaseSync: key.NewBinding(
+			key.WithKeys("S"),
+			key.WithHelp("S", "sync database"),
+		),
+		DatabaseSyncForce: key.NewBinding(
+			key.WithKeys("F"),
+			key.WithHelp("F", "force sync"),
+		),
+		DatabaseList: key.NewBinding(
+			key.WithKeys("3"),
+			key.WithHelp("3", "databases"),
+		),
+		DatabaseReinit: key.NewBinding(
+			key.WithKeys("I"),
+			key.WithHelp("I", "reinit DB"),
+		),
+		DatabaseMigrationStatus: key.NewBinding(
+			key.WithKeys("B"),
+			key.WithHelp("B", "migration status"),
+		),
+		DatabaseLogs: key.NewBinding(
+			key.WithKeys("l"),
+			key.WithHelp("l", "sync logs"),
+		),
 	}
 }
 
@@ -159,7 +189,51 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Create, k.Archive, k.Delete, k.Retry},
 		{k.Open, k.OpenCursor, k.OpenVSCode, k.OpenTerminal},
 		{k.Filter, k.Refresh, k.Ports, k.MergeReqs, k.AllPRs, k.AutoSetupClaude},
-		{k.Tunnel, k.CopyURL},
+		{k.Tunnel, k.CopyURL, k.DatabaseList, k.DatabaseSync, k.DatabaseReinit, k.DatabaseMigrationStatus},
 		{k.Help, k.Quit},
+	}
+}
+
+// KeyGroup represents a logical group of keybindings
+type KeyGroup struct {
+	Name string
+	Keys []key.Binding
+}
+
+// KeyGroups returns keybindings organized by logical groups
+func (k KeyMap) KeyGroups() []KeyGroup {
+	return []KeyGroup{
+		{
+			Name: "Navigation",
+			Keys: []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Tab},
+		},
+		{
+			Name: "Views",
+			Keys: []key.Binding{k.Ports, k.DatabaseList, k.ArchivedList, k.StatusHistory},
+		},
+		{
+			Name: "Actions",
+			Keys: []key.Binding{k.Create, k.Archive, k.Delete, k.Retry, k.Refresh, k.Add},
+		},
+		{
+			Name: "Open",
+			Keys: []key.Binding{k.Open, k.OpenTerminal, k.OpenCursor, k.OpenVSCode},
+		},
+		{
+			Name: "GitHub",
+			Keys: []key.Binding{k.MergeReqs, k.AllPRs, k.AutoSetupClaude, k.CreateWorktreeFromPR},
+		},
+		{
+			Name: "Tunnels",
+			Keys: []key.Binding{k.Tunnel, k.CopyURL},
+		},
+		{
+			Name: "Database",
+			Keys: []key.Binding{k.DatabaseSync, k.DatabaseSyncForce, k.DatabaseList, k.DatabaseReinit, k.DatabaseMigrationStatus, k.DatabaseLogs},
+		},
+		{
+			Name: "Utility",
+			Keys: []key.Binding{k.Help, k.Filter, k.Quit},
+		},
 	}
 }

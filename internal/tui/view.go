@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -66,10 +67,17 @@ func (m *Model) View() string {
 		sections = append(sections, m.renderArchivedListPage())
 	case ViewStatusHistory:
 		sections = append(sections, m.renderStatusHistoryPage())
+	case ViewDatabases:
+		sections = append(sections, m.renderDatabasesTable())
+	case ViewDatabaseLogs:
+		sections = append(sections, m.renderDatabaseLogsView())
 	}
 
-	// Footer
+	// Status bar (with separator above)
 	sections = append(sections, m.renderFooter())
+
+	// Command bar (at the very bottom)
+	sections = append(sections, m.renderKeyHints())
 
 	// Join all sections into base view
 	baseView := lipgloss.JoinVertical(lipgloss.Left, sections...)
@@ -131,12 +139,13 @@ func (m *Model) renderTabs() string {
 	var tabs []string
 
 	switch m.currentView {
-	case ViewProjects, ViewWorktrees, ViewPorts:
+	case ViewProjects, ViewWorktrees, ViewPorts, ViewDatabases:
 		tabs = append(tabs, m.styles.RenderTab("1", "projects", m.currentView == ViewProjects))
 		if m.selectedProject != "" {
 			tabs = append(tabs, m.styles.RenderTab("2", "worktrees", m.currentView == ViewWorktrees))
 		}
 		tabs = append(tabs, m.styles.RenderTab("p", "ports", m.currentView == ViewPorts))
+		tabs = append(tabs, m.styles.RenderTab("3", "databases", m.currentView == ViewDatabases))
 	}
 
 	return "  " + strings.Join(tabs, "  ")
@@ -189,6 +198,9 @@ func (m *Model) renderTitleBar() string {
 	case ViewStatusHistory:
 		title = "MESSAGE HISTORY"
 		count = len(m.statusHistory)
+	case ViewDatabases:
+		title = "DATABASES"
+		count = len(m.databaseProjects)
 	}
 
 	// Build title: ─────── TITLE(count) ───────
@@ -524,6 +536,62 @@ func (m *Model) renderPortsTable() string {
 	return m.padContent(strings.Join(rows, "\n"))
 }
 
+// CommandKey represents a key-action pair for the command bar
+type CommandKey struct {
+	Key    string
+	Action string
+}
+
+// getContextKeys returns the relevant keybindings for the current view
+func (m *Model) getContextKeys() []CommandKey {
+	switch m.currentView {
+	case ViewProjects:
+		return []CommandKey{{"enter", "select"}, {"d", "delete"}, {"p", "ports"}, {"3", "databases"}, {"?", "help"}, {"q", "quit"}}
+	case ViewWorktrees:
+		return []CommandKey{{"c", "create"}, {"a", "archive"}, {"o", "open"}, {"C", "cursor"}, {"T", "tunnel"}, {"m", "PRs"}, {"?", "help"}}
+	case ViewPorts:
+		return []CommandKey{{"1", "projects"}, {"3", "databases"}, {"?", "help"}, {"esc", "back"}}
+	case ViewDatabases:
+		return []CommandKey{{"S", "sync"}, {"F", "force sync"}, {"l", "logs"}, {"1", "projects"}, {"p", "ports"}, {"?", "help"}, {"esc", "back"}}
+	case ViewDatabaseLogs:
+		return []CommandKey{{"j/k", "scroll"}, {"a", "auto-scroll"}, {"g/G", "top/bottom"}, {"esc", "back"}}
+	case ViewPRs:
+		return []CommandKey{{"o", "open"}, {"w", "worktree"}, {"r", "refresh"}, {"?", "help"}, {"esc", "back"}}
+	case ViewAllPRs:
+		return []CommandKey{{"enter", "worktree"}, {"o", "open"}, {"r", "refresh"}, {"?", "help"}, {"esc", "back"}}
+	case ViewArchivedList:
+		if m.archivedListMode == 0 {
+			return []CommandKey{{"tab", "orphaned"}, {"l", "logs"}, {"d", "delete"}, {"r", "refresh"}, {"esc", "back"}}
+		}
+		return []CommandKey{{"tab", "archived"}, {"d", "delete"}, {"r", "refresh"}, {"esc", "back"}}
+	case ViewStatusHistory:
+		return []CommandKey{{"c", "clear"}, {"?", "help"}, {"esc", "back"}}
+	case ViewCreateWorktree:
+		return []CommandKey{{"enter", "create"}, {"tab", "next"}, {"esc", "cancel"}}
+	case ViewConfirmDelete:
+		return []CommandKey{{"enter", "confirm"}, {"esc", "cancel"}}
+	case ViewTunnelModal:
+		return []CommandKey{{"enter", "start"}, {"tab", "switch"}, {"esc", "cancel"}}
+	default:
+		return []CommandKey{{"?", "help"}, {"q", "quit"}}
+	}
+}
+
+// renderKeyHints renders the command bar at the bottom
+func (m *Model) renderKeyHints() string {
+	commands := m.getContextKeys()
+
+	var parts []string
+	for _, cmd := range commands {
+		parts = append(parts, m.styles.RenderCommand(cmd.Key, cmd.Action))
+	}
+	line := strings.Join(parts, "   ")
+
+	// Truncate if too long (calculate visible width without ANSI codes)
+	// For now, just return the line - lipgloss handles truncation
+	return "  " + line
+}
+
 func (m *Model) renderFooter() string {
 	var left, right string
 
@@ -562,6 +630,12 @@ func (m *Model) renderFooter() string {
 		}
 	case ViewStatusHistory:
 		breadcrumbs = append(breadcrumbs, "history")
+	case ViewDatabases:
+		breadcrumbs = append(breadcrumbs, "databases")
+	case ViewDatabaseLogs:
+		breadcrumbs = append(breadcrumbs, "databases")
+		breadcrumbs = append(breadcrumbs, m.databaseLogsProject)
+		breadcrumbs = append(breadcrumbs, "logs")
 	}
 
 	for i, bc := range breadcrumbs {
@@ -572,37 +646,13 @@ func (m *Model) renderFooter() string {
 		}
 	}
 
-	// Right: Status or key hints
+	// Right: Status message with icon
 	if m.statusMessage != "" {
 		if m.statusIsError {
-			right = lipgloss.NewStyle().Foreground(styles.ErrorColor).Render(m.statusMessage)
+			right = lipgloss.NewStyle().Foreground(styles.ErrorColor).Render("✗ " + m.statusMessage)
 		} else {
-			right = m.styles.Muted.Render(m.statusMessage)
+			right = m.styles.Muted.Render("✓ " + m.statusMessage)
 		}
-	} else {
-		// Key hints
-		var hints []string
-		switch m.currentView {
-		case ViewProjects:
-			hints = []string{"enter:select", "d:delete", "?:help", "q:quit"}
-		case ViewWorktrees:
-			hints = []string{"c:create", "o:open", "C:cursor", "a:archive", "T:tunnel", "m:PRs", "M:all PRs", "l:logs", "esc:back"}
-		case ViewPorts:
-			hints = []string{"esc:back"}
-		case ViewPRs:
-			hints = []string{"o:open in browser", "w:worktree", "r:refresh", "esc:back"}
-		case ViewAllPRs:
-			hints = []string{"enter:create worktree", "o:open in browser", "r:refresh", "esc:back"}
-		case ViewArchivedList:
-			if m.archivedListMode == 0 {
-				hints = []string{"tab:orphaned branches", "l:logs", "d:delete", "r:refresh", "esc:back"}
-			} else {
-				hints = []string{"tab:archived worktrees", "d:delete branch", "r:refresh", "esc:back"}
-			}
-		case ViewStatusHistory:
-			hints = []string{"c:clear history", "esc:back"}
-		}
-		right = m.styles.Muted.Render(strings.Join(hints, "  "))
 	}
 
 	// Calculate spacing
@@ -613,8 +663,13 @@ func (m *Model) renderFooter() string {
 		spacing = 0
 	}
 
-	footer := left + strings.Repeat(" ", spacing) + right
-	return footer
+	// Build separator line
+	separator := m.styles.StatusSeparator.Render(strings.Repeat("─", m.width))
+
+	// Build status bar content
+	statusBar := " " + left + strings.Repeat(" ", spacing) + right
+
+	return separator + "\n" + statusBar
 }
 
 func (m *Model) renderCreateWorktreeModal() string {
@@ -712,72 +767,70 @@ func (m *Model) renderConfirmDeleteModal() string {
 }
 
 func (m *Model) renderHelpModal() string {
-	width := 60
+	width := 70
 	if width > m.width-4 {
 		width = m.width - 4
 	}
 
+	// Build all help lines first
+	var allLines []string
+
+	// Use KeyGroups() as single source of truth
+	for _, group := range m.keyMap.KeyGroups() {
+		allLines = append(allLines, m.styles.StatusRunning.Render("  "+group.Name))
+		for _, k := range group.Keys {
+			help := k.Help()
+			allLines = append(allLines, fmt.Sprintf("    %s %s",
+				m.styles.HelpKey.Render(fmt.Sprintf("%-10s", help.Key)),
+				m.styles.Muted.Render(help.Desc)))
+		}
+		allLines = append(allLines, "") // Empty line between groups
+	}
+
+	// Calculate available height for content (modal height - title - footer - padding)
+	modalHeight := m.height - 8 // Leave room for modal chrome
+	if modalHeight < 10 {
+		modalHeight = 10
+	}
+	contentHeight := modalHeight - 6 // Title (2 lines) + footer (2 lines) + margins
+
+	// Clamp scroll
+	maxScroll := len(allLines) - contentHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.helpScroll > maxScroll {
+		m.helpScroll = maxScroll
+	}
+
+	// Get visible lines
+	start := m.helpScroll
+	end := start + contentHeight
+	if end > len(allLines) {
+		end = len(allLines)
+	}
+	visibleLines := allLines[start:end]
+
+	// Build content
 	var content strings.Builder
 
 	content.WriteString(m.styles.ModalTitle.Render("Keyboard Shortcuts"))
 	content.WriteString("\n\n")
 
-	sections := []struct {
-		title string
-		keys  []struct{ key, desc string }
-	}{
-		{
-			title: "Navigation",
-			keys: []struct{ key, desc string }{
-				{"↑/k", "Move up"},
-				{"↓/j", "Move down"},
-				{"enter", "Select/Open"},
-				{"esc", "Go back"},
-			},
-		},
-		{
-			title: "Actions",
-			keys: []struct{ key, desc string }{
-				{"c", "Create worktree"},
-				{"a/d", "Archive/Delete"},
-				{"o/t", "Open in terminal"},
-				{"C", "Open in Cursor"},
-				{"V", "Open in VSCode"},
-			},
-		},
-		{
-			title: "Views",
-			keys: []struct{ key, desc string }{
-				{"1", "Projects view"},
-				{"2", "Worktrees view"},
-				{"p", "Ports view"},
-				{"m", "Merge requests"},
-				{"M", "All PRs (create worktree)"},
-			},
-		},
-		{
-			title: "Other",
-			keys: []struct{ key, desc string }{
-				{"/", "Filter"},
-				{"r", "Refresh"},
-				{"?", "Help"},
-				{"q", "Quit"},
-			},
-		},
-	}
-
-	for _, section := range sections {
-		content.WriteString(m.styles.StatusRunning.Render("  " + section.title))
-		content.WriteString("\n")
-		for _, k := range section.keys {
-			content.WriteString(fmt.Sprintf("    %s %s\n",
-				m.styles.HelpKey.Render(fmt.Sprintf("%-8s", k.key)),
-				m.styles.Muted.Render(k.desc)))
-		}
+	for _, line := range visibleLines {
+		content.WriteString(line)
 		content.WriteString("\n")
 	}
 
-	content.WriteString("  ")
+	// Scroll indicator
+	if len(allLines) > contentHeight {
+		scrollInfo := fmt.Sprintf("  %d-%d of %d", start+1, end, len(allLines))
+		content.WriteString("\n")
+		content.WriteString(m.styles.Muted.Render(scrollInfo + "  j/k scroll  g/G top/bottom"))
+		content.WriteString("\n")
+	}
+
+	content.WriteString("\n  ")
 	content.WriteString(m.styles.RenderKeyHelp("esc", "close"))
 
 	modal := m.styles.Modal.Width(width).Render(content.String())
@@ -1536,4 +1589,256 @@ func (m *Model) renderStatusHistoryPage() string {
 	}
 
 	return m.padContent(strings.Join(rows, "\n"))
+}
+
+func (m *Model) renderDatabasesTable() string {
+	// Build list of projects with database config
+	m.databaseProjects = m.databaseProjects[:0]
+	for name, project := range m.config.Projects {
+		if project.Database != nil && project.Database.Source != "" {
+			m.databaseProjects = append(m.databaseProjects, name)
+		}
+	}
+
+	// Sort for consistent ordering
+	sort.Strings(m.databaseProjects)
+
+	if len(m.databaseProjects) == 0 {
+		empty := m.styles.Muted.Render("No projects with database config. Use 'conductor db set-source <project> <url>' to configure.")
+		return m.padContent(empty)
+	}
+
+	// Column widths (dynamic based on terminal width)
+	nameW := 18
+	statusW := 12
+	lastSyncW := 18
+	sizeW := 10
+	tablesW := 10
+	// Source gets remaining space
+	sourceW := m.width - nameW - statusW - lastSyncW - sizeW - tablesW - 14 // 14 for spacing and margins
+	if sourceW < 20 {
+		sourceW = 20
+	}
+
+	var rows []string
+
+	// Header - full width
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+		nameW, "PROJECT",
+		sourceW, "SOURCE",
+		statusW, "STATUS",
+		lastSyncW, "LAST SYNC",
+		sizeW, "SIZE",
+		tablesW, "TABLES")
+	header = padRight(header, m.width-2)
+	rows = append(rows, m.styles.TableHeader.Render(header))
+
+	// Calculate visible rows
+	tableHeight := m.tableHeight()
+	start := m.databaseOffset
+	end := start + tableHeight
+	if end > len(m.databaseProjects) {
+		end = len(m.databaseProjects)
+	}
+
+	// Rows
+	for i := start; i < end; i++ {
+		name := m.databaseProjects[i]
+		project := m.config.Projects[name]
+		dbConfig := project.Database
+
+		// Mask source URL for display
+		sourceDisplay := "-"
+		if dbConfig.Source != "" {
+			// Just show host/db, mask everything else
+			if info, err := parseDBSource(dbConfig.Source); err == nil {
+				sourceDisplay = truncate(fmt.Sprintf("%s/%s", info.host, info.db), sourceW)
+			} else {
+				sourceDisplay = truncate("configured", sourceW)
+			}
+		}
+
+		// Status - show progress if syncing
+		status := "never"
+		if m.databaseSyncing[name] {
+			if progress, ok := m.databaseProgress[name]; ok && progress != "" {
+				// Truncate progress for display in status column
+				status = truncate(progress, statusW)
+			} else {
+				status = "syncing..."
+			}
+		} else if dbConfig.SyncStatus != nil {
+			if dbConfig.SyncStatus.Status != "" {
+				status = dbConfig.SyncStatus.Status
+			}
+		}
+
+		// Last sync time
+		lastSync := "-"
+		if dbConfig.SyncStatus != nil && dbConfig.SyncStatus.LastSyncAt != "" {
+			lastSync = dbConfig.SyncStatus.LastSyncAt
+		}
+
+		// Size
+		sizeStr := "-"
+		if dbConfig.SyncStatus != nil && dbConfig.SyncStatus.GoldenCopySize > 0 {
+			sizeStr = formatSize(dbConfig.SyncStatus.GoldenCopySize)
+		}
+
+		// Tables
+		tablesStr := "-"
+		if dbConfig.SyncStatus != nil && dbConfig.SyncStatus.TableCount > 0 {
+			if dbConfig.SyncStatus.ExcludedCount > 0 {
+				tablesStr = fmt.Sprintf("%d (-%d)", dbConfig.SyncStatus.TableCount, dbConfig.SyncStatus.ExcludedCount)
+			} else {
+				tablesStr = fmt.Sprintf("%d", dbConfig.SyncStatus.TableCount)
+			}
+		}
+
+		// Build row content
+		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+			nameW, truncate(name, nameW),
+			sourceW, sourceDisplay,
+			statusW, status,
+			lastSyncW, lastSync,
+			sizeW, sizeStr,
+			tablesW, tablesStr)
+
+		// Pad to full width
+		rowContent = padRight(rowContent, m.width-2)
+
+		if i == m.databaseCursor {
+			rows = append(rows, m.styles.TableRowSelected.Width(m.width).Render("> "+rowContent))
+		} else {
+			rows = append(rows, "  "+rowContent)
+		}
+	}
+
+	return m.padContent(strings.Join(rows, "\n"))
+}
+
+// parseDBSource extracts host and database from a connection string
+type dbSourceInfo struct {
+	host string
+	db   string
+}
+
+func parseDBSource(source string) (*dbSourceInfo, error) {
+	// Simple parsing: postgresql://user:pass@host:port/dbname
+	// Just extract host and dbname
+	parts := strings.Split(source, "@")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid source format")
+	}
+	hostPart := parts[1]
+	// Remove query params
+	if idx := strings.Index(hostPart, "?"); idx != -1 {
+		hostPart = hostPart[:idx]
+	}
+	// Split host:port/db
+	slashIdx := strings.Index(hostPart, "/")
+	if slashIdx == -1 {
+		return nil, fmt.Errorf("no database in source")
+	}
+	hostPort := hostPart[:slashIdx]
+	db := hostPart[slashIdx+1:]
+
+	// Extract just host (remove port)
+	host := hostPort
+	if colonIdx := strings.Index(hostPort, ":"); colonIdx != -1 {
+		host = hostPort[:colonIdx]
+	}
+
+	return &dbSourceInfo{host: host, db: db}, nil
+}
+
+// formatSize formats bytes to human readable format
+func formatSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(MB))
+	case bytes >= KB:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
+// renderDatabaseLogsView renders the database sync logs view
+func (m *Model) renderDatabaseLogsView() string {
+	logs := m.databaseLogs[m.databaseLogsProject]
+
+	if len(logs) == 0 {
+		empty := m.styles.Muted.Render("No sync logs available for " + m.databaseLogsProject + ".")
+		return m.padContent(empty)
+	}
+
+	// Calculate visible area
+	viewHeight := m.tableHeight()
+
+	// Calculate max scroll
+	maxScroll := len(logs) - viewHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+
+	// Apply auto-scroll if enabled
+	if m.databaseLogsAuto {
+		m.databaseLogsScroll = maxScroll
+	}
+
+	// Apply scroll offset
+	start := m.databaseLogsScroll
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(logs) {
+		start = len(logs) - 1
+		if start < 0 {
+			start = 0
+		}
+	}
+
+	end := start + viewHeight
+	if end > len(logs) {
+		end = len(logs)
+	}
+
+	visibleLines := logs[start:end]
+
+	// Format lines with line numbers
+	var formatted []string
+	for i, line := range visibleLines {
+		lineNum := start + i + 1
+		// Truncate long lines
+		maxLineWidth := m.width - 8 // space for line number
+		if len(line) > maxLineWidth {
+			line = line[:maxLineWidth-3] + "..."
+		}
+		formatted = append(formatted, fmt.Sprintf("%4d  %s", lineNum, line))
+	}
+
+	// Pad to fill height
+	for len(formatted) < viewHeight {
+		formatted = append(formatted, "")
+	}
+
+	// Add scroll indicator with auto-scroll status
+	autoScrollStatus := ""
+	if m.databaseLogsAuto {
+		autoScrollStatus = " [AUTO-SCROLL ON]"
+	}
+	scrollInfo := fmt.Sprintf("Lines %d-%d of %d%s (j/k: scroll, a: toggle auto-scroll, g/G: top/bottom, esc: close)", start+1, end, len(logs), autoScrollStatus)
+	formatted = append(formatted, "")
+	formatted = append(formatted, m.styles.Muted.Render(scrollInfo))
+
+	return m.padContent(strings.Join(formatted, "\n"))
 }

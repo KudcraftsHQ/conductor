@@ -92,6 +92,17 @@ type Styles struct {
 	// Git status tags
 	TagDirty  lipgloss.Style
 	TagBehind lipgloss.Style
+
+	// Key hints (subtle bar above footer)
+	KeyHints lipgloss.Style
+
+	// Command bar styles
+	CommandKey    lipgloss.Style
+	CommandAction lipgloss.Style
+
+	// Status bar
+	StatusBar       lipgloss.Style
+	StatusSeparator lipgloss.Style
 }
 
 // DefaultStyles returns the default coolify-tui inspired styles
@@ -230,12 +241,37 @@ func DefaultStyles() *Styles {
 	s.TagBehind = lipgloss.NewStyle().
 		Foreground(BehindColor)
 
+	// Key hints (subtle, muted style)
+	s.KeyHints = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#4b5563")). // Dim gray - more subtle than MutedColor
+		Padding(0, 0)
+
+	// Command bar styles
+	s.CommandKey = lipgloss.NewStyle().
+		Foreground(HighlightColor).
+		Bold(true)
+
+	s.CommandAction = lipgloss.NewStyle().
+		Foreground(MutedColor)
+
+	// Status bar
+	s.StatusBar = lipgloss.NewStyle().
+		Foreground(MutedColor)
+
+	s.StatusSeparator = lipgloss.NewStyle().
+		Foreground(BorderColor)
+
 	return s
 }
 
 // RenderKeyHelp renders a key and its description in coolify-tui style
 func (s *Styles) RenderKeyHelp(key, desc string) string {
 	return s.HelpKey.Render("<"+key+">") + " " + s.HelpDesc.Render(desc)
+}
+
+// RenderCommand renders a command key for the command bar (no brackets)
+func (s *Styles) RenderCommand(key, action string) string {
+	return s.CommandKey.Render(key) + " " + s.CommandAction.Render(action)
 }
 
 // RenderTab renders a tab in coolify-tui style

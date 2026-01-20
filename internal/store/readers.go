@@ -335,9 +335,39 @@ func (s *Store) copyProject(p *config.Project) *config.Project {
 		GitHubOwner:             p.GitHubOwner,
 		GitHubRepo:              p.GitHubRepo,
 		Worktrees:               make(map[string]*config.Worktree, len(p.Worktrees)),
+		Database:                s.copyDatabaseConfig(p.Database),
 	}
 	for name, wt := range p.Worktrees {
 		cp.Worktrees[name] = s.copyWorktree(wt)
+	}
+	return cp
+}
+
+func (s *Store) copyDatabaseConfig(db *config.DatabaseConfig) *config.DatabaseConfig {
+	if db == nil {
+		return nil
+	}
+	cp := &config.DatabaseConfig{
+		Source:          db.Source,
+		SizeThresholdMB: db.SizeThresholdMB,
+		SyncSchedule:    db.SyncSchedule,
+		DBNamePattern:   db.DBNamePattern,
+	}
+	// Copy slice
+	if len(db.ExcludeTables) > 0 {
+		cp.ExcludeTables = make([]string, len(db.ExcludeTables))
+		copy(cp.ExcludeTables, db.ExcludeTables)
+	}
+	// Copy nested struct
+	if db.SyncStatus != nil {
+		cp.SyncStatus = &config.DatabaseSyncStatus{
+			LastSyncAt:     db.SyncStatus.LastSyncAt,
+			GoldenCopySize: db.SyncStatus.GoldenCopySize,
+			TableCount:     db.SyncStatus.TableCount,
+			ExcludedCount:  db.SyncStatus.ExcludedCount,
+			LastError:      db.SyncStatus.LastError,
+			Status:         db.SyncStatus.Status,
+		}
 	}
 	return cp
 }

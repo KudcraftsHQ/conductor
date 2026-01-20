@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/database"
 	"github.com/hammashamzah/conductor/internal/github"
 	"github.com/hammashamzah/conductor/internal/opener"
 	"github.com/hammashamzah/conductor/internal/tmux"
@@ -242,6 +245,111 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update the cache with fetched statuses
 		for name, status := range msg.Statuses {
 			m.gitStatusCache[name] = status
+		}
+		return m, nil
+
+	case DatabaseSyncProgressMsg:
+		// Update progress message for this project
+		m.databaseProgress[msg.ProjectName] = msg.Message
+		// Append to logs
+		m.databaseLogs[msg.ProjectName] = append(m.databaseLogs[msg.ProjectName],
+			fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg.Message))
+		return m, nil
+
+	case progressMsgWithContinue:
+		// Handle progress and continue listening
+		m.databaseProgress[msg.progress.ProjectName] = msg.progress.Message
+		// Append to logs
+		m.databaseLogs[msg.progress.ProjectName] = append(m.databaseLogs[msg.progress.ProjectName],
+			fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg.progress.Message))
+		return m, msg.next
+
+	case DatabaseSyncCompletedMsg:
+		// Clear syncing flag and progress
+		delete(m.databaseSyncing, msg.ProjectName)
+		delete(m.databaseProgress, msg.ProjectName)
+
+		// Handle skipped sync
+		if msg.Skipped {
+			m.databaseLogs[msg.ProjectName] = append(m.databaseLogs[msg.ProjectName],
+				fmt.Sprintf("[%s] Skipped: %s", time.Now().Format("15:04:05"), msg.SkipReason))
+			m.setStatus(fmt.Sprintf("Sync skipped: %s", msg.SkipReason), false)
+			return m, nil
+		}
+
+		// Update sync status in config
+		project := m.config.Projects[msg.ProjectName]
+		if project != nil && project.Database != nil {
+			if project.Database.SyncStatus == nil {
+				project.Database.SyncStatus = &config.DatabaseSyncStatus{}
+			}
+			if msg.Err != nil {
+				project.Database.SyncStatus.Status = "failed"
+				project.Database.SyncStatus.LastError = msg.Err.Error()
+				m.databaseLogs[msg.ProjectName] = append(m.databaseLogs[msg.ProjectName],
+					fmt.Sprintf("[%s] ERROR: %s", time.Now().Format("15:04:05"), msg.Err.Error()))
+				m.setStatus("Database sync failed: "+msg.Err.Error(), true)
+			} else {
+				project.Database.SyncStatus.Status = "synced"
+				project.Database.SyncStatus.LastSyncAt = time.Now().Format("2006-01-02 15:04")
+				project.Database.SyncStatus.GoldenCopySize = msg.GoldenFileSize
+				project.Database.SyncStatus.TableCount = msg.TableCount
+				project.Database.SyncStatus.ExcludedCount = msg.ExcludedCount
+				project.Database.SyncStatus.LastError = ""
+				completionMsg := fmt.Sprintf("Completed: %d tables, %s in %dms",
+					msg.TableCount, database.FormatSize(msg.GoldenFileSize), msg.DurationMs)
+				m.databaseLogs[msg.ProjectName] = append(m.databaseLogs[msg.ProjectName],
+					fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), completionMsg))
+				m.setStatus(fmt.Sprintf("Database synced: %d tables, %s in %dms",
+					msg.TableCount, database.FormatSize(msg.GoldenFileSize), msg.DurationMs), false)
+			}
+			// Persist to config file
+			_ = m.store.SetDatabaseConfig(msg.ProjectName, project.Database)
+		}
+		return m, nil
+
+	case DatabaseReinitCompletedMsg:
+		if msg.Err != nil {
+			m.setStatus("Database reinit failed: "+msg.Err.Error(), true)
+		} else {
+			statusMsg := fmt.Sprintf("Database %s re-initialized", msg.DatabaseName)
+			if msg.PendingMigrations > 0 {
+				statusMsg += fmt.Sprintf(" (%d pending migrations - run prisma migrate deploy)", msg.PendingMigrations)
+			} else if msg.MigrationStatus == "synced" {
+				statusMsg += " (migrations up to date)"
+			}
+			m.setStatus(statusMsg, false)
+		}
+		return m, nil
+
+	case DatabaseMigrationStatusMsg:
+		if msg.Err != nil {
+			m.setStatus("Migration check failed: "+msg.Err.Error(), true)
+		} else {
+			statusMsg := fmt.Sprintf("Migration status [%s]: %d applied, %d in worktree",
+				msg.MigrationStatus, msg.AppliedCount, msg.WorktreeCount)
+			if len(msg.PendingMigrations) > 0 {
+				statusMsg += fmt.Sprintf(" | %d pending", len(msg.PendingMigrations))
+			}
+			if len(msg.ExtraMigrations) > 0 {
+				statusMsg += fmt.Sprintf(" | %d extra in DB", len(msg.ExtraMigrations))
+			}
+			m.setStatus(statusMsg, msg.MigrationStatus == "diverged" || msg.MigrationStatus == "behind")
+		}
+		return m, nil
+
+	case DatabaseMetadataLoadedMsg:
+		// Update SyncStatus from loaded metadata for projects that don't have it yet
+		for projectName, syncStatus := range msg.Metadata {
+			project := m.config.Projects[projectName]
+			if project != nil && project.Database != nil {
+				// Only update if SyncStatus is empty or has no last sync time
+				if project.Database.SyncStatus == nil || project.Database.SyncStatus.LastSyncAt == "" {
+					project.Database.SyncStatus = syncStatus
+					// Persist to config file
+					_ = m.store.SetDatabaseConfig(projectName, project.Database)
+				}
+			}
 		}
 		return m, nil
 
@@ -520,8 +628,23 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Handle help modal
 	if m.currentView == ViewHelp {
-		if msg.Type == tea.KeyEsc || msg.String() == "?" || msg.String() == "q" {
+		switch {
+		case msg.Type == tea.KeyEsc || msg.String() == "?" || msg.String() == "q":
 			m.currentView = m.prevView
+			return m, nil
+		case msg.String() == "j" || msg.Type == tea.KeyDown:
+			m.helpScroll++
+			return m, nil
+		case msg.String() == "k" || msg.Type == tea.KeyUp:
+			if m.helpScroll > 0 {
+				m.helpScroll--
+			}
+			return m, nil
+		case msg.String() == "g":
+			m.helpScroll = 0
+			return m, nil
+		case msg.String() == "G":
+			m.helpScroll = 999 // Will be clamped in render
 			return m, nil
 		}
 		return m, nil
@@ -567,6 +690,16 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleStatusHistoryView(msg)
 	}
 
+	// Handle databases view
+	if m.currentView == ViewDatabases {
+		return m.handleDatabasesView(msg)
+	}
+
+	// Handle database logs view
+	if m.currentView == ViewDatabaseLogs {
+		return m.handleDatabaseLogsView(msg)
+	}
+
 	// Global keys
 	switch {
 	case key.Matches(msg, m.keyMap.Quit):
@@ -578,6 +711,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keyMap.Help):
 		m.prevView = m.currentView
 		m.currentView = ViewHelp
+		m.helpScroll = 0
 		return m, nil
 
 	case key.Matches(msg, m.keyMap.StatusHistory):
@@ -676,6 +810,14 @@ func (m *Model) handleProjectsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.currentView = ViewPorts
 		m.cursor = 0
 		m.offset = 0
+
+	case key.Matches(msg, m.keyMap.DatabaseList):
+		m.prevView = ViewProjects
+		m.currentView = ViewDatabases
+		m.databaseCursor = 0
+		m.databaseOffset = 0
+		// Load sync metadata from disk for projects that may have been synced via CLI
+		return m, m.loadDatabaseMetadata()
 
 	case key.Matches(msg, m.keyMap.Delete):
 		if m.cursor >= 0 && m.cursor < len(m.projectNames) {
@@ -778,6 +920,14 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keyMap.Ports):
 		m.prevView = ViewWorktrees
 		m.currentView = ViewPorts
+
+	case key.Matches(msg, m.keyMap.DatabaseList):
+		m.prevView = ViewWorktrees
+		m.currentView = ViewDatabases
+		m.databaseCursor = 0
+		m.databaseOffset = 0
+		// Load sync metadata from disk for projects that may have been synced via CLI
+		return m, m.loadDatabaseMetadata()
 
 	case key.Matches(msg, m.keyMap.MergeReqs):
 		// Open PR modal for selected worktree
@@ -998,6 +1148,156 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 			m.prevView = ViewWorktrees
 			m.currentView = ViewArchivedList
+		}
+
+	case key.Matches(msg, m.keyMap.DatabaseSync):
+		// Sync database from source for this project
+		project := m.config.Projects[m.selectedProject]
+		if project == nil || project.Database == nil {
+			m.setStatus("Database not configured for this project. Use CLI: conductor database set-source <url>", true)
+			return m, nil
+		}
+
+		defaults := m.store.GetDefaults()
+		if defaults.LocalPostgresURL == "" {
+			m.setStatus("Local PostgreSQL not configured. Use CLI: conductor database set-local <url>", true)
+			return m, nil
+		}
+
+		projectName := m.selectedProject
+		m.setStatus("Syncing database for "+projectName+"...", false)
+
+		return m, func() tea.Msg {
+			conductorDir, err := config.ConductorDir()
+			if err != nil {
+				return DatabaseSyncCompletedMsg{ProjectName: projectName, Err: err}
+			}
+
+			mgr := database.NewManager(defaults.LocalPostgresURL, conductorDir)
+			metadata, err := mgr.SyncProject(projectName, project.Database)
+			if err != nil {
+				return DatabaseSyncCompletedMsg{ProjectName: projectName, Err: err}
+			}
+
+			return DatabaseSyncCompletedMsg{
+				ProjectName:    projectName,
+				GoldenFileSize: metadata.GoldenFileSize,
+				TableCount:     len(metadata.TableSizes),
+				DurationMs:     metadata.SyncDurationMs,
+				Err:            nil,
+			}
+		}
+
+	case key.Matches(msg, m.keyMap.DatabaseReinit):
+		// Reinitialize database for selected worktree
+		worktrees := m.worktreeNames
+		if len(worktrees) == 0 || m.cursor >= len(worktrees) {
+			return m, nil
+		}
+
+		worktreeName := worktrees[m.cursor]
+		project := m.config.Projects[m.selectedProject]
+		worktree := project.Worktrees[worktreeName]
+
+		if worktree == nil || worktree.DatabaseName == "" {
+			m.setStatus("No database configured for this worktree", true)
+			return m, nil
+		}
+
+		defaults := m.store.GetDefaults()
+		if defaults.LocalPostgresURL == "" {
+			m.setStatus("Local PostgreSQL not configured", true)
+			return m, nil
+		}
+
+		projectName := m.selectedProject
+		dbName := worktree.DatabaseName
+		worktreePath := worktree.Path
+		m.setStatus("Re-initializing database "+dbName+"...", false)
+
+		return m, func() tea.Msg {
+			conductorDir, err := config.ConductorDir()
+			if err != nil {
+				return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
+			}
+
+			goldenPath := database.GetGoldenCopyPath(projectName, conductorDir)
+			schemaPath := database.GetSchemaOnlyPath(projectName, conductorDir)
+
+			if !database.GoldenCopyExists(projectName, conductorDir) {
+				return DatabaseReinitCompletedMsg{
+					ProjectName:  projectName,
+					WorktreeName: worktreeName,
+					Err:          fmt.Errorf("golden copy not found - run 'S' to sync first"),
+				}
+			}
+
+			result, err := database.ReinitializeDatabase(defaults.LocalPostgresURL, dbName, goldenPath, schemaPath, worktreePath)
+			if err != nil {
+				return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
+			}
+
+			migStatus := "unknown"
+			pendingCount := 0
+			if result.MigrationState != nil {
+				migStatus = string(result.MigrationState.Compatibility)
+				pendingCount = len(result.MigrationState.PendingMigrations)
+			}
+
+			return DatabaseReinitCompletedMsg{
+				ProjectName:       projectName,
+				WorktreeName:      worktreeName,
+				DatabaseName:      result.DatabaseName,
+				MigrationStatus:   migStatus,
+				PendingMigrations: pendingCount,
+				Err:               nil,
+			}
+		}
+
+	case key.Matches(msg, m.keyMap.DatabaseMigrationStatus):
+		// Check migration status for selected worktree
+		worktrees := m.worktreeNames
+		if len(worktrees) == 0 || m.cursor >= len(worktrees) {
+			return m, nil
+		}
+
+		worktreeName := worktrees[m.cursor]
+		project := m.config.Projects[m.selectedProject]
+		worktree := project.Worktrees[worktreeName]
+
+		if worktree == nil || worktree.DatabaseName == "" {
+			m.setStatus("No database configured for this worktree", true)
+			return m, nil
+		}
+
+		defaults := m.store.GetDefaults()
+		if defaults.LocalPostgresURL == "" {
+			m.setStatus("Local PostgreSQL not configured", true)
+			return m, nil
+		}
+
+		projectName := m.selectedProject
+		dbName := worktree.DatabaseName
+		worktreePath := worktree.Path
+		m.setStatus("Checking migration status for "+worktreeName+"...", false)
+
+		return m, func() tea.Msg {
+			state, err := database.GetWorktreeMigrationStatus(defaults.LocalPostgresURL, dbName, worktreePath)
+			if err != nil {
+				return DatabaseMigrationStatusMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
+			}
+
+			return DatabaseMigrationStatusMsg{
+				ProjectName:       projectName,
+				WorktreeName:      worktreeName,
+				MigrationStatus:   string(state.Compatibility),
+				AppliedCount:      len(state.AppliedMigrations),
+				WorktreeCount:     len(state.WorktreeMigrations),
+				PendingMigrations: state.PendingMigrations,
+				ExtraMigrations:   state.ExtraMigrations,
+				Recommendation:    state.RecommendedAction,
+				Err:               nil,
+			}
 		}
 	}
 
@@ -1990,5 +2290,414 @@ func (m *Model) ensureStatusHistoryCursorVisible() {
 		m.statusHistoryOffset = m.statusHistoryCursor
 	} else if m.statusHistoryCursor >= m.statusHistoryOffset+tableHeight {
 		m.statusHistoryOffset = m.statusHistoryCursor - tableHeight + 1
+	}
+}
+
+// handleDatabasesView handles key events in the databases view
+func (m *Model) handleDatabasesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keyMap.Back):
+		m.currentView = m.prevView
+		return m, nil
+
+	case key.Matches(msg, m.keyMap.Up):
+		if m.databaseCursor > 0 {
+			m.databaseCursor--
+			m.ensureDatabaseCursorVisible()
+		}
+
+	case key.Matches(msg, m.keyMap.Down):
+		if m.databaseCursor < len(m.databaseProjects)-1 {
+			m.databaseCursor++
+			m.ensureDatabaseCursorVisible()
+		}
+
+	case key.Matches(msg, m.keyMap.Enter), key.Matches(msg, m.keyMap.DatabaseSync):
+		// Sync the selected project's database (incremental)
+		if m.databaseCursor >= 0 && m.databaseCursor < len(m.databaseProjects) {
+			projectName := m.databaseProjects[m.databaseCursor]
+			return m, m.triggerDatabaseSync(projectName, false)
+		}
+
+	case key.Matches(msg, m.keyMap.DatabaseSyncForce):
+		// Force sync the selected project's database
+		if m.databaseCursor >= 0 && m.databaseCursor < len(m.databaseProjects) {
+			projectName := m.databaseProjects[m.databaseCursor]
+			return m, m.triggerDatabaseSync(projectName, true)
+		}
+
+	case key.Matches(msg, m.keyMap.DatabaseLogs):
+		// Show logs for the selected project
+		if m.databaseCursor >= 0 && m.databaseCursor < len(m.databaseProjects) {
+			projectName := m.databaseProjects[m.databaseCursor]
+			if logs, ok := m.databaseLogs[projectName]; ok && len(logs) > 0 {
+				m.databaseLogsProject = projectName
+				m.databaseLogsScroll = 0
+				m.databaseLogsAuto = true
+				m.prevView = m.currentView
+				m.currentView = ViewDatabaseLogs
+			} else {
+				m.setStatus("No sync logs for "+projectName, false)
+			}
+		}
+
+	case msg.String() == "1":
+		m.currentView = ViewProjects
+		m.cursor = 0
+		m.offset = 0
+
+	case msg.String() == "p":
+		m.currentView = ViewPorts
+		m.cursor = 0
+		m.offset = 0
+	}
+
+	return m, nil
+}
+
+// handleDatabaseLogsView handles key events in the database logs view
+func (m *Model) handleDatabaseLogsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	logs := m.databaseLogs[m.databaseLogsProject]
+	viewHeight := m.tableHeight()
+	maxScroll := len(logs) - viewHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+
+	switch {
+	case key.Matches(msg, m.keyMap.Back):
+		m.currentView = m.prevView
+		return m, nil
+
+	case key.Matches(msg, m.keyMap.Up), msg.String() == "k":
+		if m.databaseLogsScroll > 0 {
+			m.databaseLogsScroll--
+			m.databaseLogsAuto = false
+		}
+
+	case key.Matches(msg, m.keyMap.Down), msg.String() == "j":
+		if m.databaseLogsScroll < maxScroll {
+			m.databaseLogsScroll++
+		}
+		// Enable auto-scroll if at bottom
+		if m.databaseLogsScroll >= maxScroll {
+			m.databaseLogsAuto = true
+		}
+
+	case msg.String() == "a":
+		// Toggle auto-scroll
+		m.databaseLogsAuto = !m.databaseLogsAuto
+		if m.databaseLogsAuto {
+			m.databaseLogsScroll = maxScroll
+		}
+
+	case msg.String() == "G":
+		// Jump to bottom
+		m.databaseLogsScroll = maxScroll
+		m.databaseLogsAuto = true
+
+	case msg.String() == "g":
+		// Jump to top
+		m.databaseLogsScroll = 0
+		m.databaseLogsAuto = false
+	}
+
+	return m, nil
+}
+
+// ensureDatabaseCursorVisible adjusts offset to keep cursor visible
+func (m *Model) ensureDatabaseCursorVisible() {
+	tableHeight := m.tableHeight()
+	if tableHeight <= 0 {
+		return
+	}
+
+	if m.databaseCursor < m.databaseOffset {
+		m.databaseOffset = m.databaseCursor
+	} else if m.databaseCursor >= m.databaseOffset+tableHeight {
+		m.databaseOffset = m.databaseCursor - tableHeight + 1
+	}
+}
+
+// triggerDatabaseSync validates and starts a database sync
+func (m *Model) triggerDatabaseSync(projectName string, force bool) tea.Cmd {
+	if m.databaseSyncing[projectName] {
+		m.setStatus("Sync already in progress for "+projectName, false)
+		return nil
+	}
+
+	project := m.config.Projects[projectName]
+	if project == nil || project.Database == nil {
+		m.setStatus("No database config for "+projectName, true)
+		return nil
+	}
+
+	// Mark as syncing and clear old logs
+	m.databaseSyncing[projectName] = true
+	m.databaseProgress[projectName] = "Starting..."
+	m.databaseLogs[projectName] = []string{fmt.Sprintf("[%s] Starting sync...", time.Now().Format("15:04:05"))}
+
+	if force {
+		m.setStatus("Starting force sync for "+projectName+"...", false)
+	} else {
+		m.setStatus("Checking for changes in "+projectName+"...", false)
+	}
+
+	// Start async sync with progress channel
+	return m.startDatabaseSyncWithProgress(projectName, project.Database, force)
+}
+
+// startDatabaseSyncWithProgress starts an async database sync with real-time progress
+func (m *Model) startDatabaseSyncWithProgress(projectName string, dbConfig *config.DatabaseConfig, force bool) tea.Cmd {
+	// Create a channel for progress updates
+	progressChan := make(chan string, 100)
+
+	// Start the sync in a goroutine
+	go func() {
+		defer close(progressChan)
+
+		startTime := time.Now()
+
+		// Get the dbsync directory
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return
+		}
+		dbsyncDir := filepath.Join(homeDir, ".conductor", "dbsync")
+
+		// Check if sync is needed (unless force)
+		if !force {
+			progressChan <- "Checking for changes..."
+			checkResult, err := database.CheckSyncNeeded(dbConfig, projectName, dbsyncDir)
+			if err == nil && !checkResult.NeedsSync {
+				progressChan <- "SKIP:" + checkResult.Reason
+				return
+			}
+			if checkResult != nil && checkResult.NeedsSync {
+				progressChan <- "Changes detected: " + checkResult.Reason
+			}
+		}
+
+		// Progress callback
+		progress := func(msg string) {
+			select {
+			case progressChan <- msg:
+			default:
+				// Channel full, skip
+			}
+		}
+
+		progressChan <- "Starting sync..."
+
+		// Run the sync with progress
+		metadata, err := database.SyncFromSourceWithProgress(dbConfig, projectName, dbsyncDir, progress)
+		if err != nil {
+			progressChan <- "ERROR:" + err.Error()
+			return
+		}
+
+		// Send completion info
+		progressChan <- fmt.Sprintf("DONE:%d:%d:%d", len(metadata.TableSizes), len(metadata.ExcludedTables), time.Since(startTime).Milliseconds())
+	}()
+
+	// Return a command that reads from the channel
+	return m.listenForSyncProgress(projectName, progressChan)
+}
+
+// listenForSyncProgress returns a command that listens for sync progress
+func (m *Model) listenForSyncProgress(projectName string, progressChan <-chan string) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-progressChan
+		if !ok {
+			// Channel closed without completion message - shouldn't happen normally
+			return DatabaseSyncCompletedMsg{
+				ProjectName: projectName,
+				Err:         fmt.Errorf("sync terminated unexpectedly"),
+			}
+		}
+
+		// Check for special messages
+		if strings.HasPrefix(msg, "SKIP:") {
+			return DatabaseSyncCompletedMsg{
+				ProjectName: projectName,
+				Skipped:     true,
+				SkipReason:  strings.TrimPrefix(msg, "SKIP:"),
+			}
+		}
+
+		if strings.HasPrefix(msg, "ERROR:") {
+			return DatabaseSyncCompletedMsg{
+				ProjectName: projectName,
+				Err:         errors.New(strings.TrimPrefix(msg, "ERROR:")),
+			}
+		}
+
+		if strings.HasPrefix(msg, "DONE:") {
+			// Parse completion: DONE:tableCount:excludedCount:durationMs
+			parts := strings.Split(strings.TrimPrefix(msg, "DONE:"), ":")
+			tableCount := 0
+			excludedCount := 0
+			durationMs := int64(0)
+			if len(parts) >= 3 {
+				_, _ = fmt.Sscanf(parts[0], "%d", &tableCount)
+				_, _ = fmt.Sscanf(parts[1], "%d", &excludedCount)
+				_, _ = fmt.Sscanf(parts[2], "%d", &durationMs)
+			}
+
+			// Get golden file size
+			homeDir, _ := os.UserHomeDir()
+			dbsyncDir := filepath.Join(homeDir, ".conductor", "dbsync")
+			goldenPath := filepath.Join(dbsyncDir, projectName, "golden.sql")
+			var goldenSize int64
+			if info, err := os.Stat(goldenPath); err == nil {
+				goldenSize = info.Size()
+			}
+
+			return DatabaseSyncCompletedMsg{
+				ProjectName:    projectName,
+				GoldenFileSize: goldenSize,
+				TableCount:     tableCount,
+				ExcludedCount:  excludedCount,
+				DurationMs:     durationMs,
+			}
+		}
+
+		// Regular progress message - return it and continue listening
+		return progressMsgWithContinue{
+			progress: DatabaseSyncProgressMsg{
+				ProjectName: projectName,
+				Message:     msg,
+			},
+			next: func() tea.Msg {
+				// Continue listening
+				return listenForMoreProgress(projectName, progressChan)()
+			},
+		}
+	}
+}
+
+// progressMsgWithContinue wraps a progress message with a continuation
+type progressMsgWithContinue struct {
+	progress DatabaseSyncProgressMsg
+	next     func() tea.Msg
+}
+
+// listenForMoreProgress continues listening for progress
+func listenForMoreProgress(projectName string, progressChan <-chan string) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-progressChan
+		if !ok {
+			// Channel closed - sync complete
+			return DatabaseSyncCompletedMsg{
+				ProjectName: projectName,
+			}
+		}
+
+		// Check for special messages
+		if strings.HasPrefix(msg, "SKIP:") {
+			return DatabaseSyncCompletedMsg{
+				ProjectName: projectName,
+				Skipped:     true,
+				SkipReason:  strings.TrimPrefix(msg, "SKIP:"),
+			}
+		}
+
+		if strings.HasPrefix(msg, "ERROR:") {
+			return DatabaseSyncCompletedMsg{
+				ProjectName: projectName,
+				Err:         errors.New(strings.TrimPrefix(msg, "ERROR:")),
+			}
+		}
+
+		if strings.HasPrefix(msg, "DONE:") {
+			parts := strings.Split(strings.TrimPrefix(msg, "DONE:"), ":")
+			tableCount := 0
+			excludedCount := 0
+			durationMs := int64(0)
+			if len(parts) >= 3 {
+				_, _ = fmt.Sscanf(parts[0], "%d", &tableCount)
+				_, _ = fmt.Sscanf(parts[1], "%d", &excludedCount)
+				_, _ = fmt.Sscanf(parts[2], "%d", &durationMs)
+			}
+
+			homeDir, _ := os.UserHomeDir()
+			dbsyncDir := filepath.Join(homeDir, ".conductor", "dbsync")
+			goldenPath := filepath.Join(dbsyncDir, projectName, "golden.sql")
+			var goldenSize int64
+			if info, err := os.Stat(goldenPath); err == nil {
+				goldenSize = info.Size()
+			}
+
+			return DatabaseSyncCompletedMsg{
+				ProjectName:    projectName,
+				GoldenFileSize: goldenSize,
+				TableCount:     tableCount,
+				ExcludedCount:  excludedCount,
+				DurationMs:     durationMs,
+			}
+		}
+
+		// Regular progress
+		return progressMsgWithContinue{
+			progress: DatabaseSyncProgressMsg{
+				ProjectName: projectName,
+				Message:     msg,
+			},
+			next: func() tea.Msg {
+				return listenForMoreProgress(projectName, progressChan)()
+			},
+		}
+	}
+}
+
+// loadDatabaseMetadata creates a command that loads sync metadata from disk for all projects
+// This is used to populate SyncStatus from metadata.json files created by CLI sync commands
+func (m *Model) loadDatabaseMetadata() tea.Cmd {
+	return func() tea.Msg {
+		result := make(map[string]*config.DatabaseSyncStatus)
+
+		// Get dbsync directory
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return DatabaseMetadataLoadedMsg{Metadata: result}
+		}
+		dbsyncDir := filepath.Join(homeDir, ".conductor", "dbsync")
+
+		// Load metadata for each project with database config
+		for projectName, project := range m.config.Projects {
+			if project.Database == nil || project.Database.Source == "" {
+				continue
+			}
+
+			// Skip if already has valid SyncStatus
+			if project.Database.SyncStatus != nil && project.Database.SyncStatus.LastSyncAt != "" {
+				continue
+			}
+
+			// Try to load metadata from disk
+			metadata, err := database.LoadSyncMetadata(projectName, dbsyncDir)
+			if err != nil || metadata == nil {
+				continue
+			}
+
+			// Convert SyncMetadata to DatabaseSyncStatus
+			syncStatus := &config.DatabaseSyncStatus{
+				LastSyncAt:     metadata.LastSyncAt.Format("2006-01-02 15:04"),
+				GoldenCopySize: metadata.GoldenFileSize,
+				TableCount:     len(metadata.TableSizes),
+				ExcludedCount:  len(metadata.ExcludedTables),
+				Status:         "synced",
+			}
+
+			// Check if there was an error
+			if metadata.Error != "" {
+				syncStatus.Status = "failed"
+				syncStatus.LastError = metadata.Error
+			}
+
+			result[projectName] = syncStatus
+		}
+
+		return DatabaseMetadataLoadedMsg{Metadata: result}
 	}
 }

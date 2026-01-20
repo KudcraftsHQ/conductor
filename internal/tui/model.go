@@ -88,8 +88,9 @@ type Model struct {
 	filterMode bool
 
 	// Help
-	help   help.Model
-	keyMap keys.KeyMap
+	help       help.Model
+	keyMap     keys.KeyMap
+	helpScroll int // Scroll offset for help modal
 
 	// Create worktree modal
 	createInput     textinput.Model
@@ -166,6 +167,19 @@ type Model struct {
 	orphanedLoading      bool                          // Loading orphaned branches
 	archivedWorktrees    []archivedWorktreeInfo
 
+	// Database view state
+	databaseProjects []string          // List of projects with database config
+	databaseCursor   int               // Selected project in database view
+	databaseOffset   int               // Scroll offset for database view
+	databaseSyncing  map[string]bool   // Projects currently syncing
+	databaseProgress map[string]string // Current progress message per project
+
+	// Database logs view state
+	databaseLogs        map[string][]string // Logs per project (most recent sync)
+	databaseLogsProject string              // Which project's logs are being viewed
+	databaseLogsScroll  int                 // Scroll offset for logs view
+	databaseLogsAuto    bool                // Auto-scroll to bottom
+
 	// Config file watching (for CLI-to-TUI updates)
 	configModTime    time.Time // Last known modification time of config file
 	lastConfigReload time.Time // For debouncing rapid reloads
@@ -222,6 +236,9 @@ func NewModelWithStore(cfg *config.Config, s *store.Store, version string) *Mode
 		spinner:           sp,
 		gitStatusCache:    make(map[string]*workspace.GitStatusInfo),
 		tunnelManager:     tunnel.NewManager(cfg),
+		databaseSyncing:   make(map[string]bool),
+		databaseProgress:  make(map[string]string),
+		databaseLogs:      make(map[string][]string),
 	}
 
 	m.refreshProjectList()

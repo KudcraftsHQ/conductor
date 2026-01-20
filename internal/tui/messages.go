@@ -256,3 +256,73 @@ type ConfigWatchTickMsg struct{}
 
 // ConfigFileChangedMsg indicates the config file was modified externally
 type ConfigFileChangedMsg struct{}
+
+// ViewDatabases is the view for database list
+const ViewDatabases View = iota + 600
+
+// ViewDatabaseLogs is the view for database sync logs
+const ViewDatabaseLogs View = iota + 601
+
+// DatabaseSyncStartedMsg indicates database sync has started
+type DatabaseSyncStartedMsg struct {
+	ProjectName string
+	Force       bool // True if force sync (skip incremental check)
+}
+
+// DatabaseSyncProgressMsg indicates sync progress update
+type DatabaseSyncProgressMsg struct {
+	ProjectName  string
+	Message      string
+	TablesDone   int
+	TablesTotal  int
+	CurrentTable string
+}
+
+// DatabaseSyncCompletedMsg indicates database sync has completed
+type DatabaseSyncCompletedMsg struct {
+	ProjectName    string
+	GoldenFileSize int64
+	TableCount     int
+	ExcludedCount  int
+	DurationMs     int64
+	Skipped        bool   // True if sync was skipped (no changes)
+	SkipReason     string // Reason for skipping
+	Err            error
+}
+
+// DatabaseReinitStartedMsg indicates database reinit has started
+type DatabaseReinitStartedMsg struct {
+	ProjectName  string
+	WorktreeName string
+	DatabaseName string
+}
+
+// DatabaseReinitCompletedMsg indicates database reinit has completed
+type DatabaseReinitCompletedMsg struct {
+	ProjectName       string
+	WorktreeName      string
+	DatabaseName      string
+	MigrationStatus   string // forward, synced, diverged, behind
+	PendingMigrations int
+	Err               error
+}
+
+// DatabaseMigrationStatusMsg contains migration status for a worktree
+type DatabaseMigrationStatusMsg struct {
+	ProjectName       string
+	WorktreeName      string
+	MigrationStatus   string
+	AppliedCount      int
+	WorktreeCount     int
+	PendingMigrations []string
+	ExtraMigrations   []string
+	Recommendation    string
+	Err               error
+}
+
+// DatabaseMetadataLoadedMsg indicates sync metadata was loaded from disk for all projects
+type DatabaseMetadataLoadedMsg struct {
+	// Metadata maps project name to sync status (loaded from metadata.json)
+	Metadata map[string]*config.DatabaseSyncStatus
+}
+

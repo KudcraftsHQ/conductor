@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/database"
 	"github.com/hammashamzah/conductor/internal/runner"
 	"github.com/hammashamzah/conductor/internal/store"
 )
@@ -153,6 +154,50 @@ func (sm *SetupManager) RunSetupAsync(
 
 		// Load project config for environment variables
 		projectConfig, _ := config.LoadProjectConfig(project.Path)
+
+		// Clone database if configured for this worktree
+		if worktree.DatabaseName != "" {
+			defaults := sm.store.GetDefaults()
+			if defaults.LocalPostgresURL != "" {
+				// Log database cloning
+				dbMsg := fmt.Sprintf("Cloning database to %s...\n", worktree.DatabaseName)
+				sm.mu.Lock()
+				if buf, ok := sm.logs[key]; ok {
+					buf.WriteString(dbMsg)
+				}
+				sm.mu.Unlock()
+				if logFile != nil {
+					logFile.WriteString(dbMsg)
+				}
+
+				// Get conductor directory for dbsync storage
+				conductorDir, _ := config.ConductorDir()
+
+				// Clone the database
+				if err := cloneWorktreeDB(defaults.LocalPostgresURL, worktree.DatabaseName, projectName, conductorDir); err != nil {
+					errMsg := fmt.Sprintf("Warning: database clone failed: %v\n", err)
+					sm.mu.Lock()
+					if buf, ok := sm.logs[key]; ok {
+						buf.WriteString(errMsg)
+					}
+					sm.mu.Unlock()
+					if logFile != nil {
+						logFile.WriteString(errMsg)
+					}
+					// Continue anyway - setup script may handle missing DB
+				} else {
+					successMsg := fmt.Sprintf("Database %s created successfully\n", worktree.DatabaseName)
+					sm.mu.Lock()
+					if buf, ok := sm.logs[key]; ok {
+						buf.WriteString(successMsg)
+					}
+					sm.mu.Unlock()
+					if logFile != nil {
+						logFile.WriteString(successMsg)
+					}
+				}
+			}
+		}
 
 		// Check for setup script in .conductor-scripts/setup.sh
 		scriptPath := filepath.Join(project.Path, ".conductor-scripts", "setup.sh")
@@ -409,3 +454,18 @@ func runSetupSync(project *config.Project, projectName, worktreeName string, wor
 
 	return setupErr
 }
+
+
+// cloneWorktreeDB clones the golden database copy to a worktree database
+func cloneWorktreeDB(localURL, dbName, projectName, conductorDir string) error {
+	// Check if golden copy exists
+	goldenPath := database.GetGoldenCopyPath(projectName, filepath.Join(conductorDir, "dbsync"))
+	schemaPath := database.GetSchemaOnlyPath(projectName, filepath.Join(conductorDir, "dbsync"))
+
+	if !database.GoldenCopyExists(projectName, filepath.Join(conductorDir, "dbsync")) {
+		return fmt.Errorf("no golden copy found for project %s - run database sync first", projectName)
+	}
+
+	return database.CloneToWorktree(localURL, dbName, goldenPath, schemaPath)
+}
+
