@@ -616,6 +616,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Sync store with updated config from disk
+		if err := m.store.Reload(); err != nil {
+			return m, nil
+		}
+
 		m.config = cfg
 		m.wsManager = workspace.NewManagerWithStore(cfg, m.store)
 		m.refreshProjectList()

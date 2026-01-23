@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Markdown Help Output**: New `conductor help --markdown` flag for AI-friendly documentation
+  - Outputs complete CLI reference in markdown format
+  - Organized by command category (Core, Project, Worktree, Database, Tunnel, Utilities)
+  - Includes environment variables and configuration file references
+  - Shows tip for AI tools when running regular `conductor help`
+- **Database Lifecycle Documentation**: Comprehensive database sync documentation in README
+  - Three-tier architecture diagram (Source → Golden → Worktree)
+  - Complete command reference table
+  - Table exclusion configuration examples
 - **Auto-Release CI Workflow**: Automatic versioning and releases on push to main
   - Calculates version based on date format `YEAR.MONTH.DAY.PATCH`
   - Updates Makefile VERSION automatically

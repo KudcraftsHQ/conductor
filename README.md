@@ -222,6 +222,67 @@ conductor run
 conductor status
 ```
 
+#### Database Lifecycle
+
+Conductor provides database synchronization to give each worktree an isolated database clone. This is useful for projects using PostgreSQL where you want to test migrations or work with production-like data.
+
+```bash
+# 1. Set up your source database (production/staging)
+conductor database set-source "postgresql://user:pass@host:5432/mydb"
+
+# 2. Sync to create a local "golden" copy
+conductor database sync
+
+# 3. Clone the golden copy to a worktree
+conductor database clone --worktree tokyo
+
+# 4. Reinitialize after rebasing (drops and re-clones)
+conductor database reinit --worktree tokyo
+
+# 5. Check sync status
+conductor database status
+
+# 6. List all worktree databases
+conductor database list
+```
+
+**Architecture:**
+
+```
+┌─────────────────┐    sync     ┌─────────────────┐    clone    ┌──────────────────┐
+│   Source DB     │ ─────────▶  │   Golden DB     │ ─────────▶  │  Worktree DBs    │
+│ (prod/staging)  │             │ (myapp_golden)  │             │ (myapp-3100, etc)│
+└─────────────────┘             └─────────────────┘             └──────────────────┘
+```
+
+- **Source DB**: Your production or staging PostgreSQL database
+- **Golden DB**: A local copy synced from source, stored in your local PostgreSQL as `{project}_golden`
+- **Worktree DBs**: Individual database clones for each worktree, named `{project}-{port}`
+
+**Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `database set-source <url>` | Configure source database connection |
+| `database set-local <url>` | Configure local PostgreSQL connection |
+| `database sync` | Sync source → golden (incremental, with progress) |
+| `database clone` | Clone golden → worktree database |
+| `database reinit` | Drop and re-clone worktree database |
+| `database drop` | Drop a worktree database |
+| `database status` | Show sync status and golden DB info |
+| `database list` | List all worktree databases |
+| `database analyze` | Analyze source tables for exclusion suggestions |
+| `database migration-status` | Check Prisma migration compatibility |
+| `database check-freshness` | Check if golden needs resync |
+
+**Table Exclusions:**
+
+Large tables (audit logs, events) can be excluded from data sync while keeping their schema:
+
+```bash
+conductor database set-source "postgresql://..." --exclude=audit_logs,events
+```
+
 #### Cloudflare Tunnels
 
 Expose your local dev server to the internet via Cloudflare tunnels:

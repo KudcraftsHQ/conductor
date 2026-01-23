@@ -393,6 +393,8 @@ func (s *Store) copyWorktree(wt *config.Worktree) *config.Worktree {
 		SetupStatus:   wt.SetupStatus,
 		ArchiveStatus: wt.ArchiveStatus,
 		Tunnel:        s.copyTunnelState(wt.Tunnel),
+		DatabaseName:  wt.DatabaseName,
+		DatabaseURL:   wt.DatabaseURL,
 	}
 
 	// Copy ports
