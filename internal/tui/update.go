@@ -645,6 +645,11 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmDelete(msg)
 	}
 
+	// Handle confirm database reinit
+	if m.currentView == ViewConfirmDbReinit {
+		return m.handleConfirmDbReinit(msg)
+	}
+
 	// Handle help modal
 	if m.currentView == ViewHelp {
 		switch {
@@ -1208,7 +1213,7 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keyMap.DatabaseReinit):
-		// Reinitialize database for selected worktree
+		// Show confirmation dialog for database reinit
 		worktrees := m.worktreeNames
 		if len(worktrees) == 0 || m.cursor >= len(worktrees) {
 			return m, nil
@@ -1229,79 +1234,13 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		projectName := m.selectedProject
-		dbName := worktree.DatabaseName
-		worktreePath := worktree.Path
-		localURL := defaults.LocalPostgresURL
-		m.setStatus("Re-initializing database "+dbName+"...", false)
-
-		return m, func() tea.Msg {
-			ctx := context.Background()
-
-			// First try V3 (golden database) - preferred method
-			goldenExists, err := database.GoldenDBExists(localURL, projectName)
-			if err == nil && goldenExists {
-				// Use V3: Clone from golden database
-				result, err := database.ReinitializeDatabaseV3(ctx, localURL, projectName, dbName, worktreePath, nil)
-				if err != nil {
-					return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
-				}
-
-				migStatus := "unknown"
-				pendingCount := 0
-				if result.MigrationState != nil {
-					migStatus = string(result.MigrationState.Compatibility)
-					pendingCount = len(result.MigrationState.PendingMigrations)
-				}
-
-				return DatabaseReinitCompletedMsg{
-					ProjectName:       projectName,
-					WorktreeName:      worktreeName,
-					DatabaseName:      result.DatabaseName,
-					MigrationStatus:   migStatus,
-					PendingMigrations: pendingCount,
-					Err:               nil,
-				}
-			}
-
-			// Fall back to V1/V2 (file-based golden copy)
-			conductorDir, err := config.ConductorDir()
-			if err != nil {
-				return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
-			}
-
-			goldenPath := database.GetGoldenCopyPath(projectName, conductorDir)
-			schemaPath := database.GetSchemaOnlyPath(projectName, conductorDir)
-
-			if !database.GoldenCopyExists(projectName, conductorDir) {
-				return DatabaseReinitCompletedMsg{
-					ProjectName:  projectName,
-					WorktreeName: worktreeName,
-					Err:          fmt.Errorf("golden copy not found - run 'S' to sync first"),
-				}
-			}
-
-			result, err := database.ReinitializeDatabase(localURL, dbName, goldenPath, schemaPath, worktreePath)
-			if err != nil {
-				return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
-			}
-
-			migStatus := "unknown"
-			pendingCount := 0
-			if result.MigrationState != nil {
-				migStatus = string(result.MigrationState.Compatibility)
-				pendingCount = len(result.MigrationState.PendingMigrations)
-			}
-
-			return DatabaseReinitCompletedMsg{
-				ProjectName:       projectName,
-				WorktreeName:      worktreeName,
-				DatabaseName:      result.DatabaseName,
-				MigrationStatus:   migStatus,
-				PendingMigrations: pendingCount,
-				Err:               nil,
-			}
-		}
+		// Store reinit target and show confirmation dialog
+		m.dbReinitProject = m.selectedProject
+		m.dbReinitWorktree = worktreeName
+		m.dbReinitDBName = worktree.DatabaseName
+		m.prevView = m.currentView
+		m.currentView = ViewConfirmDbReinit
+		return m, nil
 
 	case key.Matches(msg, m.keyMap.DatabaseMigrationStatus):
 		// Check migration status for selected worktree
@@ -1438,6 +1377,90 @@ func (m *Model) handleConfirmDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.deleteTargetType = ""
 	}
 	return m, nil
+}
+
+func (m *Model) handleConfirmDbReinit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		return m.executeDbReinit()
+	case "n", "N", "esc":
+		m.currentView = m.prevView
+		m.dbReinitProject = ""
+		m.dbReinitWorktree = ""
+		m.dbReinitDBName = ""
+	}
+	return m, nil
+}
+
+func (m *Model) executeDbReinit() (tea.Model, tea.Cmd) {
+	projectName := m.dbReinitProject
+	worktreeName := m.dbReinitWorktree
+	dbName := m.dbReinitDBName
+
+	// Get worktree path
+	project := m.config.Projects[projectName]
+	if project == nil {
+		m.setStatus("Project not found", true)
+		m.currentView = m.prevView
+		return m, nil
+	}
+	worktree := project.Worktrees[worktreeName]
+	if worktree == nil {
+		m.setStatus("Worktree not found", true)
+		m.currentView = m.prevView
+		return m, nil
+	}
+	worktreePath := worktree.Path
+
+	defaults := m.store.GetDefaults()
+	localURL := defaults.LocalPostgresURL
+
+	// Clear dialog state
+	m.dbReinitProject = ""
+	m.dbReinitWorktree = ""
+	m.dbReinitDBName = ""
+	m.currentView = m.prevView
+
+	m.setStatus("Re-initializing database "+dbName+"...", false)
+
+	return m, func() tea.Msg {
+		ctx := context.Background()
+
+		// Check if golden database exists
+		goldenExists, err := database.GoldenDBExists(localURL, projectName)
+		if err != nil {
+			return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
+		}
+		if !goldenExists {
+			return DatabaseReinitCompletedMsg{
+				ProjectName:  projectName,
+				WorktreeName: worktreeName,
+				Err:          fmt.Errorf("golden database not found - run 'S' to sync first"),
+			}
+		}
+
+		// Use V3: Clone from golden database
+		result, err := database.ReinitializeDatabaseV3(ctx, localURL, projectName, dbName, worktreePath, nil)
+		if err != nil {
+			return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
+		}
+
+		migStatus := "unknown"
+		pendingCount := 0
+		if result.MigrationState != nil {
+			migStatus = string(result.MigrationState.Compatibility)
+			pendingCount = len(result.MigrationState.PendingMigrations)
+		}
+
+		return DatabaseReinitCompletedMsg{
+			ProjectName:       projectName,
+			WorktreeName:      worktreeName,
+			DatabaseName:      result.DatabaseName,
+			MigrationStatus:   migStatus,
+			PendingMigrations: pendingCount,
+			Err:               nil,
+		}
+	}
 }
 
 func (m *Model) createWorktree() (tea.Model, tea.Cmd) {

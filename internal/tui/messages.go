@@ -263,6 +263,9 @@ const ViewDatabases View = iota + 600
 // ViewDatabaseLogs is the view for database sync logs
 const ViewDatabaseLogs View = iota + 601
 
+// ViewConfirmDbReinit is the confirmation dialog for database reinitialization
+const ViewConfirmDbReinit View = iota + 602
+
 // DatabaseSyncStartedMsg indicates database sync has started
 type DatabaseSyncStartedMsg struct {
 	ProjectName string

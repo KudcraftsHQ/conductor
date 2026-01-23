@@ -183,6 +183,11 @@ type Model struct {
 	databaseLogsScroll  int                 // Scroll offset for logs view
 	databaseLogsAuto    bool                // Auto-scroll to bottom
 
+	// Database reinit confirmation state
+	dbReinitProject  string // Project name for reinit
+	dbReinitWorktree string // Worktree name for reinit
+	dbReinitDBName   string // Database name for reinit
+
 	// Config file watching (for CLI-to-TUI updates)
 	configModTime    time.Time // Last known modification time of config file
 	lastConfigReload time.Time // For debouncing rapid reloads

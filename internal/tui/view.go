@@ -45,6 +45,9 @@ func (m *Model) View() string {
 		} else {
 			sections = append(sections, m.renderProjectsTable())
 		}
+	case ViewConfirmDbReinit:
+		// Render worktrees table as background (reinit is always from worktrees view)
+		sections = append(sections, m.renderWorktreesTable())
 	case ViewHelp:
 		// Render previous view as background
 		switch m.prevView {
@@ -88,6 +91,8 @@ func (m *Model) View() string {
 		return m.overlayModal(baseView, m.renderCreateWorktreeModal())
 	case ViewConfirmDelete:
 		return m.overlayModal(baseView, m.renderConfirmDeleteModal())
+	case ViewConfirmDbReinit:
+		return m.overlayModal(baseView, m.renderConfirmDbReinitModal())
 	case ViewHelp:
 		return m.overlayModal(baseView, m.renderHelpModal())
 	case ViewQuit:
@@ -170,6 +175,9 @@ func (m *Model) renderTitleBar() string {
 		count = 0
 	case ViewConfirmDelete:
 		title = "CONFIRM"
+		count = 0
+	case ViewConfirmDbReinit:
+		title = "CONFIRM REINIT"
 		count = 0
 	case ViewHelp:
 		title = "HELP"
@@ -570,6 +578,8 @@ func (m *Model) getContextKeys() []CommandKey {
 		return []CommandKey{{"enter", "create"}, {"tab", "next"}, {"esc", "cancel"}}
 	case ViewConfirmDelete:
 		return []CommandKey{{"enter", "confirm"}, {"esc", "cancel"}}
+	case ViewConfirmDbReinit:
+		return []CommandKey{{"y", "yes"}, {"n", "no"}, {"esc", "cancel"}}
 	case ViewTunnelModal:
 		return []CommandKey{{"enter", "start"}, {"tab", "switch"}, {"esc", "cancel"}}
 	default:
@@ -611,6 +621,10 @@ func (m *Model) renderFooter() string {
 		breadcrumbs = append(breadcrumbs, "create")
 	case ViewConfirmDelete:
 		breadcrumbs = append(breadcrumbs, "confirm")
+	case ViewConfirmDbReinit:
+		breadcrumbs = append(breadcrumbs, "projects")
+		breadcrumbs = append(breadcrumbs, m.dbReinitProject)
+		breadcrumbs = append(breadcrumbs, "reinit-db")
 	case ViewPRs:
 		breadcrumbs = append(breadcrumbs, "projects")
 		breadcrumbs = append(breadcrumbs, m.selectedProject)
@@ -755,6 +769,31 @@ func (m *Model) renderConfirmDeleteModal() string {
 		content.WriteString(fmt.Sprintf("  Remove project '%s'?\n\n", m.deleteTarget))
 		content.WriteString(m.styles.Muted.Render("  This will free all ports. Files will NOT be deleted."))
 	}
+
+	content.WriteString("\n\n  ")
+	content.WriteString(m.styles.RenderKeyHelp("y", "yes"))
+	content.WriteString("  ")
+	content.WriteString(m.styles.RenderKeyHelp("n", "no"))
+
+	modal := m.styles.Modal.Width(width).Render(content.String())
+
+	return modal
+}
+
+func (m *Model) renderConfirmDbReinitModal() string {
+	width := 55
+	if width > m.width-4 {
+		width = m.width - 4
+	}
+
+	var content strings.Builder
+
+	content.WriteString(m.styles.ModalTitle.Render("Confirm Database Reinit"))
+	content.WriteString("\n\n")
+	content.WriteString(fmt.Sprintf("  Reinitialize database '%s'?\n\n", m.dbReinitDBName))
+	content.WriteString(m.styles.Muted.Render("  This will DROP the existing database and clone\n"))
+	content.WriteString(m.styles.Muted.Render("  fresh data from the golden database.\n\n"))
+	content.WriteString(m.styles.StatusError.Render("  ⚠ All local changes will be lost!"))
 
 	content.WriteString("\n\n  ")
 	content.WriteString(m.styles.RenderKeyHelp("y", "yes"))
