@@ -468,6 +468,60 @@ func CloneFromGoldenDB(ctx context.Context, localURL string, projectName string,
 	return nil
 }
 
+// ReinitializeDatabaseV3 drops an existing worktree database and re-clones from the golden database
+// Returns error if golden database doesn't exist
+func ReinitializeDatabaseV3(ctx context.Context, localURL string, projectName string, worktreeDBName string, worktreePath string, progress ProgressFunc) (*ReinitV3Result, error) {
+	// Check golden DB exists
+	exists, err := GoldenDBExists(localURL, projectName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check golden DB: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("golden database does not exist for project %s - run sync first", projectName)
+	}
+
+	// Drop existing database if it exists
+	dbExists, err := DatabaseExists(localURL, worktreeDBName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check database existence: %w", err)
+	}
+
+	if dbExists {
+		if progress != nil {
+			progress("Dropping existing database...")
+		}
+		if err := DropDatabase(localURL, worktreeDBName); err != nil {
+			return nil, fmt.Errorf("failed to drop existing database: %w", err)
+		}
+	}
+
+	// Clone from golden database
+	if err := CloneFromGoldenDB(ctx, localURL, projectName, worktreeDBName, progress); err != nil {
+		return nil, err
+	}
+
+	result := &ReinitV3Result{
+		DatabaseName: worktreeDBName,
+	}
+
+	// Check migration status if worktree uses Prisma
+	if HasPrismaMigrations(worktreePath) {
+		dbURL := BuildWorktreeURL(localURL, worktreeDBName)
+		state, err := DetectMigrationState(dbURL, worktreePath)
+		if err == nil {
+			result.MigrationState = state
+		}
+	}
+
+	return result, nil
+}
+
+// ReinitV3Result contains the result of a V3 database reinitialization
+type ReinitV3Result struct {
+	DatabaseName   string
+	MigrationState *MigrationState
+}
+
 // GetGoldenDBSyncInfo retrieves the latest sync info from the golden database
 func GetGoldenDBSyncInfo(localURL string, projectName string) (*GoldenDBSyncInfo, error) {
 	exists, err := GoldenDBExists(localURL, projectName)

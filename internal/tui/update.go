@@ -1232,9 +1232,39 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		projectName := m.selectedProject
 		dbName := worktree.DatabaseName
 		worktreePath := worktree.Path
+		localURL := defaults.LocalPostgresURL
 		m.setStatus("Re-initializing database "+dbName+"...", false)
 
 		return m, func() tea.Msg {
+			ctx := context.Background()
+
+			// First try V3 (golden database) - preferred method
+			goldenExists, err := database.GoldenDBExists(localURL, projectName)
+			if err == nil && goldenExists {
+				// Use V3: Clone from golden database
+				result, err := database.ReinitializeDatabaseV3(ctx, localURL, projectName, dbName, worktreePath, nil)
+				if err != nil {
+					return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
+				}
+
+				migStatus := "unknown"
+				pendingCount := 0
+				if result.MigrationState != nil {
+					migStatus = string(result.MigrationState.Compatibility)
+					pendingCount = len(result.MigrationState.PendingMigrations)
+				}
+
+				return DatabaseReinitCompletedMsg{
+					ProjectName:       projectName,
+					WorktreeName:      worktreeName,
+					DatabaseName:      result.DatabaseName,
+					MigrationStatus:   migStatus,
+					PendingMigrations: pendingCount,
+					Err:               nil,
+				}
+			}
+
+			// Fall back to V1/V2 (file-based golden copy)
 			conductorDir, err := config.ConductorDir()
 			if err != nil {
 				return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
@@ -1251,7 +1281,7 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-			result, err := database.ReinitializeDatabase(defaults.LocalPostgresURL, dbName, goldenPath, schemaPath, worktreePath)
+			result, err := database.ReinitializeDatabase(localURL, dbName, goldenPath, schemaPath, worktreePath)
 			if err != nil {
 				return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
 			}
