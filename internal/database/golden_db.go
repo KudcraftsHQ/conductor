@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -644,4 +645,80 @@ func formatDuration(d time.Duration) string {
 	}
 	days := int(d.Hours() / 24)
 	return fmt.Sprintf("%dd", days)
+}
+
+// LoadGoldenDBMetadata loads sync metadata from the golden database (V3)
+func LoadGoldenDBMetadata(localURL string, projectName string) (*SyncMetadata, error) {
+	exists, err := GoldenDBExists(localURL, projectName)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, nil
+	}
+
+	goldenURL := GoldenDBURL(localURL, projectName)
+	db, err := sql.Open("postgres", goldenURL)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+
+	var syncedAt time.Time
+	var sourceURL string
+	var excludedTablesJSON, rowCountsJSON []byte
+	var syncDurationMs int64
+	var isIncremental bool
+
+	err = db.QueryRow(`
+		SELECT synced_at, source_url, excluded_tables, row_counts, sync_duration_ms, is_incremental
+		FROM _conductor_sync
+		ORDER BY id DESC LIMIT 1
+	`).Scan(&syncedAt, &sourceURL, &excludedTablesJSON, &rowCountsJSON, &syncDurationMs, &isIncremental)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var excludedTables []string
+	var rowCounts map[string]int64
+	_ = json.Unmarshal(excludedTablesJSON, &excludedTables)
+	_ = json.Unmarshal(rowCountsJSON, &rowCounts)
+
+	return &SyncMetadata{
+		LastSyncAt:     syncedAt,
+		ExcludedTables: excludedTables,
+		RowCounts:      rowCounts,
+		SyncDurationMs: syncDurationMs,
+		IsIncremental:  isIncremental,
+		SyncVersion:    SyncVersionGoldenDB,
+	}, nil
+}
+
+// GetGoldenDBSize returns the size of the golden database in bytes
+func GetGoldenDBSize(localURL string, projectName string) (int64, error) {
+	exists, err := GoldenDBExists(localURL, projectName)
+	if err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, nil
+	}
+
+	goldenURL := GoldenDBURL(localURL, projectName)
+	db, err := sql.Open("postgres", goldenURL)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = db.Close() }()
+
+	dbName := GoldenDBName(projectName)
+	var size int64
+	err = db.QueryRow(`SELECT pg_database_size($1)`, dbName).Scan(&size)
+	if err != nil {
+		return 0, err
+	}
+	return size, nil
 }

@@ -571,30 +571,22 @@ var databaseCloneCmd = &cobra.Command{
 
 		fmt.Printf("Cloning database for worktree '%s'...\n", worktreeName)
 		fmt.Printf("  Database: %s\n", dbName)
-		fmt.Printf("  Source: golden copy\n\n")
+		fmt.Printf("  Source: golden database\n\n")
 
-		// Get dbsync directory
-		dbsyncDir := filepath.Join(conductorDir, "dbsync")
-
-		// Clone the database
-		result, err := database.CloneToWorktreeWithMigrations(
-			defaults.LocalPostgresURL,
-			dbName,
-			database.GetGoldenCopyPath(projectName, dbsyncDir),
-			database.GetSchemaOnlyPath(projectName, dbsyncDir),
-			worktree.Path,
-		)
+		// Clone from V3 golden database
+		err = database.CloneFromGoldenDB(cmd.Context(), defaults.LocalPostgresURL, projectName, dbName, func(msg string) {
+			fmt.Printf("  %s\n", msg)
+		})
 		if err != nil {
 			return fmt.Errorf("clone failed: %w", err)
 		}
 
+		dbURL := database.BuildWorktreeURL(defaults.LocalPostgresURL, dbName)
+
 		fmt.Printf("\n✓ Database cloned successfully\n")
-		fmt.Printf("  Database: %s\n", result.DatabaseName)
-		if result.MigrationState != nil && len(result.MigrationState.PendingMigrations) > 0 {
-			fmt.Printf("  Pending migrations: %d (run 'bunx prisma migrate deploy')\n", len(result.MigrationState.PendingMigrations))
-		}
+		fmt.Printf("  Database: %s\n", dbName)
 		fmt.Printf("\nSet DATABASE_URL in your .env:\n")
-		fmt.Printf("  %s\n", result.DatabaseURL)
+		fmt.Printf("  %s\n", dbURL)
 
 		return nil
 	},
@@ -668,12 +660,10 @@ var databaseReinitCmd = &cobra.Command{
 			return err
 		}
 
-		// Get golden copy paths
-		goldenPath := database.GetGoldenCopyPath(projectName, conductorDir)
-		schemaPath := database.GetSchemaOnlyPath(projectName, conductorDir)
+		mgr := database.NewManager(defaults.LocalPostgresURL, conductorDir)
 
-		// Check if golden copy exists
-		if !database.GoldenCopyExists(projectName, conductorDir) {
+		// Check if golden database exists (V3 only)
+		if !mgr.HasGoldenCopy(projectName) {
 			return fmt.Errorf("golden copy not found. Run 'conductor database sync' first")
 		}
 
@@ -681,13 +671,14 @@ var databaseReinitCmd = &cobra.Command{
 		fmt.Printf("  Database: %s\n", worktree.DatabaseName)
 		fmt.Printf("  Worktree path: %s\n", worktree.Path)
 
-		// Reinitialize
-		result, err := database.ReinitializeDatabase(
+		// Reinitialize using V3 (drop and re-clone from golden DB)
+		result, err := database.ReinitializeDatabaseV3(
+			cmd.Context(),
 			defaults.LocalPostgresURL,
 			worktree.DatabaseName,
-			goldenPath,
-			schemaPath,
+			projectName,
 			worktree.Path,
+			func(msg string) { fmt.Printf("  %s\n", msg) },
 		)
 		if err != nil {
 			return fmt.Errorf("failed to reinitialize: %w", err)
@@ -699,10 +690,9 @@ var databaseReinitCmd = &cobra.Command{
 			fmt.Printf("\nMigration status: %s\n", result.MigrationState.Compatibility)
 			if len(result.MigrationState.PendingMigrations) > 0 {
 				fmt.Printf("  Pending migrations: %d\n", len(result.MigrationState.PendingMigrations))
+				fmt.Printf("\nRun 'bunx prisma migrate deploy' to apply pending migrations\n")
 			}
 		}
-
-		fmt.Printf("\nRecommended: %s\n", result.RecommendedAction)
 
 		return nil
 	},

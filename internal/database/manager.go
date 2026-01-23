@@ -3,26 +3,22 @@ package database
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 )
 
-// Manager coordinates database operations
+// Manager coordinates database operations (V3 golden database only)
 type Manager struct {
-	localURL  string
-	dbsyncDir string
-	mu        sync.Mutex
-	syncing   map[string]bool // Track which projects are currently syncing
+	localURL string
+	mu       sync.Mutex
+	syncing  map[string]bool // Track which projects are currently syncing
 }
 
 // NewManager creates a new database manager
 func NewManager(localURL string, conductorDir string) *Manager {
 	return &Manager{
-		localURL:  localURL,
-		dbsyncDir: filepath.Join(conductorDir, "dbsync"),
-		syncing:   make(map[string]bool),
+		localURL: localURL,
+		syncing:  make(map[string]bool),
 	}
 }
 
@@ -71,17 +67,9 @@ func (m *Manager) SyncProjectWithProgressCtx(ctx context.Context, projectName st
 	}, nil
 }
 
-// CheckSyncNeeded checks if a sync is needed for a project
-// Uses V3 (golden DB) time-based check first, falls back to V1/V2 for file-based
+// CheckSyncNeeded checks if a sync is needed for a project (V3 only)
 func (m *Manager) CheckSyncNeeded(projectName string, cfg *DatabaseConfig) (*SyncCheckResult, error) {
-	// Check V3 (golden database) first - time-based cooldown
-	goldenExists, err := GoldenDBExists(m.localURL, projectName)
-	if err == nil && goldenExists {
-		return CheckGoldenDBSyncNeeded(m.localURL, projectName, DefaultSyncCooldown)
-	}
-
-	// Fall back to V1/V2 file-based check
-	return CheckSyncNeeded(cfg, projectName, m.dbsyncDir)
+	return CheckGoldenDBSyncNeeded(m.localURL, projectName, DefaultSyncCooldown)
 }
 
 // IsSyncing returns true if a project is currently syncing
@@ -91,39 +79,9 @@ func (m *Manager) IsSyncing(projectName string) bool {
 	return m.syncing[projectName]
 }
 
-// CloneForWorktree creates a database for a worktree from the golden copy
-// Automatically detects V3 (golden DB) vs V1/V2 (file) format
+// CloneForWorktree creates a database for a worktree from the golden copy (V3 only)
 func (m *Manager) CloneForWorktree(projectName string, dbName string) error {
-	// Check for V3 (golden database) first - fastest approach
-	goldenExists, err := GoldenDBExists(m.localURL, projectName)
-	if err == nil && goldenExists {
-		return CloneFromGoldenDB(context.Background(), m.localURL, projectName, dbName, nil)
-	}
-
-	// Fall back to file-based approaches (V1/V2)
-	projectDir := filepath.Join(m.dbsyncDir, projectName)
-
-	// Load metadata to detect sync version
-	metadata, err := LoadSyncMetadata(projectName, m.dbsyncDir)
-	if err != nil {
-		return fmt.Errorf("failed to load sync metadata: %w", err)
-	}
-
-	// Check if this is V2 sync (separated schema + data)
-	if metadata != nil && metadata.SyncVersion == SyncVersionSeparated {
-		return CloneToWorktreeV2(m.localURL, dbName, projectDir, metadata)
-	}
-
-	// Fall back to V1 (legacy golden.sql format)
-	goldenPath := GetGoldenCopyPath(projectName, m.dbsyncDir)
-	schemaPath := GetSchemaOnlyPath(projectName, m.dbsyncDir)
-
-	// Check if golden copy exists
-	if !GoldenCopyExists(projectName, m.dbsyncDir) {
-		return fmt.Errorf("no golden copy found for project %s - run sync first", projectName)
-	}
-
-	return CloneToWorktree(m.localURL, dbName, goldenPath, schemaPath)
+	return CloneFromGoldenDB(context.Background(), m.localURL, projectName, dbName, nil)
 }
 
 // CleanupWorktree drops a worktree database
@@ -131,19 +89,15 @@ func (m *Manager) CleanupWorktree(dbName string) error {
 	return DropDatabase(m.localURL, dbName)
 }
 
-// GetSyncStatus returns the sync metadata for a project
+// GetSyncStatus returns the sync metadata for a project (V3 only)
 func (m *Manager) GetSyncStatus(projectName string) (*SyncMetadata, error) {
-	return LoadSyncMetadata(projectName, m.dbsyncDir)
+	return LoadGoldenDBMetadata(m.localURL, projectName)
 }
 
-// HasGoldenCopy checks if a project has a golden copy (V3 DB or V1/V2 files)
+// HasGoldenCopy checks if a project has a golden copy (V3 only)
 func (m *Manager) HasGoldenCopy(projectName string) bool {
-	// Check V3 (golden database) first
-	if exists, err := GoldenDBExists(m.localURL, projectName); err == nil && exists {
-		return true
-	}
-	// Fall back to file-based check
-	return GoldenCopyExists(projectName, m.dbsyncDir)
+	exists, err := GoldenDBExists(m.localURL, projectName)
+	return err == nil && exists
 }
 
 // ListWorktreeDatabases lists all databases for a project
@@ -191,23 +145,14 @@ func (m *Manager) SuggestTableExclusions(sourceURL string, thresholdMB int) ([]s
 	return SuggestExclusions(tables, thresholdMB), nil
 }
 
-// DeleteGoldenCopy deletes the golden copy for a project
+// DeleteGoldenCopy deletes the golden database for a project (V3 only)
 func (m *Manager) DeleteGoldenCopy(projectName string) error {
-	projectDir := filepath.Join(m.dbsyncDir, projectName)
-	return os.RemoveAll(projectDir)
+	return DropGoldenDB(m.localURL, projectName)
 }
 
-// GetGoldenCopySize returns the size of the golden copy in bytes
+// GetGoldenCopySize returns the size of the golden database in bytes (V3 only)
 func (m *Manager) GetGoldenCopySize(projectName string) (int64, error) {
-	goldenPath := GetGoldenCopyPath(projectName, m.dbsyncDir)
-	info, err := os.Stat(goldenPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	return info.Size(), nil
+	return GetGoldenDBSize(m.localURL, projectName)
 }
 
 // GenerateWorktreeDBName generates a database name for a worktree
