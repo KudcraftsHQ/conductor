@@ -1,10 +1,12 @@
 package database
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Manager coordinates database operations
@@ -26,11 +28,17 @@ func NewManager(localURL string, conductorDir string) *Manager {
 
 // SyncProject syncs a project's source database to a local golden copy
 func (m *Manager) SyncProject(projectName string, cfg *DatabaseConfig) (*SyncMetadata, error) {
-	return m.SyncProjectWithProgress(projectName, cfg, nil)
+	return m.SyncProjectWithProgressCtx(context.Background(), projectName, cfg, nil)
 }
 
-// SyncProjectWithProgress syncs with progress callback
+// SyncProjectWithProgress syncs with progress callback (backwards compatible)
 func (m *Manager) SyncProjectWithProgress(projectName string, cfg *DatabaseConfig, progress ProgressFunc) (*SyncMetadata, error) {
+	return m.SyncProjectWithProgressCtx(context.Background(), projectName, cfg, progress)
+}
+
+// SyncProjectWithProgressCtx syncs with progress callback and context for cancellation
+// Uses V3 (golden database) approach - pipes directly to local PostgreSQL for speed
+func (m *Manager) SyncProjectWithProgressCtx(ctx context.Context, projectName string, cfg *DatabaseConfig, progress ProgressFunc) (*SyncMetadata, error) {
 	m.mu.Lock()
 	if m.syncing[projectName] {
 		m.mu.Unlock()
@@ -45,11 +53,34 @@ func (m *Manager) SyncProjectWithProgress(projectName string, cfg *DatabaseConfi
 		m.mu.Unlock()
 	}()
 
-	return SyncFromSourceWithProgress(cfg, projectName, m.dbsyncDir, progress)
+	// Use V3 (golden database) approach - much faster than file-based
+	result, err := SyncToGoldenDB(ctx, cfg.Source, m.localURL, projectName, cfg, progress)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to SyncMetadata for backwards compatibility
+	return &SyncMetadata{
+		LastSyncAt:     time.Now(),
+		SourceDatabase: GoldenDBName(projectName),
+		TableSizes:     result.TableSizes,
+		ExcludedTables: result.ExcludedTables,
+		RowCounts:      result.RowCounts,
+		SyncDurationMs: result.SyncDurationMs,
+		SyncVersion:    SyncVersionGoldenDB,
+	}, nil
 }
 
 // CheckSyncNeeded checks if a sync is needed for a project
+// Uses V3 (golden DB) time-based check first, falls back to V1/V2 for file-based
 func (m *Manager) CheckSyncNeeded(projectName string, cfg *DatabaseConfig) (*SyncCheckResult, error) {
+	// Check V3 (golden database) first - time-based cooldown
+	goldenExists, err := GoldenDBExists(m.localURL, projectName)
+	if err == nil && goldenExists {
+		return CheckGoldenDBSyncNeeded(m.localURL, projectName, DefaultSyncCooldown)
+	}
+
+	// Fall back to V1/V2 file-based check
 	return CheckSyncNeeded(cfg, projectName, m.dbsyncDir)
 }
 
@@ -61,7 +92,29 @@ func (m *Manager) IsSyncing(projectName string) bool {
 }
 
 // CloneForWorktree creates a database for a worktree from the golden copy
+// Automatically detects V3 (golden DB) vs V1/V2 (file) format
 func (m *Manager) CloneForWorktree(projectName string, dbName string) error {
+	// Check for V3 (golden database) first - fastest approach
+	goldenExists, err := GoldenDBExists(m.localURL, projectName)
+	if err == nil && goldenExists {
+		return CloneFromGoldenDB(context.Background(), m.localURL, projectName, dbName, nil)
+	}
+
+	// Fall back to file-based approaches (V1/V2)
+	projectDir := filepath.Join(m.dbsyncDir, projectName)
+
+	// Load metadata to detect sync version
+	metadata, err := LoadSyncMetadata(projectName, m.dbsyncDir)
+	if err != nil {
+		return fmt.Errorf("failed to load sync metadata: %w", err)
+	}
+
+	// Check if this is V2 sync (separated schema + data)
+	if metadata != nil && metadata.SyncVersion == SyncVersionSeparated {
+		return CloneToWorktreeV2(m.localURL, dbName, projectDir, metadata)
+	}
+
+	// Fall back to V1 (legacy golden.sql format)
 	goldenPath := GetGoldenCopyPath(projectName, m.dbsyncDir)
 	schemaPath := GetSchemaOnlyPath(projectName, m.dbsyncDir)
 
@@ -83,8 +136,13 @@ func (m *Manager) GetSyncStatus(projectName string) (*SyncMetadata, error) {
 	return LoadSyncMetadata(projectName, m.dbsyncDir)
 }
 
-// HasGoldenCopy checks if a project has a golden copy
+// HasGoldenCopy checks if a project has a golden copy (V3 DB or V1/V2 files)
 func (m *Manager) HasGoldenCopy(projectName string) bool {
+	// Check V3 (golden database) first
+	if exists, err := GoldenDBExists(m.localURL, projectName); err == nil && exists {
+		return true
+	}
+	// Fall back to file-based check
 	return GoldenCopyExists(projectName, m.dbsyncDir)
 }
 

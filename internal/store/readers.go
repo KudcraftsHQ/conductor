@@ -358,6 +358,13 @@ func (s *Store) copyDatabaseConfig(db *config.DatabaseConfig) *config.DatabaseCo
 		cp.ExcludeTables = make([]string, len(db.ExcludeTables))
 		copy(cp.ExcludeTables, db.ExcludeTables)
 	}
+	// Copy map
+	if len(db.FilterTables) > 0 {
+		cp.FilterTables = make(map[string]string, len(db.FilterTables))
+		for k, v := range db.FilterTables {
+			cp.FilterTables[k] = v
+		}
+	}
 	// Copy nested struct
 	if db.SyncStatus != nil {
 		cp.SyncStatus = &config.DatabaseSyncStatus{

@@ -43,6 +43,45 @@ type SyncMetadata struct {
 
 	// MigrationBaseline tracks Prisma migration state for the golden copy
 	MigrationBaseline *MigrationBaseline `json:"migrationBaseline,omitempty"`
+
+	// TableSyncState tracks per-table sync state for incremental sync
+	TableSyncState map[string]*TableSyncState `json:"tableSyncState,omitempty"`
+
+	// IncrementalFiles lists incremental SQL files to apply after golden.sql
+	IncrementalFiles []string `json:"incrementalFiles,omitempty"`
+
+	// IsIncremental indicates if this sync was incremental (vs full)
+	IsIncremental bool `json:"isIncremental,omitempty"`
+
+	// TableDataFiles maps table names to their data file paths (for separated sync)
+	TableDataFiles map[string]string `json:"tableDataFiles,omitempty"`
+
+	// SchemaSnapshot stores the table schemas for diff detection
+	SchemaSnapshot map[string]*TableSchema `json:"schemaSnapshot,omitempty"`
+
+	// SyncVersion indicates the sync format version (2 = separated schema+data)
+	SyncVersion int `json:"syncVersion,omitempty"`
+}
+
+// TableSyncState tracks the sync state for a single table
+type TableSyncState struct {
+	// LastSyncedAt is when this table was last synced
+	LastSyncedAt time.Time `json:"lastSyncedAt"`
+
+	// TimestampColumn is the column used for incremental sync (created_at, updated_at, etc.)
+	TimestampColumn string `json:"timestampColumn,omitempty"`
+
+	// MaxTimestamp is the max value of the timestamp column at last sync
+	MaxTimestamp *time.Time `json:"maxTimestamp,omitempty"`
+
+	// PrimaryKeyColumn is the primary key column name
+	PrimaryKeyColumn string `json:"primaryKeyColumn,omitempty"`
+
+	// MaxPrimaryKey is the max primary key value at last sync (for tables without timestamps)
+	MaxPrimaryKey *int64 `json:"maxPrimaryKey,omitempty"`
+
+	// RowCount is the row count at last sync
+	RowCount int64 `json:"rowCount"`
 }
 
 // MigrationBaseline represents the migration state of a golden copy
@@ -80,6 +119,36 @@ type TableInfo struct {
 	SizeBytes  int64  `json:"sizeBytes"`
 	HasIndexes bool   `json:"hasIndexes"`
 	IsAudit    bool   `json:"isAudit"` // Heuristic: likely an audit/log table
+}
+
+// SchemaDiff represents the differences between two schema versions
+type SchemaDiff struct {
+	// NewTables lists tables that exist in new schema but not in old
+	NewTables []string `json:"newTables,omitempty"`
+
+	// RemovedTables lists tables that existed in old schema but not in new
+	RemovedTables []string `json:"removedTables,omitempty"`
+
+	// ModifiedTables lists tables whose columns have changed
+	ModifiedTables []string `json:"modifiedTables,omitempty"`
+
+	// HasChanges returns true if there are any schema differences
+	HasChanges bool `json:"hasChanges"`
+}
+
+// TableSchema represents the schema structure of a table for comparison
+type TableSchema struct {
+	Name    string         `json:"name"`
+	Schema  string         `json:"schema"`
+	Columns []ColumnSchema `json:"columns"`
+}
+
+// ColumnSchema represents a column's schema for comparison
+type ColumnSchema struct {
+	Name         string `json:"name"`
+	DataType     string `json:"dataType"`
+	IsNullable   bool   `json:"isNullable"`
+	DefaultValue string `json:"defaultValue,omitempty"`
 }
 
 // SchemaChange represents a detected change in the source schema

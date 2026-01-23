@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -265,15 +266,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, msg.next
 
 	case DatabaseSyncCompletedMsg:
-		// Clear syncing flag and progress
+		// Clear syncing flag, progress, and cancel function
 		delete(m.databaseSyncing, msg.ProjectName)
 		delete(m.databaseProgress, msg.ProjectName)
+		delete(m.databaseSyncCancel, msg.ProjectName)
 
 		// Handle skipped sync
 		if msg.Skipped {
 			m.databaseLogs[msg.ProjectName] = append(m.databaseLogs[msg.ProjectName],
 				fmt.Sprintf("[%s] Skipped: %s", time.Now().Format("15:04:05"), msg.SkipReason))
 			m.setStatus(fmt.Sprintf("Sync skipped: %s", msg.SkipReason), false)
+			return m, nil
+		}
+
+		// Handle cancelled sync
+		if msg.Cancelled {
+			m.databaseLogs[msg.ProjectName] = append(m.databaseLogs[msg.ProjectName],
+				fmt.Sprintf("[%s] Cancelled by user", time.Now().Format("15:04:05")))
+			m.setStatus("Database sync cancelled", false)
 			return m, nil
 		}
 
@@ -335,6 +345,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				statusMsg += fmt.Sprintf(" | %d extra in DB", len(msg.ExtraMigrations))
 			}
 			m.setStatus(statusMsg, msg.MigrationStatus == "diverged" || msg.MigrationStatus == "behind")
+		}
+		return m, nil
+
+	case BackgroundSyncNeededMsg:
+		// Trigger background sync for the project
+		project := m.config.Projects[msg.ProjectName]
+		if project != nil && project.Database != nil {
+			m.setStatus(fmt.Sprintf("Auto-syncing %s (%s)...", msg.ProjectName, msg.Reason), false)
+			return m, m.triggerDatabaseSync(msg.ProjectName, false)
 		}
 		return m, nil
 
@@ -2300,6 +2319,17 @@ func (m *Model) handleDatabasesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.currentView = m.prevView
 		return m, nil
 
+	case msg.String() == "esc":
+		// Cancel sync for the selected project if syncing
+		if m.databaseCursor >= 0 && m.databaseCursor < len(m.databaseProjects) {
+			projectName := m.databaseProjects[m.databaseCursor]
+			if cancel, ok := m.databaseSyncCancel[projectName]; ok && m.databaseSyncing[projectName] {
+				cancel()
+				m.setStatus("Cancelling sync for "+projectName+"...", false)
+			}
+		}
+		return m, nil
+
 	case key.Matches(msg, m.keyMap.Up):
 		if m.databaseCursor > 0 {
 			m.databaseCursor--
@@ -2448,27 +2478,45 @@ func (m *Model) triggerDatabaseSync(projectName string, force bool) tea.Cmd {
 }
 
 // startDatabaseSyncWithProgress starts an async database sync with real-time progress
+// Uses V3 (golden database) approach for faster sync and time-based cooldown
 func (m *Model) startDatabaseSyncWithProgress(projectName string, dbConfig *config.DatabaseConfig, force bool) tea.Cmd {
 	// Create a channel for progress updates
 	progressChan := make(chan string, 100)
 
+	// Create context with cancel for interruption
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Store the cancel function so it can be called on Esc
+	m.databaseSyncCancel[projectName] = cancel
+
+	// Get localPostgresURL and conductorDir before starting goroutine
+	defaults := m.store.GetDefaults()
+	localPostgresURL := defaults.LocalPostgresURL
+
 	// Start the sync in a goroutine
 	go func() {
 		defer close(progressChan)
+		defer func() {
+			// Clean up cancel function when done
+			delete(m.databaseSyncCancel, projectName)
+		}()
 
 		startTime := time.Now()
 
-		// Get the dbsync directory
-		homeDir, err := os.UserHomeDir()
+		// Get the conductor directory
+		conductorDir, err := config.ConductorDir()
 		if err != nil {
+			progressChan <- "ERROR:" + err.Error()
 			return
 		}
-		dbsyncDir := filepath.Join(homeDir, ".conductor", "dbsync")
 
-		// Check if sync is needed (unless force)
+		// Create manager for V3 sync
+		mgr := database.NewManager(localPostgresURL, conductorDir)
+
+		// Check if sync is needed (unless force) - uses V3 time-based check
 		if !force {
 			progressChan <- "Checking for changes..."
-			checkResult, err := database.CheckSyncNeeded(dbConfig, projectName, dbsyncDir)
+			checkResult, err := mgr.CheckSyncNeeded(projectName, dbConfig)
 			if err == nil && !checkResult.NeedsSync {
 				progressChan <- "SKIP:" + checkResult.Reason
 				return
@@ -2476,6 +2524,12 @@ func (m *Model) startDatabaseSyncWithProgress(projectName string, dbConfig *conf
 			if checkResult != nil && checkResult.NeedsSync {
 				progressChan <- "Changes detected: " + checkResult.Reason
 			}
+		}
+
+		// Check for cancellation before starting sync
+		if ctx.Err() != nil {
+			progressChan <- "CANCELLED:"
+			return
 		}
 
 		// Progress callback
@@ -2489,10 +2543,14 @@ func (m *Model) startDatabaseSyncWithProgress(projectName string, dbConfig *conf
 
 		progressChan <- "Starting sync..."
 
-		// Run the sync with progress
-		metadata, err := database.SyncFromSourceWithProgress(dbConfig, projectName, dbsyncDir, progress)
+		// Run the V3 sync with progress and context for cancellation
+		metadata, err := mgr.SyncProjectWithProgressCtx(ctx, projectName, dbConfig, progress)
 		if err != nil {
-			progressChan <- "ERROR:" + err.Error()
+			if ctx.Err() != nil {
+				progressChan <- "CANCELLED:"
+			} else {
+				progressChan <- "ERROR:" + err.Error()
+			}
 			return
 		}
 
@@ -2529,6 +2587,13 @@ func (m *Model) listenForSyncProgress(projectName string, progressChan <-chan st
 			return DatabaseSyncCompletedMsg{
 				ProjectName: projectName,
 				Err:         errors.New(strings.TrimPrefix(msg, "ERROR:")),
+			}
+		}
+
+		if strings.HasPrefix(msg, "CANCELLED:") {
+			return DatabaseSyncCompletedMsg{
+				ProjectName: projectName,
+				Cancelled:   true,
 			}
 		}
 

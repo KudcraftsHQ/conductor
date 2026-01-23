@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 )
 
 // CloneToWorktree clones the golden copy to a new worktree database
+// Supports both V1 (single golden.sql) and V2 (separated schema + data files)
 func CloneToWorktree(localURL string, dbName string, goldenPath string, schemaPath string) error {
 	// Create the database
 	if err := CreateDatabase(localURL, dbName); err != nil {
@@ -36,6 +38,52 @@ func CloneToWorktree(localURL string, dbName string, goldenPath string, schemaPa
 			if err := restoreDump(targetURL, schemaPath); err != nil {
 				// Non-fatal - schema-only tables are optional
 				fmt.Printf("Warning: failed to restore schema-only tables: %v\n", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// CloneToWorktreeV2 clones using the V2 separated sync format (schema.sql + data/*.sql)
+func CloneToWorktreeV2(localURL string, dbName string, projectDir string, metadata *SyncMetadata) error {
+	// Create the database
+	if err := CreateDatabase(localURL, dbName); err != nil {
+		return fmt.Errorf("failed to create database: %w", err)
+	}
+
+	targetURL := BuildWorktreeURL(localURL, dbName)
+
+	// 1. Restore schema first
+	schemaPath := filepath.Join(projectDir, "schema.sql")
+	if _, err := os.Stat(schemaPath); err == nil {
+		if err := restoreDump(targetURL, schemaPath); err != nil {
+			_ = DropDatabase(localURL, dbName)
+			return fmt.Errorf("failed to restore schema: %w", err)
+		}
+	}
+
+	// 2. Restore each table's data file
+	if metadata != nil && metadata.TableDataFiles != nil {
+		for tableName, dataFile := range metadata.TableDataFiles {
+			dataPath := filepath.Join(projectDir, dataFile)
+			if _, err := os.Stat(dataPath); err == nil {
+				if err := restoreDump(targetURL, dataPath); err != nil {
+					// Log but continue - some data is better than none
+					fmt.Printf("Warning: failed to restore data for %s: %v\n", tableName, err)
+				}
+			}
+		}
+	}
+
+	// 3. Restore incremental files in order (if any)
+	if metadata != nil && len(metadata.IncrementalFiles) > 0 {
+		for _, incFile := range metadata.IncrementalFiles {
+			incPath := filepath.Join(projectDir, incFile)
+			if _, err := os.Stat(incPath); err == nil {
+				if err := restoreDump(targetURL, incPath); err != nil {
+					fmt.Printf("Warning: failed to restore incremental %s: %v\n", incFile, err)
+				}
 			}
 		}
 	}

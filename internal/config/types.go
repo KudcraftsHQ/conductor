@@ -135,6 +135,9 @@ type DatabaseConfig struct {
 	Source string `json:"source"`
 	// ExcludeTables is a list of tables to exclude from data sync (schema only)
 	ExcludeTables []string `json:"excludeTables,omitempty"`
+	// FilterTables maps table names to WHERE clauses for partial data sync
+	// Example: {"public.webhook_events": "created_at > NOW() - INTERVAL '30 days'"}
+	FilterTables map[string]string `json:"filterTables,omitempty"`
 	// SizeThresholdMB auto-excludes tables larger than this size (0 = disabled)
 	SizeThresholdMB int `json:"sizeThresholdMB,omitempty"`
 	// SyncSchedule is a cron expression for automatic sync (empty = manual only)

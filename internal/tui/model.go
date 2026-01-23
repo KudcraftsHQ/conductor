@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"sort"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/database"
 	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/tui/keys"
 	"github.com/hammashamzah/conductor/internal/tui/styles"
@@ -168,11 +170,12 @@ type Model struct {
 	archivedWorktrees    []archivedWorktreeInfo
 
 	// Database view state
-	databaseProjects []string          // List of projects with database config
-	databaseCursor   int               // Selected project in database view
-	databaseOffset   int               // Scroll offset for database view
-	databaseSyncing  map[string]bool   // Projects currently syncing
-	databaseProgress map[string]string // Current progress message per project
+	databaseProjects   []string                    // List of projects with database config
+	databaseCursor     int                         // Selected project in database view
+	databaseOffset     int                         // Scroll offset for database view
+	databaseSyncing    map[string]bool             // Projects currently syncing
+	databaseProgress   map[string]string           // Current progress message per project
+	databaseSyncCancel map[string]context.CancelFunc // Cancel functions for ongoing syncs
 
 	// Database logs view state
 	databaseLogs        map[string][]string // Logs per project (most recent sync)
@@ -236,9 +239,10 @@ func NewModelWithStore(cfg *config.Config, s *store.Store, version string) *Mode
 		spinner:           sp,
 		gitStatusCache:    make(map[string]*workspace.GitStatusInfo),
 		tunnelManager:     tunnel.NewManager(cfg),
-		databaseSyncing:   make(map[string]bool),
-		databaseProgress:  make(map[string]string),
-		databaseLogs:      make(map[string][]string),
+		databaseSyncing:    make(map[string]bool),
+		databaseProgress:   make(map[string]string),
+		databaseSyncCancel: make(map[string]context.CancelFunc),
+		databaseLogs:       make(map[string][]string),
 	}
 
 	m.refreshProjectList()
@@ -255,6 +259,7 @@ func (m *Model) Init() tea.Cmd {
 		m.restoreTunnels(),
 		m.recoverInterruptedStates(),
 		m.initConfigWatch(),
+		m.scheduleBackgroundDatabaseSync(),
 	)
 }
 
@@ -288,6 +293,45 @@ func (m *Model) restoreTunnels() tea.Cmd {
 		m.store.CleanupStaleTunnels(activeTunnels)
 
 		return TunnelRestoredMsg{RestoredCount: len(restored)}
+	}
+}
+
+// scheduleBackgroundDatabaseSync checks for database-enabled projects and triggers
+// automatic sync if the cooldown has passed (once per day by default)
+func (m *Model) scheduleBackgroundDatabaseSync() tea.Cmd {
+	return func() tea.Msg {
+		defaults := m.store.GetDefaults()
+		if defaults.LocalPostgresURL == "" {
+			return nil // No local PostgreSQL configured
+		}
+
+		conductorDir, err := config.ConductorDir()
+		if err != nil {
+			return nil
+		}
+
+		mgr := database.NewManager(defaults.LocalPostgresURL, conductorDir)
+
+		// Check each project for database sync needs
+		for projectName, project := range m.config.Projects {
+			if project.Database == nil {
+				continue
+			}
+
+			// Check if sync is needed (uses V3 time-based cooldown)
+			checkResult, err := mgr.CheckSyncNeeded(projectName, project.Database)
+			if err != nil || !checkResult.NeedsSync {
+				continue
+			}
+
+			// Trigger background sync for this project
+			return BackgroundSyncNeededMsg{
+				ProjectName: projectName,
+				Reason:      checkResult.Reason,
+			}
+		}
+
+		return nil
 	}
 }
 

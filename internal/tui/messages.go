@@ -287,7 +287,14 @@ type DatabaseSyncCompletedMsg struct {
 	DurationMs     int64
 	Skipped        bool   // True if sync was skipped (no changes)
 	SkipReason     string // Reason for skipping
+	Cancelled      bool   // True if sync was cancelled by user
 	Err            error
+}
+
+// BackgroundSyncNeededMsg indicates a database needs background sync
+type BackgroundSyncNeededMsg struct {
+	ProjectName string
+	Reason      string
 }
 
 // DatabaseReinitStartedMsg indicates database reinit has started

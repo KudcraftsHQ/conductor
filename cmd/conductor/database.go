@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"text/tabwriter"
 
 	"github.com/hammashamzah/conductor/internal/config"
@@ -205,13 +208,14 @@ var databaseSyncCmd = &cobra.Command{
 			return fmt.Errorf("database not configured. Run 'conductor database set-source <url>' first")
 		}
 
+		defaults := s.GetDefaults()
 		conductorDir, err := config.ConductorDir()
 		if err != nil {
 			return err
 		}
 
-		// Sync only needs conductorDir, not local PostgreSQL URL
-		mgr := database.NewManager("", conductorDir)
+		// V3 sync needs local PostgreSQL URL for golden database
+		mgr := database.NewManager(defaults.LocalPostgresURL, conductorDir)
 
 		// Check if sync is needed (unless --force)
 		if !syncForce {
@@ -231,6 +235,20 @@ var databaseSyncCmd = &cobra.Command{
 
 		fmt.Printf("Syncing database for %s...\n", projectName)
 		fmt.Printf("  Source: %s\n\n", database.MaskConnectionString(project.Database.Source))
+		fmt.Println("  (Press Ctrl+C to cancel)")
+
+		// Create context with signal handling for graceful cancellation
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Handle interrupt signal
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-sigChan
+			fmt.Println("\n\n  Cancelling sync...")
+			cancel()
+		}()
 
 		// Progress callback to show real-time progress
 		lastMsg := ""
@@ -243,9 +261,14 @@ var databaseSyncCmd = &cobra.Command{
 			lastMsg = msg
 		}
 
-		metadata, err := mgr.SyncProjectWithProgress(projectName, project.Database, progress)
+		metadata, err := mgr.SyncProjectWithProgressCtx(ctx, projectName, project.Database, progress)
 		if err != nil {
 			fmt.Println() // New line after progress
+			// Check if cancelled
+			if ctx.Err() != nil {
+				fmt.Println("\n✗ Sync cancelled by user")
+				return nil
+			}
 			// Update config with failed status
 			if project.Database.SyncStatus == nil {
 				project.Database.SyncStatus = &config.DatabaseSyncStatus{}
