@@ -171,3 +171,24 @@ type ConnectionInfo struct {
 
 // DefaultDBNamePattern is the default pattern for worktree database names
 const DefaultDBNamePattern = "{project}-{port}"
+
+// ForeignKeyInfo represents a foreign key relationship between tables
+type ForeignKeyInfo struct {
+	TableSchema      string `json:"tableSchema"`      // Schema of the table with FK
+	TableName        string `json:"tableName"`        // Table that has the FK constraint
+	ColumnName       string `json:"columnName"`       // Column in this table
+	ReferencedSchema string `json:"referencedSchema"` // Schema of referenced table
+	ReferencedTable  string `json:"referencedTable"`  // Parent table being referenced
+	ReferencedColumn string `json:"referencedColumn"` // Column in parent table
+	ConstraintName   string `json:"constraintName"`   // Name of the FK constraint
+}
+
+// IndexInfo represents an index on a table
+type IndexInfo struct {
+	Schema    string   `json:"schema"`
+	Table     string   `json:"table"`
+	IndexName string   `json:"indexName"`
+	Columns   []string `json:"columns"`
+	IsUnique  bool     `json:"isUnique"`
+	IsPrimary bool     `json:"isPrimary"`
+}

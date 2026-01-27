@@ -20,6 +20,10 @@ build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
 	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/conductor
+ifeq ($(shell uname),Darwin)
+	@echo "Ad-hoc signing for macOS..."
+	@codesign --force --sign - $(BUILD_DIR)/$(BINARY_NAME)
+endif
 
 # Build for all platforms
 build-all: clean
@@ -33,6 +37,11 @@ build-all: clean
 	# macOS
 	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/conductor
 	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 ./cmd/conductor
+ifeq ($(shell uname),Darwin)
+	@echo "Ad-hoc signing macOS binaries..."
+	@codesign --force --sign - $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64
+	@codesign --force --sign - $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64
+endif
 
 	# Windows
 	GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/conductor
@@ -46,6 +55,10 @@ install: build
 	@mkdir -p ~/.local/bin
 	@cp $(BUILD_DIR)/$(BINARY_NAME) ~/.local/bin/$(BINARY_NAME)
 	@chmod +x ~/.local/bin/$(BINARY_NAME)
+ifeq ($(shell uname),Darwin)
+	@echo "Ad-hoc signing installed binary..."
+	@codesign --force --sign - ~/.local/bin/$(BINARY_NAME)
+endif
 	@echo "✓ Installed to ~/.local/bin/$(BINARY_NAME)"
 	@echo ""
 	@echo "Make sure ~/.local/bin is in your PATH:"
@@ -57,6 +70,10 @@ install: build
 install-global: build
 	@echo "Installing $(BINARY_NAME) to /usr/local/bin..."
 	sudo cp $(BUILD_DIR)/$(BINARY_NAME) /usr/local/bin/$(BINARY_NAME)
+ifeq ($(shell uname),Darwin)
+	@echo "Ad-hoc signing installed binary..."
+	sudo codesign --force --sign - /usr/local/bin/$(BINARY_NAME)
+endif
 	@echo "✓ Installed to /usr/local/bin/$(BINARY_NAME)"
 	@echo ""
 	@echo "⚠ Note: Auto-updates are disabled for system installations."

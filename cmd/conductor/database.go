@@ -251,14 +251,8 @@ var databaseSyncCmd = &cobra.Command{
 		}()
 
 		// Progress callback to show real-time progress
-		lastMsg := ""
 		progress := func(msg string) {
-			// Clear previous line and print new message
-			if lastMsg != "" {
-				fmt.Print("\r\033[K") // Clear line
-			}
-			fmt.Printf("  %s", msg)
-			lastMsg = msg
+			fmt.Printf("  %s\n", msg)
 		}
 
 		metadata, err := mgr.SyncProjectWithProgressCtx(ctx, projectName, project.Database, progress)

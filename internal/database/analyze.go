@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 // GetTableInfo retrieves information about all tables in the database
@@ -588,5 +588,149 @@ func GetTableList(connStr string) ([]string, error) {
 	}
 
 	return tables, rows.Err()
+}
+
+// GetForeignKeys returns all FK relationships for given tables
+func GetForeignKeys(connStr string, tables []string) ([]ForeignKeyInfo, error) {
+	if len(tables) == 0 {
+		return nil, nil
+	}
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Query FK relationships from information_schema
+	query := `
+		SELECT
+			tc.table_schema,
+			tc.table_name,
+			kcu.column_name,
+			ccu.table_schema AS referenced_schema,
+			ccu.table_name AS referenced_table,
+			ccu.column_name AS referenced_column,
+			tc.constraint_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON tc.constraint_name = kcu.constraint_name
+			AND tc.table_schema = kcu.table_schema
+		JOIN information_schema.constraint_column_usage ccu
+			ON tc.constraint_name = ccu.constraint_name
+		WHERE tc.constraint_type = 'FOREIGN KEY'
+		  AND tc.table_schema || '.' || tc.table_name = ANY($1)
+	`
+
+	rows, err := db.QueryContext(ctx, query, pq.Array(tables))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query foreign keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var fks []ForeignKeyInfo
+	for rows.Next() {
+		var fk ForeignKeyInfo
+		if err := rows.Scan(
+			&fk.TableSchema,
+			&fk.TableName,
+			&fk.ColumnName,
+			&fk.ReferencedSchema,
+			&fk.ReferencedTable,
+			&fk.ReferencedColumn,
+			&fk.ConstraintName,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan FK row: %w", err)
+		}
+		fks = append(fks, fk)
+	}
+
+	return fks, rows.Err()
+}
+
+// GetTableIndexes returns index info for specified tables
+func GetTableIndexes(connStr string, tables []string) (map[string][]IndexInfo, error) {
+	if len(tables) == 0 {
+		return make(map[string][]IndexInfo), nil
+	}
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Query indexes from pg_indexes
+	query := `
+		SELECT
+			schemaname,
+			tablename,
+			indexname,
+			indexdef
+		FROM pg_indexes
+		WHERE schemaname || '.' || tablename = ANY($1)
+	`
+
+	rows, err := db.QueryContext(ctx, query, pq.Array(tables))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query indexes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[string][]IndexInfo)
+	for rows.Next() {
+		var schema, table, indexName, indexDef string
+		if err := rows.Scan(&schema, &table, &indexName, &indexDef); err != nil {
+			return nil, fmt.Errorf("failed to scan index row: %w", err)
+		}
+
+		fullName := schema + "." + table
+		idx := IndexInfo{
+			Schema:    schema,
+			Table:     table,
+			IndexName: indexName,
+			Columns:   parseIndexColumns(indexDef),
+			IsUnique:  strings.Contains(indexDef, "UNIQUE"),
+			IsPrimary: strings.Contains(indexName, "_pkey"),
+		}
+		result[fullName] = append(result[fullName], idx)
+	}
+
+	return result, rows.Err()
+}
+
+// parseIndexColumns extracts column names from an index definition
+// Example: "CREATE INDEX idx_name ON public.table USING btree (col1, col2)"
+func parseIndexColumns(indexDef string) []string {
+	// Find the content within the last parentheses
+	lastOpen := strings.LastIndex(indexDef, "(")
+	lastClose := strings.LastIndex(indexDef, ")")
+	if lastOpen == -1 || lastClose == -1 || lastClose <= lastOpen {
+		return nil
+	}
+
+	columnsPart := indexDef[lastOpen+1 : lastClose]
+	// Split by comma and clean up
+	parts := strings.Split(columnsPart, ",")
+	var columns []string
+	for _, part := range parts {
+		col := strings.TrimSpace(part)
+		// Remove any ASC/DESC or other modifiers
+		if spaceIdx := strings.Index(col, " "); spaceIdx != -1 {
+			col = col[:spaceIdx]
+		}
+		// Remove quotes if present
+		col = strings.Trim(col, `"`)
+		if col != "" {
+			columns = append(columns, col)
+		}
+	}
+	return columns
 }
 
