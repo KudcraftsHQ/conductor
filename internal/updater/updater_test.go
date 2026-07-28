@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,24 +37,60 @@ func TestCanWriteFalseForReadOnlyDirectory(t *testing.T) {
 	assert.False(t, canWrite(bin))
 }
 
+// startRunningBinary copies a real compiled executable into dir and starts it,
+// returning its path.
+//
+// It must be a genuine binary, not a #!/bin/sh script: when a script runs, the
+// executing image is the interpreter, so the script file itself is not busy and
+// ETXTBSY never triggers. Copying /bin/sleep gives a real ELF/Mach-O whose file
+// *is* the running image.
+func startRunningBinary(t *testing.T, dir string) string {
+	t.Helper()
+
+	src, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep binary available")
+	}
+	data, err := os.ReadFile(src)
+	require.NoError(t, err)
+
+	bin := filepath.Join(dir, "sleeper")
+	require.NoError(t, os.WriteFile(bin, data, 0755))
+
+	cmd := exec.Command(bin, "30")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	// Give the kernel a moment to map the image before probing.
+	time.Sleep(100 * time.Millisecond)
+	return bin
+}
+
 // TestCanWriteWhileBinaryIsRunning is the regression this fix exists for: on
 // Linux, probing a *running* executable for write returns ETXTBSY, which made
 // `conductor update` report "installed in a system directory" and refuse to
 // update even from ~/.local/bin.
 func TestCanWriteWhileBinaryIsRunning(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("shell script fixture is POSIX-only")
+		t.Skip("POSIX-only")
 	}
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "sleeper")
-	require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\nsleep 30\n"), 0755))
+	bin := startRunningBinary(t, dir)
 
-	cmd := exec.Command(bin)
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	})
+	// Guard: confirm the fixture actually reproduces the condition on this
+	// platform, so the assertion below cannot pass vacuously.
+	if runtime.GOOS == "linux" {
+		info, err := os.Stat(bin)
+		require.NoError(t, err)
+		f, err := os.OpenFile(bin, os.O_WRONLY, info.Mode())
+		if err == nil {
+			_ = f.Close()
+			t.Fatal("fixture is not actually running/busy — the old probe would have succeeded, so this test proves nothing")
+		}
+	}
 
 	assert.True(t, canWrite(bin), "a running binary in a writable dir must still be replaceable")
 }
@@ -84,23 +121,23 @@ func TestReplaceBinaryWhileRunning(t *testing.T) {
 		t.Skip("cannot rename over a running executable on Windows")
 	}
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "sleeper")
-	src := filepath.Join(dir, "new")
-	require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\nsleep 30\n"), 0755))
-	require.NoError(t, os.WriteFile(src, []byte("#!/bin/sh\ntrue\n"), 0644))
+	bin := startRunningBinary(t, dir)
 
-	cmd := exec.Command(bin)
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	})
+	src := filepath.Join(dir, "new")
+	require.NoError(t, os.WriteFile(src, []byte("replacement payload"), 0644))
+
+	// Guard: the old in-place copy must fail here, otherwise this test would
+	// pass regardless of the fix.
+	if runtime.GOOS == "linux" {
+		require.Error(t, copyFile(src, bin),
+			"in-place copy should fail with ETXTBSY on a running binary")
+	}
 
 	require.NoError(t, replaceBinary(src, bin), "must be able to replace a running binary")
 
 	got, err := os.ReadFile(bin)
 	require.NoError(t, err)
-	assert.Equal(t, "#!/bin/sh\ntrue\n", string(got))
+	assert.Equal(t, "replacement payload", string(got))
 }
 
 func TestReplaceBinaryLeavesTargetIntactOnMissingSource(t *testing.T) {
