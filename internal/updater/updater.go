@@ -160,18 +160,11 @@ func (u *Updater) DownloadAndInstall(updateInfo *UpdateInfo) error {
 		return fmt.Errorf("failed to backup current binary: %w", err)
 	}
 
-	// Replace binary
-	if err := copyFile(binaryPath, executable); err != nil {
+	// Replace binary (atomic rename — see replaceBinary)
+	if err := replaceBinary(binaryPath, executable); err != nil {
 		// Rollback
-		_ = copyFile(backupPath, executable)
+		_ = replaceBinary(backupPath, executable)
 		return fmt.Errorf("failed to install update: %w", err)
-	}
-
-	// Set executable permissions
-	if err := os.Chmod(executable, 0755); err != nil {
-		// Rollback
-		_ = copyFile(backupPath, executable)
-		return fmt.Errorf("failed to set permissions: %w", err)
 	}
 
 	// Clean up backup
@@ -270,19 +263,60 @@ func (u *Updater) extractTarGz(archivePath, destDir string) (string, error) {
 }
 
 // canWrite checks if we have write permission to a file
+// canWrite reports whether the binary at path can be replaced by an update.
+//
+// It probes the containing directory rather than the file itself. On Linux,
+// opening a running executable for writing always fails with ETXTBSY, so
+// probing the file would report "not writable" for every self-update — even
+// though replacing the binary via its directory succeeds.
 func canWrite(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
+	if _, err := os.Stat(path); err != nil {
 		return false
 	}
 
-	// Try to open for writing
-	f, err := os.OpenFile(path, os.O_WRONLY, info.Mode())
+	f, err := os.CreateTemp(filepath.Dir(path), ".conductor-write-probe-*")
 	if err != nil {
 		return false
 	}
+	name := f.Name()
 	_ = f.Close()
+	_ = os.Remove(name)
 	return true
+}
+
+// replaceBinary replaces dst with the contents of src.
+//
+// The new binary is written alongside dst and renamed into place rather than
+// written over dst directly: on Linux, writing to a running executable fails
+// with ETXTBSY, whereas renaming over it succeeds because the running process
+// keeps the old inode. The rename is atomic, so a failure mid-copy leaves the
+// existing binary untouched.
+func replaceBinary(src, dst string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".conductor-update-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	defer func() { _ = sourceFile.Close() }()
+
+	if _, err := io.Copy(tmp, sourceFile); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0755); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, dst)
 }
 
 // copyFile copies a file from src to dst
