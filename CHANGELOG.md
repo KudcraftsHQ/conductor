@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Herdr Worktree Opener**: `conductor worktree open <name> --herdr` opens a focused Herdr workspace for the worktree
+  - `--claude` starts interactive Claude Code, `--dev` starts the project dev server through `conductor run`, and `--prompt` runs Claude Code non-interactively
+  - Options can be combined, including a one-shot Claude task alongside the dev-server pane
 - **Pluggable Terminal Multiplexer**: Conductor now drives either tmux or [herdr](https://herdr.dev)
   - New `internal/mux` package defines a `Multiplexer` interface; tmux and herdr both implement it
   - Select with `defaults.multiplexer` in `~/.conductor/conductor.json`: `"tmux"`, `"herdr"`, or `"auto"` (default)

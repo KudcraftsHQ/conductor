@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/opener"
 	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/workspace"
@@ -136,6 +137,10 @@ var (
 	worktreeOpenVSCode   bool
 	worktreeOpenTerminal bool
 	worktreeOpenZed      bool
+	worktreeOpenHerdr    bool
+	worktreeOpenClaude   bool
+	worktreeOpenDev      bool
+	worktreeOpenPrompt   string
 )
 
 var worktreeOpenCmd = &cobra.Command{
@@ -157,7 +162,7 @@ var worktreeOpenCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to get current directory: %w", err)
 		}
-		_, project, _, err := cfg.DetectProject(cwd)
+		projectName, project, _, err := cfg.DetectProject(cwd)
 		if err != nil {
 			return fmt.Errorf("not in a registered project")
 		}
@@ -166,6 +171,24 @@ var worktreeOpenCmd = &cobra.Command{
 		wt, ok := project.Worktrees[name]
 		if !ok {
 			return fmt.Errorf("worktree '%s' not found", name)
+		}
+
+		// Herdr is selected explicitly, automatically when the configured mux is
+		// Herdr, or whenever a Herdr-only launch option is requested.
+		useHerdr := worktreeOpenHerdr || worktreeOpenClaude || worktreeOpenDev || worktreeOpenPrompt != "" || mux.Current().Kind() == mux.KindHerdr
+		if useHerdr {
+			if worktreeOpenCursor || worktreeOpenVSCode || worktreeOpenZed {
+				return fmt.Errorf("--herdr cannot be combined with an IDE opener")
+			}
+			if err := mux.Herdr().CheckInstalled(); err != nil {
+				return err
+			}
+			fmt.Printf("Opening %s in Herdr...\n", name)
+			return mux.OpenHerdrWorktree(projectName, wt.Branch, wt.Path, mux.HerdrOpenOptions{
+				Claude: worktreeOpenClaude,
+				Prompt: worktreeOpenPrompt,
+				Dev:    worktreeOpenDev,
+			})
 		}
 
 		// Determine what to open with
@@ -324,6 +347,10 @@ func init() {
 	worktreeOpenCmd.Flags().BoolVar(&worktreeOpenVSCode, "vscode", false, "Open in VSCode")
 	worktreeOpenCmd.Flags().BoolVar(&worktreeOpenZed, "zed", false, "Open in Zed")
 	worktreeOpenCmd.Flags().BoolVarP(&worktreeOpenTerminal, "terminal", "t", false, "Open in terminal")
+	worktreeOpenCmd.Flags().BoolVar(&worktreeOpenHerdr, "herdr", false, "Open the worktree in Herdr")
+	worktreeOpenCmd.Flags().BoolVar(&worktreeOpenClaude, "claude", false, "Start interactive Claude Code in the Herdr workspace")
+	worktreeOpenCmd.Flags().BoolVar(&worktreeOpenDev, "dev", false, "Start the project dev server with conductor run in Herdr")
+	worktreeOpenCmd.Flags().StringVarP(&worktreeOpenPrompt, "prompt", "p", "", "Run Claude Code once with this prompt in Herdr (non-interactive)")
 
 	worktreeCmd.AddCommand(worktreeCreateCmd)
 	worktreeCmd.AddCommand(worktreeListCmd)
