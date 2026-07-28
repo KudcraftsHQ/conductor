@@ -153,7 +153,7 @@ type ColumnSchema struct {
 
 // SchemaChange represents a detected change in the source schema
 type SchemaChange struct {
-	Type        string `json:"type"` // "added", "removed", "modified"
+	Type        string `json:"type"`       // "added", "removed", "modified"
 	ObjectType  string `json:"objectType"` // "table", "column", "index"
 	ObjectName  string `json:"objectName"`
 	Description string `json:"description"`

@@ -36,11 +36,11 @@ const (
 
 // PrismaMigration represents a migration record from _prisma_migrations table
 type PrismaMigration struct {
-	ID                string    `json:"id"`
-	MigrationName     string    `json:"migrationName"`
-	Checksum          string    `json:"checksum"`
-	AppliedAt         time.Time `json:"appliedAt"`
-	AppliedStepsCount int       `json:"appliedStepsCount"`
+	ID                string     `json:"id"`
+	MigrationName     string     `json:"migrationName"`
+	Checksum          string     `json:"checksum"`
+	AppliedAt         time.Time  `json:"appliedAt"`
+	AppliedStepsCount int        `json:"appliedStepsCount"`
 	RolledBackAt      *time.Time `json:"rolledBackAt,omitempty"`
 }
 

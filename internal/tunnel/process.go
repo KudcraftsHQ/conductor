@@ -13,13 +13,13 @@ import (
 
 // PIDFile stores process information for recovery across TUI restarts
 type PIDFile struct {
-	PID          int              `json:"pid"`
-	ProjectName  string           `json:"project"`
-	WorktreeName string           `json:"worktree"`
+	PID          int               `json:"pid"`
+	ProjectName  string            `json:"project"`
+	WorktreeName string            `json:"worktree"`
 	Mode         config.TunnelMode `json:"mode"`
-	Port         int              `json:"port"`
-	URL          string           `json:"url"`
-	StartedAt    time.Time        `json:"startedAt"`
+	Port         int               `json:"port"`
+	URL          string            `json:"url"`
+	StartedAt    time.Time         `json:"startedAt"`
 }
 
 // TunnelsDir returns the path to the tunnels directory

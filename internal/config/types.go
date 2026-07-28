@@ -4,11 +4,11 @@ import "time"
 
 // Config represents the global conductor configuration
 type Config struct {
-	Version         int                    `json:"version"`
-	Defaults        Defaults               `json:"defaults"`
-	Updates         UpdateSettings         `json:"updates"`
-	PortAllocations map[string]*PortAlloc  `json:"portAllocations"`
-	Projects        map[string]*Project    `json:"projects"`
+	Version         int                   `json:"version"`
+	Defaults        Defaults              `json:"defaults"`
+	Updates         UpdateSettings        `json:"updates"`
+	PortAllocations map[string]*PortAlloc `json:"portAllocations"`
+	Projects        map[string]*Project   `json:"projects"`
 }
 
 // Defaults contains default settings
@@ -22,6 +22,34 @@ type Defaults struct {
 	// LocalPostgresURL is the connection string for local PostgreSQL
 	// Format: postgresql://user:pass@localhost:5432
 	LocalPostgresURL string `json:"localPostgresUrl,omitempty"`
+	// ClickUp contains global ClickUp agent configuration
+	ClickUp *ClickUpConfig `json:"clickup,omitempty"`
+	// Tmux contains tmux session settings
+	Tmux TmuxDefaults `json:"tmux,omitempty"`
+	// Multiplexer selects the terminal multiplexer conductor drives:
+	// "tmux", "herdr", or "auto" (default). Auto picks herdr when conductor is
+	// running inside a herdr pane or tmux is unavailable, tmux otherwise.
+	Multiplexer string `json:"multiplexer,omitempty"`
+}
+
+// TmuxDefaults contains tmux session settings
+type TmuxDefaults struct {
+	// DisableCC disables iTerm2 -CC control mode integration.
+	// When true, conductor uses plain tmux even inside iTerm2,
+	// giving full control over pane layouts.
+	DisableCC bool `json:"disableCc,omitempty"`
+}
+
+// ClickUpConfig contains ClickUp agent configuration (global defaults)
+type ClickUpConfig struct {
+	APIToken      string `json:"apiToken"`                // pk_xxxxx
+	TeamID        string `json:"teamId"`                  // workspace/team ID
+	TriggerStatus string `json:"triggerStatus,omitempty"` // default: "in progress"
+	WebhookPort   int    `json:"webhookPort,omitempty"`   // default: 9876
+	WebhookSecret string `json:"webhookSecret,omitempty"` // set after registration
+	WebhookID     string `json:"webhookId,omitempty"`     // set after registration
+	PollInterval  int    `json:"pollInterval,omitempty"`  // seconds, default: 30
+	PollFallback  bool   `json:"pollFallback,omitempty"`  // true = enable polling fallback
 }
 
 // PortAlloc represents a single port allocation
@@ -41,6 +69,21 @@ type Project struct {
 	Worktrees               map[string]*Worktree `json:"worktrees"`
 	// Database contains database sync configuration (optional)
 	Database *DatabaseConfig `json:"database,omitempty"`
+	// Tooling contains detected project type and tool availability (per-machine)
+	Tooling *ProjectTooling `json:"tooling,omitempty"`
+}
+
+// ProjectTooling contains detected project type info and tool installation status
+type ProjectTooling struct {
+	DetectedAt     time.Time `json:"detectedAt"`
+	Framework      string    `json:"framework"`
+	Language       string    `json:"language"`
+	PackageManager string    `json:"packageManager"`
+	TestFramework  string    `json:"testFramework,omitempty"`
+	WebEligible    bool      `json:"webEligible"`
+	UIType         string    `json:"uiType"`
+	ProofShotReady bool      `json:"proofShotReady,omitempty"`
+	TrustLayerInit bool      `json:"trustLayerInit,omitempty"`
 }
 
 // SetupStatus represents the state of worktree setup
@@ -103,7 +146,7 @@ type PRInfo struct {
 	Number     int       `json:"number"`
 	URL        string    `json:"url"`
 	Title      string    `json:"title"`
-	State      string    `json:"state"`  // "open", "closed", "merged", "draft"
+	State      string    `json:"state"` // "open", "closed", "merged", "draft"
 	Author     string    `json:"author"`
 	HeadBranch string    `json:"head_branch"` // The branch being merged (PR source branch)
 	UpdatedAt  time.Time `json:"updated_at"`
@@ -126,7 +169,23 @@ type Worktree struct {
 	DatabaseName string `json:"databaseName,omitempty"`
 	// DatabaseURL is the full connection string for the worktree's database
 	DatabaseURL string `json:"databaseUrl,omitempty"`
+	// ClickUpTaskID is the ClickUp task ID that triggered this worktree
+	ClickUpTaskID string `json:"clickupTaskId,omitempty"`
+	// ClickUpTaskURL is the URL to the ClickUp task
+	ClickUpTaskURL string `json:"clickupTaskUrl,omitempty"`
+	// MissionID links this worktree to a mission (if created by mission system)
+	MissionID string `json:"missionId,omitempty"`
 }
+
+// DatabaseMode represents the database sync mode
+type DatabaseMode string
+
+const (
+	// DatabaseModeLocal uses local PostgreSQL for golden and worktree databases
+	DatabaseModeLocal DatabaseMode = "local"
+	// DatabaseModeRemote uses remote PostgreSQL server for worktree databases
+	DatabaseModeRemote DatabaseMode = "remote"
+)
 
 // DatabaseConfig is the configuration for database sync
 type DatabaseConfig struct {
@@ -148,6 +207,23 @@ type DatabaseConfig struct {
 	DBNamePattern string `json:"dbNamePattern,omitempty"`
 	// SyncStatus tracks the last sync state (persisted)
 	SyncStatus *DatabaseSyncStatus `json:"syncStatus,omitempty"`
+
+	// Mode is "local" (default) or "remote"
+	// local: golden DB on local postgres, worktree DBs local
+	// remote: clone via SSH, worktree DBs on remote server
+	Mode DatabaseMode `json:"mode,omitempty"`
+	// SSHHost is the SSH connection string for remote operations (e.g., "root@152.53.19.193")
+	// Used to execute pg_dump | psql on the server for fast cloning
+	SSHHost string `json:"sshHost,omitempty"`
+	// CloneURL is the connection string for reading source DB (executed on the server via SSH)
+	// Should use internal/localhost address since it runs on the server
+	CloneURL string `json:"cloneUrl,omitempty"`
+	// DevURL is the base connection string for dev databases (executed on the server via SSH)
+	// Should use internal/localhost address. Database name is appended: {DevURL}/dev_{worktree}
+	DevURL string `json:"devUrl,omitempty"`
+	// DevURLExternal is the external connection string for dev databases (used by worktrees)
+	// This is what gets written to .env for the app to connect. Database name is appended.
+	DevURLExternal string `json:"devUrlExternal,omitempty"`
 }
 
 // DatabaseSyncStatus tracks the status of database synchronization
@@ -168,9 +244,77 @@ type DatabaseSyncStatus struct {
 
 // ProjectConfig represents project-level conductor.json
 type ProjectConfig struct {
-	Scripts map[string]string    `json:"scripts"`
-	Ports   PortConfig           `json:"ports"`
-	Tunnel  *ProjectTunnelConfig `json:"tunnel,omitempty"`
+	Scripts map[string]string     `json:"scripts"`
+	Ports   PortConfig            `json:"ports"`
+	Tunnel  *ProjectTunnelConfig  `json:"tunnel,omitempty"`
+	ClickUp *ProjectClickUpConfig `json:"clickup,omitempty"`
+	// Tooling contains detected project type info (committed to repo)
+	Tooling *ProjectToolingConfig `json:"tooling,omitempty"`
+	// Auth contains test authentication configuration
+	Auth *AuthConfig `json:"auth,omitempty"`
+}
+
+// AuthConfig contains authentication settings for testing
+type AuthConfig struct {
+	// Type is the auth method: "none", "dev-bypass", "email-password", "oauth"
+	Type string `json:"type"`
+	// LoginURL is the path to the login page (e.g., "/login", "/auth/signin")
+	LoginURL string `json:"loginUrl,omitempty"`
+	// SeedCommand creates the test account if it doesn't exist (e.g., "bun run seed-user")
+	SeedCommand string `json:"seedCommand,omitempty"`
+	// CallbackURL is where to redirect after login (e.g., "/app", "/dashboard")
+	CallbackURL string `json:"callbackUrl,omitempty"`
+}
+
+// ProjectToolingConfig contains project type info stored in conductor.json (repo-level)
+type ProjectToolingConfig struct {
+	Framework      string `json:"framework"`
+	Language       string `json:"language"`
+	PackageManager string `json:"packageManager"`
+	WebEligible    bool   `json:"webEligible"`
+	UIType         string `json:"uiType"`
+}
+
+// AgentMode determines how the agent processes tasks for a project
+type AgentMode string
+
+const (
+	AgentModeParallel   AgentMode = "parallel"
+	AgentModeSequential AgentMode = "sequential"
+)
+
+// ProjectClickUpConfig contains project-level ClickUp settings
+type ProjectClickUpConfig struct {
+	ListID        string    `json:"listId"`                  // ClickUp list ID for this project
+	TriggerStatus string    `json:"triggerStatus,omitempty"` // Override global trigger status
+	Mode          AgentMode `json:"mode,omitempty"`          // "parallel" (default) or "sequential"
+	DoneStatus    string    `json:"doneStatus,omitempty"`    // Status to set when task completes (default: "done")
+	ReadyStatus   string    `json:"readyStatus,omitempty"`   // Status to filter for AI pick (default: "to do")
+	AutoPick      bool      `json:"autoPick,omitempty"`      // Auto-pick next task via AI when current completes
+}
+
+// GetMode returns the agent mode, defaulting to parallel
+func (c *ProjectClickUpConfig) GetMode() AgentMode {
+	if c.Mode == AgentModeSequential {
+		return AgentModeSequential
+	}
+	return AgentModeParallel
+}
+
+// GetDoneStatus returns the done status, defaulting to "done"
+func (c *ProjectClickUpConfig) GetDoneStatus() string {
+	if c.DoneStatus != "" {
+		return c.DoneStatus
+	}
+	return "done"
+}
+
+// GetReadyStatus returns the ready status, defaulting to "to do"
+func (c *ProjectClickUpConfig) GetReadyStatus() string {
+	if c.ReadyStatus != "" {
+		return c.ReadyStatus
+	}
+	return "to do"
 }
 
 // PortConfig defines port settings for a project
@@ -189,6 +333,7 @@ func NewConfig() *Config {
 			PortRangeEnd:     3999,
 			OpenWith:         "iterm",
 			IDECommand:       "cursor",
+			Multiplexer:      "auto",
 		},
 		Updates:         DefaultUpdateSettings(),
 		PortAllocations: make(map[string]*PortAlloc),

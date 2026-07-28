@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"context"
 	"os"
 	"sort"
 	"time"
@@ -11,7 +10,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/hammashamzah/conductor/internal/config"
-	"github.com/hammashamzah/conductor/internal/database"
+	"github.com/hammashamzah/conductor/internal/mux"
+	"github.com/hammashamzah/conductor/internal/session"
 	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/tui/keys"
 	"github.com/hammashamzah/conductor/internal/tui/styles"
@@ -130,16 +130,16 @@ type Model struct {
 	spinner spinner.Model
 
 	// PR view state
-	prList       []config.PRInfo // PRs for current worktree
-	prCursor     int             // Selected PR in modal
-	prWorktree   string          // Which worktree's PRs we're viewing
-	prLoading    bool            // Whether we're fetching PRs
+	prList     []config.PRInfo // PRs for current worktree
+	prCursor   int             // Selected PR in modal
+	prWorktree string          // Which worktree's PRs we're viewing
+	prLoading  bool            // Whether we're fetching PRs
 
 	// All PRs view state (project-level PR list)
-	allPRList       []config.PRInfo // All PRs for current project
-	allPRCursor     int             // Selected PR in all PRs view
-	allPRLoading    bool            // Whether we're fetching all PRs
-	allPRCreating   bool            // Whether we're creating a worktree from a PR
+	allPRList     []config.PRInfo // All PRs for current project
+	allPRCursor   int             // Selected PR in all PRs view
+	allPRLoading  bool            // Whether we're fetching all PRs
+	allPRCreating bool            // Whether we're creating a worktree from a PR
 
 	// Claude PR auto-scan state
 	claudePRScanning bool // Whether we're currently scanning for Claude PRs
@@ -149,11 +149,11 @@ type Model struct {
 	gitStatusLoading bool
 
 	// Tunnel state
-	tunnelManager    *tunnel.Manager
-	tunnelModalOpen  bool
-	tunnelModalMode  int // 0 = quick, 1 = named
-	tunnelModalPort  int // Which port to tunnel
-	tunnelStarting   bool
+	tunnelManager   *tunnel.Manager
+	tunnelModalOpen bool
+	tunnelModalMode int // 0 = quick, 1 = named
+	tunnelModalPort int // Which port to tunnel
+	tunnelStarting  bool
 
 	// Branch rename dialog state (when branch is already checked out)
 	branchRenameInput    textinput.Model
@@ -162,35 +162,44 @@ type Model struct {
 	branchRenameConflict string        // Path where branch is already checked out
 
 	// Archived worktrees list state
-	archivedListCursor   int
-	archivedListOffset   int
-	archivedListMode     int                           // 0 = archived worktrees, 1 = orphaned branches
-	orphanedBranches     []workspace.OrphanedBranchInfo // Cached orphaned branches
-	orphanedLoading      bool                          // Loading orphaned branches
-	archivedWorktrees    []archivedWorktreeInfo
+	archivedListCursor int
+	archivedListOffset int
+	archivedListMode   int                            // 0 = archived worktrees, 1 = orphaned branches
+	orphanedBranches   []workspace.OrphanedBranchInfo // Cached orphaned branches
+	orphanedLoading    bool                           // Loading orphaned branches
+	archivedWorktrees  []archivedWorktreeInfo
 
 	// Database view state
-	databaseProjects   []string                    // List of projects with database config
-	databaseCursor     int                         // Selected project in database view
-	databaseOffset     int                         // Scroll offset for database view
-	databaseSyncing    map[string]bool             // Projects currently syncing
-	databaseProgress   map[string]string           // Current progress message per project
-	databaseSyncCancel map[string]context.CancelFunc // Cancel functions for ongoing syncs
+	databaseProjects []string // List of projects with database config
+	databaseCursor   int      // Selected project in database view
+	databaseOffset   int      // Scroll offset for database view
 
 	// Database logs view state
-	databaseLogs        map[string][]string // Logs per project (most recent sync)
+	databaseLogs        map[string][]string // Logs per project
 	databaseLogsProject string              // Which project's logs are being viewed
 	databaseLogsScroll  int                 // Scroll offset for logs view
 	databaseLogsAuto    bool                // Auto-scroll to bottom
 
-	// Database reinit confirmation state
-	dbReinitProject  string // Project name for reinit
-	dbReinitWorktree string // Worktree name for reinit
-	dbReinitDBName   string // Database name for reinit
+	// Database reinstantiate confirmation state
+	dbReinstantiateProject  string // Project name for reinstantiate
+	dbReinstantiateWorktree string // Worktree name for reinstantiate
+	dbReinstantiateDBName   string // Database name for reinstantiate
+
+	// Agent picker state
+	agentPickerCursor int    // 0 = Claude Code, 1 = OpenCode, 2 = Codex
+	agentPickerTarget string // worktree name being opened
+
+	// Multiplexer driving the agent/dev panes (tmux or herdr)
+	mux mux.Multiplexer
+
+	// Session restore (after auto-update restart)
+	pendingRestore *mux.SessionState
 
 	// Config file watching (for CLI-to-TUI updates)
 	configModTime    time.Time // Last known modification time of config file
 	lastConfigReload time.Time // For debouncing rapid reloads
+
+	sessionTracker *session.Tracker // scans multiplexer panes for agents
 }
 
 // NewModel creates a new TUI model
@@ -244,19 +253,25 @@ func NewModelWithStore(cfg *config.Config, s *store.Store, version string) *Mode
 		spinner:           sp,
 		gitStatusCache:    make(map[string]*workspace.GitStatusInfo),
 		tunnelManager:     tunnel.NewManager(cfg),
-		databaseSyncing:    make(map[string]bool),
-		databaseProgress:   make(map[string]string),
-		databaseSyncCancel: make(map[string]context.CancelFunc),
-		databaseLogs:       make(map[string][]string),
+		databaseLogs:      make(map[string][]string),
+		mux:               mux.FromConfig(cfg),
 	}
 
 	m.refreshProjectList()
+
+	// Auto-select project and jump to worktrees view when there's only one project
+	if len(m.projectNames) == 1 {
+		m.selectedProject = m.projectNames[0]
+		m.refreshWorktreeList()
+		m.currentView = ViewWorktrees
+	}
+
 	return m
 }
 
 // Init initializes the model
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		m.spinner.Tick,
 		m.checkForUpdates(),
 		m.scheduleClaudePRScan(),
@@ -264,8 +279,49 @@ func (m *Model) Init() tea.Cmd {
 		m.restoreTunnels(),
 		m.recoverInterruptedStates(),
 		m.initConfigWatch(),
-		m.scheduleBackgroundDatabaseSync(),
-	)
+	}
+
+	if m.pendingRestore != nil {
+		cmds = append(cmds, m.verifyRestoredSession())
+	}
+
+	return tea.Batch(cmds...)
+}
+
+// StartSessionTracker creates and starts the session tracker that scans multiplexer
+// panes for agents. Its purpose is to update window names with agent status icons
+// so terminal tabs show at-a-glance status.
+func (m *Model) StartSessionTracker(p *tea.Program) {
+	// Multiplexers that surface agent status natively need no tracker.
+	if m.mux.TracksAgentStatus() {
+		return
+	}
+	m.sessionTracker = session.NewTracker(m.mux.SessionName(), nil)
+	m.sessionTracker.SetTitleUpdater(m.mux.UpdateTabTitles)
+	m.sessionTracker.Start()
+}
+
+// StopSessionTracker stops the session tracker
+func (m *Model) StopSessionTracker() {
+	if m.sessionTracker != nil {
+		m.sessionTracker.Stop()
+	}
+}
+
+// SetPendingRestore sets session state to verify on startup (after update restart)
+func (m *Model) SetPendingRestore(state *mux.SessionState) {
+	m.pendingRestore = state
+}
+
+// verifyRestoredSession checks that saved windows are still alive after restart
+func (m *Model) verifyRestoredSession() tea.Cmd {
+	state := m.pendingRestore
+	mx := m.mux
+	return func() tea.Msg {
+		alive := state.VerifyWindows(mx)
+		mux.ClearSessionState()
+		return SessionRestoredMsg{AliveWindows: alive}
+	}
 }
 
 // recoverInterruptedStates checks for worktrees that were left in creating/running state
@@ -298,45 +354,6 @@ func (m *Model) restoreTunnels() tea.Cmd {
 		m.store.CleanupStaleTunnels(activeTunnels)
 
 		return TunnelRestoredMsg{RestoredCount: len(restored)}
-	}
-}
-
-// scheduleBackgroundDatabaseSync checks for database-enabled projects and triggers
-// automatic sync if the cooldown has passed (once per day by default)
-func (m *Model) scheduleBackgroundDatabaseSync() tea.Cmd {
-	return func() tea.Msg {
-		defaults := m.store.GetDefaults()
-		if defaults.LocalPostgresURL == "" {
-			return nil // No local PostgreSQL configured
-		}
-
-		conductorDir, err := config.ConductorDir()
-		if err != nil {
-			return nil
-		}
-
-		mgr := database.NewManager(defaults.LocalPostgresURL, conductorDir)
-
-		// Check each project for database sync needs
-		for projectName, project := range m.config.Projects {
-			if project.Database == nil {
-				continue
-			}
-
-			// Check if sync is needed (uses V3 time-based cooldown)
-			checkResult, err := mgr.CheckSyncNeeded(projectName, project.Database)
-			if err != nil || !checkResult.NeedsSync {
-				continue
-			}
-
-			// Trigger background sync for this project
-			return BackgroundSyncNeededMsg{
-				ProjectName: projectName,
-				Reason:      checkResult.Reason,
-			}
-		}
-
-		return nil
 	}
 }
 

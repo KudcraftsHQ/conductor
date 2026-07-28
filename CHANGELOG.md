@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Pluggable Terminal Multiplexer**: Conductor now drives either tmux or [herdr](https://herdr.dev)
+  - New `internal/mux` package defines a `Multiplexer` interface; tmux and herdr both implement it
+  - Select with `defaults.multiplexer` in `~/.conductor/conductor.json`: `"tmux"`, `"herdr"`, or `"auto"` (default)
+  - `auto` picks herdr when conductor is running inside a herdr pane or when tmux is unavailable, tmux otherwise
+  - `CONDUCTOR_MUX=herdr` environment variable overrides the config value
+  - Under herdr a worktree maps to a herdr *workspace* labelled `project/branch`, with the coding agent pane on the left and the dev server pane on the right — the same layout as tmux
+  - Conductor's session tracker (which annotates tmux window names with agent status icons) is skipped under herdr, which detects and renders agent status itself
+  - Session state saved for auto-update restarts now records which multiplexer wrote it
+- **Codex CLI Agent**: Added OpenAI's Codex CLI as a coding agent option alongside Claude Code and OpenCode
+  - Selectable in the "Open with" agent picker (Claude Code / OpenCode / Codex)
+  - Launches via `codex` (interactive), seeds tasks as a positional prompt, and uses `codex exec` for one-shot runs
+  - System prompt delivered through the worktree context file (same mechanism as OpenCode)
+  - Codex tmux sessions detected and labeled by the session scanner
 - **Markdown Help Output**: New `conductor help --markdown` flag for AI-friendly documentation
   - Outputs complete CLI reference in markdown format
   - Organized by command category (Core, Project, Worktree, Database, Tunnel, Utilities)
@@ -35,8 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Release Documentation**: Updated CLAUDE.md with auto-release workflow instructions
+- **Sequential Agent Completion**: A task is only treated as finished once its agent has been observed running at least once, so a slow-to-detect agent is no longer mistaken for an exited one
 
-## [1.1.11.2] - 2026-01-11
+### Removed
+- **Sidebar**: Removed the tmux sidebar pane entirely — the `conductor sidebar` and `conductor sidebar-server` commands, the `internal/sidebarserver` package, the standalone and integrated sidebar TUI modes, the TPM plugin (`conductor.tmux`, `scripts/tmux-plugin/`), and the `defaults.sidebar` config block
+  - Agent status is still surfaced through tmux window/tab titles under tmux, and natively by herdr
+  - The separate `apps/conductor-tui` Solid app that rendered the sidebar is now unused
+- **Missions**: Removed the mission orchestration feature — the `conductor mission` command tree, the `internal/mission` package, the missions TUI view and spec dialog, and the `4` keybinding
 
 ### Fixed
 - **CI Integration Tests**: Skip integration tests in CI by using `-short` flag (integration tests require network access)

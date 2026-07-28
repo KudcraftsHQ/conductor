@@ -159,10 +159,66 @@ func (sm *SetupManager) RunSetupAsync(
 		projectConfig, _ := config.LoadProjectConfig(project.Path)
 
 		// Clone database if configured for this worktree
-		if worktree.DatabaseName != "" {
+		if worktree.DatabaseName != "" || (project.Database != nil && project.Database.Mode == config.DatabaseModeRemote) {
 			defaults := sm.store.GetDefaults()
-			if defaults.LocalPostgresURL != "" {
-				// Log database cloning
+
+			// Check if we're using remote mode
+			if project.Database != nil && project.Database.Mode == config.DatabaseModeRemote {
+				// Remote mode: clone on the remote server
+				dbMsg := fmt.Sprintf("Cloning database remotely for worktree %s...\n", worktreeName)
+				sm.mu.Lock()
+				if buf, ok := sm.logs[key]; ok {
+					buf.WriteString(dbMsg)
+				}
+				sm.mu.Unlock()
+				if logFile != nil {
+					logFile.WriteString(dbMsg)
+				}
+
+				progress := func(msg string) {
+					logMsg := fmt.Sprintf("  %s\n", msg)
+					sm.mu.Lock()
+					if buf, ok := sm.logs[key]; ok {
+						buf.WriteString(logMsg)
+					}
+					sm.mu.Unlock()
+					if logFile != nil {
+						logFile.WriteString(logMsg)
+					}
+				}
+
+				dbName, dbURL, err := cloneWorktreeDBRemote(context.Background(), project.Database, worktreeName, progress)
+				if err != nil {
+					errMsg := fmt.Sprintf("Warning: remote database clone failed: %v\n", err)
+					sm.mu.Lock()
+					if buf, ok := sm.logs[key]; ok {
+						buf.WriteString(errMsg)
+					}
+					sm.mu.Unlock()
+					if logFile != nil {
+						logFile.WriteString(errMsg)
+					}
+					// Continue anyway - setup script may handle missing DB
+				} else {
+					// Update worktree with database info via store
+					_ = sm.store.SetWorktreeDatabase(projectName, worktreeName, dbName, dbURL)
+
+					// Also update the local worktree variable so env vars are correct
+					worktree.DatabaseName = dbName
+					worktree.DatabaseURL = dbURL
+
+					successMsg := fmt.Sprintf("Remote database %s created successfully\n", dbName)
+					sm.mu.Lock()
+					if buf, ok := sm.logs[key]; ok {
+						buf.WriteString(successMsg)
+					}
+					sm.mu.Unlock()
+					if logFile != nil {
+						logFile.WriteString(successMsg)
+					}
+				}
+			} else if defaults.LocalPostgresURL != "" && worktree.DatabaseName != "" {
+				// Local mode: clone from golden database
 				dbMsg := fmt.Sprintf("Cloning database to %s...\n", worktree.DatabaseName)
 				sm.mu.Lock()
 				if buf, ok := sm.logs[key]; ok {
@@ -224,10 +280,15 @@ func (sm *SetupManager) RunSetupAsync(
 			cmd = exec.Command("bash", "-c", script)
 		}
 
-		cmd.Dir = worktree.Path
+		const setupTimeout = 30 * time.Minute
+		setupCtx, setupCancel := context.WithTimeout(context.Background(), setupTimeout)
+		defer setupCancel()
+
+		cmdWithTimeout := exec.CommandContext(setupCtx, cmd.Args[0], cmd.Args[1:]...)
+		cmdWithTimeout.Dir = worktree.Path
 
 		// Build environment variables using the same function as CLI runner
-		cmd.Env = runner.BuildEnv(projectName, project, worktreeName, worktree, projectConfig)
+		cmdWithTimeout.Env = runner.BuildEnv(projectName, project, worktreeName, worktree, projectConfig)
 
 		// Capture output to both memory buffer and file
 		sm.mu.RLock()
@@ -247,10 +308,13 @@ func (sm *SetupManager) RunSetupAsync(
 			output = io.MultiWriter(logBuf, logFile)
 		}
 
-		cmd.Stdout = output
-		cmd.Stderr = output
+		cmdWithTimeout.Stdout = output
+		cmdWithTimeout.Stderr = output
 
-		setupErr = cmd.Run()
+		setupErr = cmdWithTimeout.Run()
+		if setupCtx.Err() == context.DeadlineExceeded {
+			setupErr = fmt.Errorf("setup timed out after %s", setupTimeout)
+		}
 		success = setupErr == nil
 
 		// Write footer to log
@@ -331,10 +395,15 @@ func (sm *SetupManager) RunArchiveScript(
 		cmd = exec.Command("bash", "-c", script)
 	}
 
-	cmd.Dir = worktree.Path
+	const archiveTimeout = 5 * time.Minute
+	archiveCtx, archiveCancel := context.WithTimeout(context.Background(), archiveTimeout)
+	defer archiveCancel()
+
+	cmdWithTimeout := exec.CommandContext(archiveCtx, cmd.Args[0], cmd.Args[1:]...)
+	cmdWithTimeout.Dir = worktree.Path
 
 	// Build environment variables using the same function as CLI runner
-	cmd.Env = runner.BuildEnv(projectName, project, worktreeName, worktree, projectConfig)
+	cmdWithTimeout.Env = runner.BuildEnv(projectName, project, worktreeName, worktree, projectConfig)
 
 	// Write header to log
 	header := fmt.Sprintf("=== Archive started at %s ===\n", time.Now().Format(time.RFC3339))
@@ -344,11 +413,14 @@ func (sm *SetupManager) RunArchiveScript(
 
 	// Capture output to file
 	if logFile != nil {
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
+		cmdWithTimeout.Stdout = logFile
+		cmdWithTimeout.Stderr = logFile
 	}
 
-	archiveErr := cmd.Run()
+	archiveErr := cmdWithTimeout.Run()
+	if archiveCtx.Err() == context.DeadlineExceeded {
+		archiveErr = fmt.Errorf("archive script timed out after %s", archiveTimeout)
+	}
 
 	// Write footer to log
 	var footer string
@@ -397,10 +469,46 @@ func runSetupSync(project *config.Project, projectName, worktreeName string, wor
 		}
 	}()
 
-	// Clone database if configured for this worktree (V3 only)
-	if worktree.DatabaseName != "" {
+	// Clone database if configured for this worktree
+	if worktree.DatabaseName != "" || (project.Database != nil && project.Database.Mode == config.DatabaseModeRemote) {
 		cfg, _ := config.Load()
-		if cfg != nil && cfg.Defaults.LocalPostgresURL != "" {
+
+		// Check if we're using remote mode
+		if project.Database != nil && project.Database.Mode == config.DatabaseModeRemote {
+			// Remote mode: clone on the remote server
+			fmt.Printf("Cloning database remotely for worktree %s...\n", worktreeName)
+			if logFile != nil {
+				fmt.Fprintf(logFile, "Cloning database remotely for worktree %s...\n", worktreeName)
+			}
+
+			progress := func(msg string) {
+				fmt.Printf("  %s\n", msg)
+				if logFile != nil {
+					fmt.Fprintf(logFile, "  %s\n", msg)
+				}
+			}
+
+			dbName, dbURL, err := cloneWorktreeDBRemote(context.Background(), project.Database, worktreeName, progress)
+			if err != nil {
+				warnMsg := fmt.Sprintf("Warning: remote database clone failed: %v\n", err)
+				fmt.Print(warnMsg)
+				if logFile != nil {
+					logFile.WriteString(warnMsg)
+				}
+				// Continue anyway - setup script may handle missing DB
+			} else {
+				// Update the local worktree variable so env vars are correct
+				worktree.DatabaseName = dbName
+				worktree.DatabaseURL = dbURL
+
+				successMsg := fmt.Sprintf("Remote database %s cloned successfully\n", dbName)
+				fmt.Print(successMsg)
+				if logFile != nil {
+					logFile.WriteString(successMsg)
+				}
+			}
+		} else if cfg != nil && cfg.Defaults.LocalPostgresURL != "" && worktree.DatabaseName != "" {
+			// Local mode: clone from golden database
 			fmt.Printf("Cloning database to %s...\n", worktree.DatabaseName)
 			if logFile != nil {
 				fmt.Fprintf(logFile, "Cloning database to %s...\n", worktree.DatabaseName)
@@ -484,10 +592,29 @@ func runSetupSync(project *config.Project, projectName, worktreeName string, wor
 	return setupErr
 }
 
-
 // cloneWorktreeDB clones the golden database to a worktree database (V3 only)
 func cloneWorktreeDB(localURL, dbName, projectName, conductorDir string) error {
 	// Use V3 golden database clone (no file-based fallback)
 	return database.CloneFromGoldenDB(context.Background(), localURL, projectName, dbName, nil)
 }
 
+// cloneWorktreeDBRemote clones the source database to a worktree database on the remote server via SSH
+func cloneWorktreeDBRemote(ctx context.Context, cfg *config.DatabaseConfig, worktreeName string, progress func(string)) (string, string, error) {
+	if cfg.SSHHost == "" {
+		return "", "", fmt.Errorf("remote mode requires sshHost to be configured")
+	}
+	if cfg.CloneURL == "" || cfg.DevURL == "" {
+		return "", "", fmt.Errorf("remote mode requires cloneUrl and devUrl to be configured")
+	}
+
+	dbName := database.GenerateRemoteDBName(worktreeName)
+
+	err := database.RemoteCloneForWorktree(ctx, cfg.SSHHost, cfg.CloneURL, cfg.DevURL, dbName, cfg.ExcludeTables, progress)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Use external URL for worktree .env (what the app connects to)
+	dbURL := database.BuildRemoteWorktreeURL(cfg.DevURLExternal, cfg.DevURL, dbName)
+	return dbName, dbURL, nil
+}

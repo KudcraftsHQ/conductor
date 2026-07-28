@@ -39,6 +39,21 @@ func (s *Store) RemoveProject(name string) error {
 	return nil
 }
 
+// SetProjectTooling sets the tooling detection results for a project
+func (s *Store) SetProjectTooling(projectName string, tooling *config.ProjectTooling) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	project, ok := s.config.Projects[projectName]
+	if !ok {
+		return fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	project.Tooling = tooling
+	s.markDirty()
+	return nil
+}
+
 // SetGitHubConfig sets the GitHub owner and repo for a project
 func (s *Store) SetGitHubConfig(projectName, owner, repo string) error {
 	s.mu.Lock()
@@ -345,6 +360,7 @@ func (s *Store) BatchMutate(fn func(cfg *config.Config) error) error {
 // ============================================================================
 
 // RecoverInterruptedWorktrees marks all creating/running worktrees as failed
+// and clears any stuck archive-running status.
 // Returns the number of worktrees recovered
 func (s *Store) RecoverInterruptedWorktrees() int {
 	s.mu.Lock()
@@ -361,6 +377,11 @@ func (s *Store) RecoverInterruptedWorktrees() int {
 			switch wt.SetupStatus {
 			case config.SetupStatusCreating, config.SetupStatusRunning:
 				wt.SetupStatus = config.SetupStatusFailed
+				recovered++
+			}
+
+			if wt.ArchiveStatus == config.ArchiveStatusRunning {
+				wt.ArchiveStatus = config.ArchiveStatusNone
 				recovered++
 			}
 		}
@@ -418,7 +439,6 @@ func (s *Store) RestoreTunnelStates(tunnelStates map[string]*config.TunnelState)
 		s.markDirty()
 	}
 }
-
 
 // SetDatabaseConfig sets the database configuration for a project
 func (s *Store) SetDatabaseConfig(projectName string, dbConfig *config.DatabaseConfig) error {
@@ -481,3 +501,43 @@ func (s *Store) SetWorktreeDatabase(projectName, worktreeName, dbName, dbURL str
 	return nil
 }
 
+// SetWorktreeMission sets the mission ID for a worktree
+func (s *Store) SetWorktreeMission(projectName, worktreeName, missionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	project, ok := s.config.Projects[projectName]
+	if !ok {
+		return fmt.Errorf("project %q not found", projectName)
+	}
+
+	wt, ok := project.Worktrees[worktreeName]
+	if !ok {
+		return fmt.Errorf("worktree %q not found", worktreeName)
+	}
+
+	wt.MissionID = missionID
+	s.markDirty()
+	return nil
+}
+
+// SetWorktreeClickUpTask sets the ClickUp task linkage for a worktree
+func (s *Store) SetWorktreeClickUpTask(projectName, worktreeName, taskID, taskURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	project, ok := s.config.Projects[projectName]
+	if !ok {
+		return fmt.Errorf("project %q not found", projectName)
+	}
+
+	wt, ok := project.Worktrees[worktreeName]
+	if !ok {
+		return fmt.Errorf("worktree %q not found", worktreeName)
+	}
+
+	wt.ClickUpTaskID = taskID
+	wt.ClickUpTaskURL = taskURL
+	s.markDirty()
+	return nil
+}

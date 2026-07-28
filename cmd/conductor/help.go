@@ -60,12 +60,12 @@ func printMarkdownHelp(cmd *cobra.Command) {
 
 	// Group commands by category
 	categories := map[string][]*cobra.Command{
-		"Core":       {},
-		"Project":    {},
-		"Worktree":   {},
-		"Database":   {},
-		"Tunnel":     {},
-		"Utilities":  {},
+		"Core":      {},
+		"Project":   {},
+		"Worktree":  {},
+		"Database":  {},
+		"Tunnel":    {},
+		"Utilities": {},
 	}
 
 	for _, c := range cmd.Commands() {

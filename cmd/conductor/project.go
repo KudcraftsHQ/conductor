@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"sort"
 	"text/tabwriter"
+	"time"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/detect"
 	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -99,6 +101,27 @@ This command will:
 		projectConfigPath := filepath.Join(absPath, "conductor.json")
 		if _, err := os.Stat(projectConfigPath); os.IsNotExist(err) {
 			fmt.Println("\nTip: Run 'conductor project init' in the project to create conductor.json")
+		}
+
+		// Auto-detect project type
+		info, detectErr := detect.DetectProject(absPath)
+		if detectErr == nil && info.Framework != "unknown" {
+			tooling := &config.ProjectTooling{
+				DetectedAt:     time.Now(),
+				Framework:      info.Framework,
+				Language:       info.Language,
+				PackageManager: info.PackageManager,
+				TestFramework:  info.TestFramework,
+				WebEligible:    info.WebEligible,
+				UIType:         info.UIType,
+			}
+			_ = s.SetProjectTooling(name, tooling)
+
+			fmt.Printf("\nDetected: %s (%s)\n", info.Framework, info.Language)
+			if info.WebEligible {
+				fmt.Println("  ProofShot: eligible (web project)")
+			}
+			fmt.Println("\nRun 'conductor project setup' for full tooling detection.")
 		}
 
 		return nil

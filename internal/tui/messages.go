@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/session"
 	"github.com/hammashamzah/conductor/internal/workspace"
 )
 
@@ -263,58 +264,25 @@ const ViewDatabases View = iota + 600
 // ViewDatabaseLogs is the view for database sync logs
 const ViewDatabaseLogs View = iota + 601
 
-// ViewConfirmDbReinit is the confirmation dialog for database reinitialization
-const ViewConfirmDbReinit View = iota + 602
+// ViewConfirmDbReinstantiate is the confirmation dialog for database reinstantiation
+const ViewConfirmDbReinstantiate View = iota + 602
 
-// DatabaseSyncStartedMsg indicates database sync has started
-type DatabaseSyncStartedMsg struct {
-	ProjectName string
-	Force       bool // True if force sync (skip incremental check)
-}
+// ViewAgentPicker is the modal for choosing which coding agent to open a worktree with
+const ViewAgentPicker View = iota + 700
 
-// DatabaseSyncProgressMsg indicates sync progress update
-type DatabaseSyncProgressMsg struct {
-	ProjectName  string
-	Message      string
-	TablesDone   int
-	TablesTotal  int
-	CurrentTable string
-}
-
-// DatabaseSyncCompletedMsg indicates database sync has completed
-type DatabaseSyncCompletedMsg struct {
-	ProjectName    string
-	GoldenFileSize int64
-	TableCount     int
-	ExcludedCount  int
-	DurationMs     int64
-	Skipped        bool   // True if sync was skipped (no changes)
-	SkipReason     string // Reason for skipping
-	Cancelled      bool   // True if sync was cancelled by user
-	Err            error
-}
-
-// BackgroundSyncNeededMsg indicates a database needs background sync
-type BackgroundSyncNeededMsg struct {
-	ProjectName string
-	Reason      string
-}
-
-// DatabaseReinitStartedMsg indicates database reinit has started
-type DatabaseReinitStartedMsg struct {
+// DatabaseReinstantiateStartedMsg indicates database reinstantiate has started
+type DatabaseReinstantiateStartedMsg struct {
 	ProjectName  string
 	WorktreeName string
 	DatabaseName string
 }
 
-// DatabaseReinitCompletedMsg indicates database reinit has completed
-type DatabaseReinitCompletedMsg struct {
-	ProjectName       string
-	WorktreeName      string
-	DatabaseName      string
-	MigrationStatus   string // forward, synced, diverged, behind
-	PendingMigrations int
-	Err               error
+// DatabaseReinstantiateCompletedMsg indicates database reinstantiate has completed
+type DatabaseReinstantiateCompletedMsg struct {
+	ProjectName  string
+	WorktreeName string
+	DatabaseName string
+	Err          error
 }
 
 // DatabaseMigrationStatusMsg contains migration status for a worktree
@@ -336,3 +304,13 @@ type DatabaseMetadataLoadedMsg struct {
 	Metadata map[string]*config.DatabaseSyncStatus
 }
 
+// SessionRestoredMsg indicates tmux session state was verified after an update restart
+type SessionRestoredMsg struct {
+	AliveWindows []string
+	Err          error
+}
+
+// SessionsUpdateMsg is sent by the session tracker when agent sessions change
+type SessionsUpdateMsg struct {
+	Sessions []*session.Session
+}

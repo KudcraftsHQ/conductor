@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/hammashamzah/conductor/internal/config"
-	"github.com/hammashamzah/conductor/internal/tmux"
+	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/tui"
 	"github.com/hammashamzah/conductor/internal/tui/ipc"
 	"github.com/spf13/cobra"
@@ -24,22 +24,24 @@ var tuiCmd = &cobra.Command{
 }
 
 func runTUI() {
-	// If already inside conductor tmux session, run TUI directly
-	if tmux.IsInsideConductorSession() {
+	mx := mux.Current()
+
+	// If already inside the conductor session, run TUI directly
+	if mx.IsInsideConductorSession() {
 		runTUIDirectly()
 		return
 	}
 
-	// If inside different tmux session, warn and run directly
-	if tmux.IsInsideTmux() {
-		fmt.Println("Warning: Running inside existing tmux session. For best experience, exit and run 'conductor' directly.")
+	// If inside a different session of the same multiplexer, warn and run directly
+	if mx.IsInsideSession() {
+		fmt.Printf("Warning: Running inside an existing %s session. For best experience, exit and run 'conductor' directly.\n", mx.Kind())
 		runTUIDirectly()
 		return
 	}
 
-	// Not in tmux - start conductor session (this execs, doesn't return)
-	if err := tmux.StartSession(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start tmux session: %v\n", err)
+	// Not in a session - start one (this execs, doesn't return)
+	if err := mx.StartSession(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start session: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -59,6 +61,12 @@ func runTUIDirectly() {
 	ipc.DisableNotifications()
 
 	m := tui.NewModelWithVersion(cfg, version)
+
+	// Check for session state from a previous update restart
+	if state := mux.LoadSessionState(); state != nil {
+		m.SetPendingRestore(state)
+	}
+
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	// Start IPC server for CLI-to-TUI notifications (from external CLI commands)
@@ -67,6 +75,10 @@ func runTUIDirectly() {
 		go ipcServer.Start()
 		defer func() { _ = ipcServer.Close() }()
 	}
+
+	// Start the agent session tracker so window names get live status icons.
+	m.StartSessionTracker(p)
+	defer m.StopSessionTracker()
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)

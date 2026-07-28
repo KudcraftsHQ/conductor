@@ -87,8 +87,8 @@ func TestView_WorktreesList(t *testing.T) {
 		{
 			name: "with archived worktree",
 			worktrees: map[string]*config.Worktree{
-				"tokyo":  {Branch: "feature/a", Path: "/wt/tokyo", SetupStatus: config.SetupStatusDone},
-				"paris":  {Branch: "feature/b", Path: "/wt/paris", Archived: true, ArchivedAt: time.Now()},
+				"tokyo": {Branch: "feature/a", Path: "/wt/tokyo", SetupStatus: config.SetupStatusDone},
+				"paris": {Branch: "feature/b", Path: "/wt/paris", Archived: true, ArchivedAt: time.Now()},
 			},
 			asserts: []string{"tokyo", "paris", "archived"},
 		},

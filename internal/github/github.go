@@ -13,14 +13,14 @@ import (
 
 // ghPR represents the JSON output from gh pr list/view
 type ghPR struct {
-	Number         int       `json:"number"`
-	URL            string    `json:"url"`
-	Title          string    `json:"title"`
-	State          string    `json:"state"`
-	Author         ghAuthor  `json:"author"`
-	IsDraft        bool      `json:"isDraft"`
-	HeadRefName    string    `json:"headRefName"` // The branch being merged
-	UpdatedAt      time.Time `json:"updatedAt"`
+	Number      int       `json:"number"`
+	URL         string    `json:"url"`
+	Title       string    `json:"title"`
+	State       string    `json:"state"`
+	Author      ghAuthor  `json:"author"`
+	IsDraft     bool      `json:"isDraft"`
+	HeadRefName string    `json:"headRefName"` // The branch being merged
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 type ghAuthor struct {

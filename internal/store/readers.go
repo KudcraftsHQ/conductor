@@ -352,6 +352,12 @@ func (s *Store) copyDatabaseConfig(db *config.DatabaseConfig) *config.DatabaseCo
 		SizeThresholdMB: db.SizeThresholdMB,
 		SyncSchedule:    db.SyncSchedule,
 		DBNamePattern:   db.DBNamePattern,
+		// Remote mode fields
+		Mode:           db.Mode,
+		SSHHost:        db.SSHHost,
+		CloneURL:       db.CloneURL,
+		DevURL:         db.DevURL,
+		DevURLExternal: db.DevURLExternal,
 	}
 	// Copy slice
 	if len(db.ExcludeTables) > 0 {
@@ -384,17 +390,19 @@ func (s *Store) copyWorktree(wt *config.Worktree) *config.Worktree {
 		return nil
 	}
 	cp := &config.Worktree{
-		Path:          wt.Path,
-		Branch:        wt.Branch,
-		IsRoot:        wt.IsRoot,
-		CreatedAt:     wt.CreatedAt,
-		Archived:      wt.Archived,
-		ArchivedAt:    wt.ArchivedAt,
-		SetupStatus:   wt.SetupStatus,
-		ArchiveStatus: wt.ArchiveStatus,
-		Tunnel:        s.copyTunnelState(wt.Tunnel),
-		DatabaseName:  wt.DatabaseName,
-		DatabaseURL:   wt.DatabaseURL,
+		Path:           wt.Path,
+		Branch:         wt.Branch,
+		IsRoot:         wt.IsRoot,
+		CreatedAt:      wt.CreatedAt,
+		Archived:       wt.Archived,
+		ArchivedAt:     wt.ArchivedAt,
+		SetupStatus:    wt.SetupStatus,
+		ArchiveStatus:  wt.ArchiveStatus,
+		Tunnel:         s.copyTunnelState(wt.Tunnel),
+		DatabaseName:   wt.DatabaseName,
+		DatabaseURL:    wt.DatabaseURL,
+		ClickUpTaskID:  wt.ClickUpTaskID,
+		ClickUpTaskURL: wt.ClickUpTaskURL,
 	}
 
 	// Copy ports

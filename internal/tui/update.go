@@ -2,11 +2,9 @@ package tui
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,12 +14,14 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/hammashamzah/conductor/internal/codingagent"
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/database"
 	"github.com/hammashamzah/conductor/internal/github"
+	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/opener"
-	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/tui/ipc"
+	"github.com/hammashamzah/conductor/internal/updater"
 	"github.com/hammashamzah/conductor/internal/workspace"
 )
 
@@ -61,7 +61,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		projectName := msg.ProjectName
 		worktreeName := msg.WorktreeName
 		return m, func() tea.Msg {
-			done := make(chan SetupCompleteMsg)
+			done := make(chan SetupCompleteMsg, 1)
 			_ = m.wsManager.RunSetupAsync(projectName, worktreeName, func(success bool, setupErr error) {
 				done <- SetupCompleteMsg{
 					ProjectName:  projectName,
@@ -70,7 +70,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Err:          setupErr,
 				}
 			})
-			return <-done
+			select {
+			case msg := <-done:
+				return msg
+			case <-time.After(35 * time.Minute):
+				return SetupCompleteMsg{
+					ProjectName:  projectName,
+					WorktreeName: worktreeName,
+					Success:      false,
+					Err:          fmt.Errorf("setup timed out"),
+				}
+			}
 		}
 
 	case SetupCompleteMsg:
@@ -249,86 +259,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case DatabaseSyncProgressMsg:
-		// Update progress message for this project
-		m.databaseProgress[msg.ProjectName] = msg.Message
-		// Append to logs
-		m.databaseLogs[msg.ProjectName] = append(m.databaseLogs[msg.ProjectName],
-			fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg.Message))
-		return m, nil
-
-	case progressMsgWithContinue:
-		// Handle progress and continue listening
-		m.databaseProgress[msg.progress.ProjectName] = msg.progress.Message
-		// Append to logs
-		m.databaseLogs[msg.progress.ProjectName] = append(m.databaseLogs[msg.progress.ProjectName],
-			fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg.progress.Message))
-		return m, msg.next
-
-	case DatabaseSyncCompletedMsg:
-		// Clear syncing flag, progress, and cancel function
-		delete(m.databaseSyncing, msg.ProjectName)
-		delete(m.databaseProgress, msg.ProjectName)
-		delete(m.databaseSyncCancel, msg.ProjectName)
-
-		// Handle skipped sync
-		if msg.Skipped {
-			m.databaseLogs[msg.ProjectName] = append(m.databaseLogs[msg.ProjectName],
-				fmt.Sprintf("[%s] Skipped: %s", time.Now().Format("15:04:05"), msg.SkipReason))
-			m.setStatus(fmt.Sprintf("Sync skipped: %s", msg.SkipReason), false)
-			return m, nil
-		}
-
-		// Handle cancelled sync
-		if msg.Cancelled {
-			m.databaseLogs[msg.ProjectName] = append(m.databaseLogs[msg.ProjectName],
-				fmt.Sprintf("[%s] Cancelled by user", time.Now().Format("15:04:05")))
-			m.setStatus("Database sync cancelled", false)
-			return m, nil
-		}
-
-		// Update sync status in config
-		project := m.config.Projects[msg.ProjectName]
-		if project != nil && project.Database != nil {
-			if project.Database.SyncStatus == nil {
-				project.Database.SyncStatus = &config.DatabaseSyncStatus{}
-			}
-			if msg.Err != nil {
-				project.Database.SyncStatus.Status = "failed"
-				project.Database.SyncStatus.LastError = msg.Err.Error()
-				m.databaseLogs[msg.ProjectName] = append(m.databaseLogs[msg.ProjectName],
-					fmt.Sprintf("[%s] ERROR: %s", time.Now().Format("15:04:05"), msg.Err.Error()))
-				m.setStatus("Database sync failed: "+msg.Err.Error(), true)
-			} else {
-				project.Database.SyncStatus.Status = "synced"
-				project.Database.SyncStatus.LastSyncAt = time.Now().Format("2006-01-02 15:04")
-				project.Database.SyncStatus.GoldenCopySize = msg.GoldenFileSize
-				project.Database.SyncStatus.TableCount = msg.TableCount
-				project.Database.SyncStatus.ExcludedCount = msg.ExcludedCount
-				project.Database.SyncStatus.LastError = ""
-				completionMsg := fmt.Sprintf("Completed: %d tables, %s in %dms",
-					msg.TableCount, database.FormatSize(msg.GoldenFileSize), msg.DurationMs)
-				m.databaseLogs[msg.ProjectName] = append(m.databaseLogs[msg.ProjectName],
-					fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), completionMsg))
-				m.setStatus(fmt.Sprintf("Database synced: %d tables, %s in %dms",
-					msg.TableCount, database.FormatSize(msg.GoldenFileSize), msg.DurationMs), false)
-			}
-			// Persist to config file
-			_ = m.store.SetDatabaseConfig(msg.ProjectName, project.Database)
-		}
-		return m, nil
-
-	case DatabaseReinitCompletedMsg:
+	case DatabaseReinstantiateCompletedMsg:
 		if msg.Err != nil {
-			m.setStatus("Database reinit failed: "+msg.Err.Error(), true)
+			m.setStatus("Database reinstantiate failed: "+msg.Err.Error(), true)
 		} else {
-			statusMsg := fmt.Sprintf("Database %s re-initialized", msg.DatabaseName)
-			if msg.PendingMigrations > 0 {
-				statusMsg += fmt.Sprintf(" (%d pending migrations - run prisma migrate deploy)", msg.PendingMigrations)
-			} else if msg.MigrationStatus == "synced" {
-				statusMsg += " (migrations up to date)"
-			}
-			m.setStatus(statusMsg, false)
+			m.setStatus(fmt.Sprintf("Database %s reinstantiated successfully", msg.DatabaseName), false)
 		}
 		return m, nil
 
@@ -345,30 +280,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				statusMsg += fmt.Sprintf(" | %d extra in DB", len(msg.ExtraMigrations))
 			}
 			m.setStatus(statusMsg, msg.MigrationStatus == "diverged" || msg.MigrationStatus == "behind")
-		}
-		return m, nil
-
-	case BackgroundSyncNeededMsg:
-		// Trigger background sync for the project
-		project := m.config.Projects[msg.ProjectName]
-		if project != nil && project.Database != nil {
-			m.setStatus(fmt.Sprintf("Auto-syncing %s (%s)...", msg.ProjectName, msg.Reason), false)
-			return m, m.triggerDatabaseSync(msg.ProjectName, false)
-		}
-		return m, nil
-
-	case DatabaseMetadataLoadedMsg:
-		// Update SyncStatus from loaded metadata for projects that don't have it yet
-		for projectName, syncStatus := range msg.Metadata {
-			project := m.config.Projects[projectName]
-			if project != nil && project.Database != nil {
-				// Only update if SyncStatus is empty or has no last sync time
-				if project.Database.SyncStatus == nil || project.Database.SyncStatus.LastSyncAt == "" {
-					project.Database.SyncStatus = syncStatus
-					// Persist to config file
-					_ = m.store.SetDatabaseConfig(projectName, project.Database)
-				}
-			}
 		}
 		return m, nil
 
@@ -410,6 +321,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(nextCheck, func() tea.Msg {
 			return m.performUpdateCheck()
 		})
+
+	case SessionRestoredMsg:
+		if msg.Err != nil {
+			m.setStatus("Session restore failed: "+msg.Err.Error(), true)
+		} else if len(msg.AliveWindows) > 0 {
+			m.setStatus(fmt.Sprintf("Updated to v%s — %d windows preserved", m.version, len(msg.AliveWindows)), false)
+		} else {
+			m.setStatus("Updated to v"+m.version, false)
+		}
+		m.pendingRestore = nil
+		return m, nil
 
 	case ClaudePRScanTickMsg:
 		// Schedule next scan regardless of current state
@@ -650,9 +572,9 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmDelete(msg)
 	}
 
-	// Handle confirm database reinit
-	if m.currentView == ViewConfirmDbReinit {
-		return m.handleConfirmDbReinit(msg)
+	// Handle confirm database reinstantiate
+	if m.currentView == ViewConfirmDbReinstantiate {
+		return m.handleConfirmDbReinstantiate(msg)
 	}
 
 	// Handle help modal
@@ -684,6 +606,11 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleLogsView(msg)
 	}
 
+	// Handle agent picker
+	if m.currentView == ViewAgentPicker {
+		return m.handleAgentPicker(msg)
+	}
+
 	// Handle quit dialog
 	if m.currentView == ViewQuit {
 		return m.handleQuitDialog(msg)
@@ -694,7 +621,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handlePRsView(msg)
 	}
 
-// Handle All PRs view
+	// Handle All PRs view
 	if m.currentView == ViewAllPRs {
 		return m.handleAllPRsView(msg)
 	}
@@ -752,6 +679,28 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setStatus("No message history", false)
 		}
+		return m, nil
+
+	case key.Matches(msg, m.keyMap.ApplyUpdate):
+		if !m.updateDownloaded {
+			if m.updateAvailable {
+				m.setStatus("Update downloading in background...", false)
+			} else {
+				m.setStatus("No update available", false)
+			}
+			return m, nil
+		}
+		// Save session state before restarting
+		if err := mux.SaveSessionState(m.mux, m.version); err != nil {
+			return m, m.setStatusWithTimeout("Failed to save session: "+err.Error(), true)
+		}
+		// Replace current process with new binary (does not return on success)
+		if err := updater.Restart(); err != nil {
+			// Restart failed — clean up state file
+			mux.ClearSessionState()
+			return m, m.setStatusWithTimeout("Failed to restart: "+err.Error(), true)
+		}
+		// unreachable
 		return m, nil
 
 	case key.Matches(msg, m.keyMap.Filter):
@@ -845,8 +794,7 @@ func (m *Model) handleProjectsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.currentView = ViewDatabases
 		m.databaseCursor = 0
 		m.databaseOffset = 0
-		// Load sync metadata from disk for projects that may have been synced via CLI
-		return m, m.loadDatabaseMetadata()
+		return m, nil
 
 	case key.Matches(msg, m.keyMap.Delete):
 		if m.cursor >= 0 && m.cursor < len(m.projectNames) {
@@ -937,8 +885,14 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case key.Matches(msg, m.keyMap.Open), key.Matches(msg, m.keyMap.OpenTerminal):
-		return m.openWorktree(opener.TerminalITerm)
+	case key.Matches(msg, m.keyMap.Open), key.Matches(msg, m.keyMap.OpenTerminal), msg.Type == tea.KeyEnter:
+		if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
+			m.agentPickerTarget = m.worktreeNames[m.cursor]
+			m.agentPickerCursor = 0
+			m.prevView = ViewWorktrees
+			m.currentView = ViewAgentPicker
+		}
+		return m, nil
 
 	case key.Matches(msg, m.keyMap.OpenCursor):
 		return m.openWorktreeIDE(opener.IDECursor)
@@ -955,8 +909,7 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.currentView = ViewDatabases
 		m.databaseCursor = 0
 		m.databaseOffset = 0
-		// Load sync metadata from disk for projects that may have been synced via CLI
-		return m, m.loadDatabaseMetadata()
+		return m, nil
 
 	case key.Matches(msg, m.keyMap.MergeReqs):
 		// Open PR modal for selected worktree
@@ -1068,7 +1021,7 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.setStatus("Retrying setup: "+wtName+"...", false)
 
 				return m, func() tea.Msg {
-					done := make(chan RetrySetupMsg)
+					done := make(chan RetrySetupMsg, 1)
 					_ = m.wsManager.RunSetupAsync(projectName, worktreeName, func(success bool, setupErr error) {
 						done <- RetrySetupMsg{
 							ProjectName:  projectName,
@@ -1077,7 +1030,17 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 							Err:          setupErr,
 						}
 					})
-					return <-done
+					select {
+					case msg := <-done:
+						return msg
+					case <-time.After(35 * time.Minute):
+						return RetrySetupMsg{
+							ProjectName:  projectName,
+							WorktreeName: worktreeName,
+							Success:      false,
+							Err:          fmt.Errorf("setup timed out"),
+						}
+					}
 				}
 			}
 		}
@@ -1102,10 +1065,6 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.logsType = "setup"
 		}
 		// Note: Don't reset cursor here - preserve selection for when we return
-
-	case key.Matches(msg, m.keyMap.Enter):
-		// Open in terminal on enter
-		return m.openWorktree(opener.TerminalITerm)
 
 	case key.Matches(msg, m.keyMap.Tunnel):
 		// Toggle tunnel for selected worktree
@@ -1179,46 +1138,8 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.currentView = ViewArchivedList
 		}
 
-	case key.Matches(msg, m.keyMap.DatabaseSync):
-		// Sync database from source for this project
-		project := m.config.Projects[m.selectedProject]
-		if project == nil || project.Database == nil {
-			m.setStatus("Database not configured for this project. Use CLI: conductor database set-source <url>", true)
-			return m, nil
-		}
-
-		defaults := m.store.GetDefaults()
-		if defaults.LocalPostgresURL == "" {
-			m.setStatus("Local PostgreSQL not configured. Use CLI: conductor database set-local <url>", true)
-			return m, nil
-		}
-
-		projectName := m.selectedProject
-		m.setStatus("Syncing database for "+projectName+"...", false)
-
-		return m, func() tea.Msg {
-			conductorDir, err := config.ConductorDir()
-			if err != nil {
-				return DatabaseSyncCompletedMsg{ProjectName: projectName, Err: err}
-			}
-
-			mgr := database.NewManager(defaults.LocalPostgresURL, conductorDir)
-			metadata, err := mgr.SyncProject(projectName, project.Database)
-			if err != nil {
-				return DatabaseSyncCompletedMsg{ProjectName: projectName, Err: err}
-			}
-
-			return DatabaseSyncCompletedMsg{
-				ProjectName:    projectName,
-				GoldenFileSize: metadata.GoldenFileSize,
-				TableCount:     len(metadata.TableSizes),
-				DurationMs:     metadata.SyncDurationMs,
-				Err:            nil,
-			}
-		}
-
-	case key.Matches(msg, m.keyMap.DatabaseReinit):
-		// Show confirmation dialog for database reinit
+	case key.Matches(msg, m.keyMap.DatabaseReinstantiate):
+		// Show confirmation dialog for database reinstantiate (remote mode only)
 		worktrees := m.worktreeNames
 		if len(worktrees) == 0 || m.cursor >= len(worktrees) {
 			return m, nil
@@ -1233,18 +1154,23 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		defaults := m.store.GetDefaults()
-		if defaults.LocalPostgresURL == "" {
-			m.setStatus("Local PostgreSQL not configured", true)
+		// Check for remote mode
+		if project.Database == nil || project.Database.Mode != config.DatabaseModeRemote {
+			m.setStatus("Only remote database mode is supported", true)
 			return m, nil
 		}
 
-		// Store reinit target and show confirmation dialog
-		m.dbReinitProject = m.selectedProject
-		m.dbReinitWorktree = worktreeName
-		m.dbReinitDBName = worktree.DatabaseName
+		if project.Database.SSHHost == "" {
+			m.setStatus("SSH host not configured for remote database", true)
+			return m, nil
+		}
+
+		// Store reinstantiate target and show confirmation dialog
+		m.dbReinstantiateProject = m.selectedProject
+		m.dbReinstantiateWorktree = worktreeName
+		m.dbReinstantiateDBName = worktree.DatabaseName
 		m.prevView = m.currentView
-		m.currentView = ViewConfirmDbReinit
+		m.currentView = ViewConfirmDbReinstantiate
 		return m, nil
 
 	case key.Matches(msg, m.keyMap.DatabaseMigrationStatus):
@@ -1384,86 +1310,71 @@ func (m *Model) handleConfirmDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) handleConfirmDbReinit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleConfirmDbReinstantiate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
-		return m.executeDbReinit()
+		return m.executeDbReinstantiate()
 	case "n", "N", "esc":
 		m.currentView = m.prevView
-		m.dbReinitProject = ""
-		m.dbReinitWorktree = ""
-		m.dbReinitDBName = ""
+		m.dbReinstantiateProject = ""
+		m.dbReinstantiateWorktree = ""
+		m.dbReinstantiateDBName = ""
 	}
 	return m, nil
 }
 
-func (m *Model) executeDbReinit() (tea.Model, tea.Cmd) {
-	projectName := m.dbReinitProject
-	worktreeName := m.dbReinitWorktree
-	dbName := m.dbReinitDBName
+func (m *Model) executeDbReinstantiate() (tea.Model, tea.Cmd) {
+	projectName := m.dbReinstantiateProject
+	worktreeName := m.dbReinstantiateWorktree
+	dbName := m.dbReinstantiateDBName
 
-	// Get worktree path
+	// Get project and database config
 	project := m.config.Projects[projectName]
 	if project == nil {
 		m.setStatus("Project not found", true)
 		m.currentView = m.prevView
 		return m, nil
 	}
-	worktree := project.Worktrees[worktreeName]
-	if worktree == nil {
-		m.setStatus("Worktree not found", true)
+	dbConfig := project.Database
+	if dbConfig == nil {
+		m.setStatus("Database not configured", true)
 		m.currentView = m.prevView
 		return m, nil
 	}
-	worktreePath := worktree.Path
-
-	defaults := m.store.GetDefaults()
-	localURL := defaults.LocalPostgresURL
 
 	// Clear dialog state
-	m.dbReinitProject = ""
-	m.dbReinitWorktree = ""
-	m.dbReinitDBName = ""
+	m.dbReinstantiateProject = ""
+	m.dbReinstantiateWorktree = ""
+	m.dbReinstantiateDBName = ""
 	m.currentView = m.prevView
 
-	m.setStatus("Re-initializing database "+dbName+"...", false)
+	m.setStatus("Reinstantiating database "+dbName+"...", false)
 
 	return m, func() tea.Msg {
 		ctx := context.Background()
 
-		// Check if golden database exists
-		goldenExists, err := database.GoldenDBExists(localURL, projectName)
+		// Step 1: Drop existing database via SSH
+		err := database.RemoteDropDatabase(ctx, dbConfig.SSHHost, dbConfig.DevURL, dbName)
 		if err != nil {
-			return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
-		}
-		if !goldenExists {
-			return DatabaseReinitCompletedMsg{
-				ProjectName:  projectName,
-				WorktreeName: worktreeName,
-				Err:          fmt.Errorf("golden database not found - run 'S' to sync first"),
+			return DatabaseReinstantiateCompletedMsg{
+				ProjectName: projectName, WorktreeName: worktreeName, Err: err,
 			}
 		}
 
-		// Use V3: Clone from golden database
-		result, err := database.ReinitializeDatabaseV3(ctx, localURL, projectName, dbName, worktreePath, nil)
+		// Step 2: Clone fresh from source via SSH
+		err = database.RemoteCloneForWorktree(ctx, dbConfig.SSHHost, dbConfig.CloneURL,
+			dbConfig.DevURL, dbName, dbConfig.ExcludeTables, nil)
 		if err != nil {
-			return DatabaseReinitCompletedMsg{ProjectName: projectName, WorktreeName: worktreeName, Err: err}
+			return DatabaseReinstantiateCompletedMsg{
+				ProjectName: projectName, WorktreeName: worktreeName, Err: err,
+			}
 		}
 
-		migStatus := "unknown"
-		pendingCount := 0
-		if result.MigrationState != nil {
-			migStatus = string(result.MigrationState.Compatibility)
-			pendingCount = len(result.MigrationState.PendingMigrations)
-		}
-
-		return DatabaseReinitCompletedMsg{
-			ProjectName:       projectName,
-			WorktreeName:      worktreeName,
-			DatabaseName:      result.DatabaseName,
-			MigrationStatus:   migStatus,
-			PendingMigrations: pendingCount,
-			Err:               nil,
+		return DatabaseReinstantiateCompletedMsg{
+			ProjectName:  projectName,
+			WorktreeName: worktreeName,
+			DatabaseName: dbName,
+			Err:          nil,
 		}
 	}
 }
@@ -1589,30 +1500,27 @@ func (m *Model) executeDelete() (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *Model) openWorktree(termType opener.TerminalType) (tea.Model, tea.Cmd) {
-	if m.cursor < 0 || m.cursor >= len(m.worktreeNames) {
-		return m, nil
-	}
-
-	wtName := m.worktreeNames[m.cursor]
+func (m *Model) openWorktreeWithAgent(wtName string, agent codingagent.Agent) (tea.Model, tea.Cmd) {
 	project := m.config.Projects[m.selectedProject]
 	wt := project.Worktrees[wtName]
 	if wt == nil {
 		return m, nil
 	}
 
-	m.setStatus("Opening "+wtName+"...", false)
+	m.setStatus("Opening "+wtName+" with "+agent.Label()+"...", false)
 
+	selectedProject := m.selectedProject
+	mx := m.mux
 	return m, func() tea.Msg {
-		// Check if tmux window already exists
-		if tmux.WindowExists(m.selectedProject, wt.Branch) {
+		// Check if the worktree window already exists
+		if mx.WindowExists(selectedProject, wt.Branch) {
 			// Focus existing window
-			err := tmux.FocusWindow(m.selectedProject, wt.Branch)
+			err := mx.FocusWindow(selectedProject, wt.Branch)
 			return OpenedMsg{Path: wt.Path, Err: err}
 		}
 
-		// Create new coding window with claude on left, dev server on right
-		err := tmux.CreateCodingWindow(m.selectedProject, wt.Branch, wt.Path)
+		// Create new coding window with chosen agent on left, dev server on right
+		err := mx.CreateCodingWindow(selectedProject, wt.Branch, wt.Path, agent)
 		return OpenedMsg{Path: wt.Path, Err: err}
 	}
 }
@@ -1754,6 +1662,39 @@ func (m *Model) getCurrentLogs() string {
 	return workspace.GetSetupManager().GetLogs(m.selectedProject, m.logsWorktree)
 }
 
+func (m *Model) handleAgentPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case msg.Type == tea.KeyEsc:
+		m.currentView = m.prevView
+		return m, nil
+
+	case key.Matches(msg, m.keyMap.Up), msg.String() == "k":
+		if m.agentPickerCursor > 0 {
+			m.agentPickerCursor--
+		}
+
+	case key.Matches(msg, m.keyMap.Down), msg.String() == "j":
+		if m.agentPickerCursor < 2 {
+			m.agentPickerCursor++
+		}
+
+	case msg.Type == tea.KeyEnter:
+		m.currentView = m.prevView
+		var agent codingagent.Agent
+		switch m.agentPickerCursor {
+		case 0:
+			agent = codingagent.ClaudeCode
+		case 1:
+			agent = codingagent.OpenCode
+		case 2:
+			agent = codingagent.Codex
+		}
+		return m.openWorktreeWithAgent(m.agentPickerTarget, agent)
+	}
+
+	return m, nil
+}
+
 func (m *Model) handleQuitDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case msg.Type == tea.KeyEsc || msg.String() == "q":
@@ -1772,14 +1713,16 @@ func (m *Model) handleQuitDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case msg.Type == tea.KeyEnter:
 		if m.quitFocused == 0 {
-			// Kill all - kill the entire tmux session
+			// Kill all - kill other windows first, then quit TUI
+			// (quitting TUI closes its pane, which ends the session)
+			mx := m.mux
 			return m, func() tea.Msg {
-				_ = tmux.KillSession()
+				mx.KillOtherWindows()
 				return tea.Quit()
 			}
 		}
-		// Detach - detach from tmux session, TUI keeps running
-		_ = tmux.DetachSession()
+		// Detach - detach from the session, TUI keeps running
+		_ = m.mux.DetachSession()
 		m.currentView = m.prevView
 		return m, nil
 	}
@@ -2377,17 +2320,6 @@ func (m *Model) handleDatabasesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.currentView = m.prevView
 		return m, nil
 
-	case msg.String() == "esc":
-		// Cancel sync for the selected project if syncing
-		if m.databaseCursor >= 0 && m.databaseCursor < len(m.databaseProjects) {
-			projectName := m.databaseProjects[m.databaseCursor]
-			if cancel, ok := m.databaseSyncCancel[projectName]; ok && m.databaseSyncing[projectName] {
-				cancel()
-				m.setStatus("Cancelling sync for "+projectName+"...", false)
-			}
-		}
-		return m, nil
-
 	case key.Matches(msg, m.keyMap.Up):
 		if m.databaseCursor > 0 {
 			m.databaseCursor--
@@ -2398,20 +2330,6 @@ func (m *Model) handleDatabasesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.databaseCursor < len(m.databaseProjects)-1 {
 			m.databaseCursor++
 			m.ensureDatabaseCursorVisible()
-		}
-
-	case key.Matches(msg, m.keyMap.Enter), key.Matches(msg, m.keyMap.DatabaseSync):
-		// Sync the selected project's database (incremental)
-		if m.databaseCursor >= 0 && m.databaseCursor < len(m.databaseProjects) {
-			projectName := m.databaseProjects[m.databaseCursor]
-			return m, m.triggerDatabaseSync(projectName, false)
-		}
-
-	case key.Matches(msg, m.keyMap.DatabaseSyncForce):
-		// Force sync the selected project's database
-		if m.databaseCursor >= 0 && m.databaseCursor < len(m.databaseProjects) {
-			projectName := m.databaseProjects[m.databaseCursor]
-			return m, m.triggerDatabaseSync(projectName, true)
 		}
 
 	case key.Matches(msg, m.keyMap.DatabaseLogs):
@@ -2425,7 +2343,7 @@ func (m *Model) handleDatabasesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.prevView = m.currentView
 				m.currentView = ViewDatabaseLogs
 			} else {
-				m.setStatus("No sync logs for "+projectName, false)
+				m.setStatus("No logs for "+projectName, false)
 			}
 		}
 
@@ -2504,323 +2422,5 @@ func (m *Model) ensureDatabaseCursorVisible() {
 		m.databaseOffset = m.databaseCursor
 	} else if m.databaseCursor >= m.databaseOffset+tableHeight {
 		m.databaseOffset = m.databaseCursor - tableHeight + 1
-	}
-}
-
-// triggerDatabaseSync validates and starts a database sync
-func (m *Model) triggerDatabaseSync(projectName string, force bool) tea.Cmd {
-	if m.databaseSyncing[projectName] {
-		m.setStatus("Sync already in progress for "+projectName, false)
-		return nil
-	}
-
-	project := m.config.Projects[projectName]
-	if project == nil || project.Database == nil {
-		m.setStatus("No database config for "+projectName, true)
-		return nil
-	}
-
-	// Mark as syncing and clear old logs
-	m.databaseSyncing[projectName] = true
-	m.databaseProgress[projectName] = "Starting..."
-	m.databaseLogs[projectName] = []string{fmt.Sprintf("[%s] Starting sync...", time.Now().Format("15:04:05"))}
-
-	if force {
-		m.setStatus("Starting force sync for "+projectName+"...", false)
-	} else {
-		m.setStatus("Checking for changes in "+projectName+"...", false)
-	}
-
-	// Start async sync with progress channel
-	return m.startDatabaseSyncWithProgress(projectName, project.Database, force)
-}
-
-// startDatabaseSyncWithProgress starts an async database sync with real-time progress
-// Uses V3 (golden database) approach for faster sync and time-based cooldown
-func (m *Model) startDatabaseSyncWithProgress(projectName string, dbConfig *config.DatabaseConfig, force bool) tea.Cmd {
-	// Create a channel for progress updates
-	progressChan := make(chan string, 100)
-
-	// Create context with cancel for interruption
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Store the cancel function so it can be called on Esc
-	m.databaseSyncCancel[projectName] = cancel
-
-	// Get localPostgresURL and conductorDir before starting goroutine
-	defaults := m.store.GetDefaults()
-	localPostgresURL := defaults.LocalPostgresURL
-
-	// Start the sync in a goroutine
-	go func() {
-		defer close(progressChan)
-		defer func() {
-			// Clean up cancel function when done
-			delete(m.databaseSyncCancel, projectName)
-		}()
-
-		startTime := time.Now()
-
-		// Get the conductor directory
-		conductorDir, err := config.ConductorDir()
-		if err != nil {
-			progressChan <- "ERROR:" + err.Error()
-			return
-		}
-
-		// Create manager for V3 sync
-		mgr := database.NewManager(localPostgresURL, conductorDir)
-
-		// Check if sync is needed (unless force) - uses V3 time-based check
-		if !force {
-			progressChan <- "Checking for changes..."
-			checkResult, err := mgr.CheckSyncNeeded(projectName, dbConfig)
-			if err == nil && !checkResult.NeedsSync {
-				progressChan <- "SKIP:" + checkResult.Reason
-				return
-			}
-			if checkResult != nil && checkResult.NeedsSync {
-				progressChan <- "Changes detected: " + checkResult.Reason
-			}
-		}
-
-		// Check for cancellation before starting sync
-		if ctx.Err() != nil {
-			progressChan <- "CANCELLED:"
-			return
-		}
-
-		// Progress callback
-		progress := func(msg string) {
-			select {
-			case progressChan <- msg:
-			default:
-				// Channel full, skip
-			}
-		}
-
-		progressChan <- "Starting sync..."
-
-		// Run the V3 sync with progress and context for cancellation
-		metadata, err := mgr.SyncProjectWithProgressCtx(ctx, projectName, dbConfig, progress)
-		if err != nil {
-			if ctx.Err() != nil {
-				progressChan <- "CANCELLED:"
-			} else {
-				progressChan <- "ERROR:" + err.Error()
-			}
-			return
-		}
-
-		// Send completion info
-		progressChan <- fmt.Sprintf("DONE:%d:%d:%d", len(metadata.TableSizes), len(metadata.ExcludedTables), time.Since(startTime).Milliseconds())
-	}()
-
-	// Return a command that reads from the channel
-	return m.listenForSyncProgress(projectName, progressChan)
-}
-
-// listenForSyncProgress returns a command that listens for sync progress
-func (m *Model) listenForSyncProgress(projectName string, progressChan <-chan string) tea.Cmd {
-	return func() tea.Msg {
-		msg, ok := <-progressChan
-		if !ok {
-			// Channel closed without completion message - shouldn't happen normally
-			return DatabaseSyncCompletedMsg{
-				ProjectName: projectName,
-				Err:         fmt.Errorf("sync terminated unexpectedly"),
-			}
-		}
-
-		// Check for special messages
-		if strings.HasPrefix(msg, "SKIP:") {
-			return DatabaseSyncCompletedMsg{
-				ProjectName: projectName,
-				Skipped:     true,
-				SkipReason:  strings.TrimPrefix(msg, "SKIP:"),
-			}
-		}
-
-		if strings.HasPrefix(msg, "ERROR:") {
-			return DatabaseSyncCompletedMsg{
-				ProjectName: projectName,
-				Err:         errors.New(strings.TrimPrefix(msg, "ERROR:")),
-			}
-		}
-
-		if strings.HasPrefix(msg, "CANCELLED:") {
-			return DatabaseSyncCompletedMsg{
-				ProjectName: projectName,
-				Cancelled:   true,
-			}
-		}
-
-		if strings.HasPrefix(msg, "DONE:") {
-			// Parse completion: DONE:tableCount:excludedCount:durationMs
-			parts := strings.Split(strings.TrimPrefix(msg, "DONE:"), ":")
-			tableCount := 0
-			excludedCount := 0
-			durationMs := int64(0)
-			if len(parts) >= 3 {
-				_, _ = fmt.Sscanf(parts[0], "%d", &tableCount)
-				_, _ = fmt.Sscanf(parts[1], "%d", &excludedCount)
-				_, _ = fmt.Sscanf(parts[2], "%d", &durationMs)
-			}
-
-			// Get golden file size
-			homeDir, _ := os.UserHomeDir()
-			dbsyncDir := filepath.Join(homeDir, ".conductor", "dbsync")
-			goldenPath := filepath.Join(dbsyncDir, projectName, "golden.sql")
-			var goldenSize int64
-			if info, err := os.Stat(goldenPath); err == nil {
-				goldenSize = info.Size()
-			}
-
-			return DatabaseSyncCompletedMsg{
-				ProjectName:    projectName,
-				GoldenFileSize: goldenSize,
-				TableCount:     tableCount,
-				ExcludedCount:  excludedCount,
-				DurationMs:     durationMs,
-			}
-		}
-
-		// Regular progress message - return it and continue listening
-		return progressMsgWithContinue{
-			progress: DatabaseSyncProgressMsg{
-				ProjectName: projectName,
-				Message:     msg,
-			},
-			next: func() tea.Msg {
-				// Continue listening
-				return listenForMoreProgress(projectName, progressChan)()
-			},
-		}
-	}
-}
-
-// progressMsgWithContinue wraps a progress message with a continuation
-type progressMsgWithContinue struct {
-	progress DatabaseSyncProgressMsg
-	next     func() tea.Msg
-}
-
-// listenForMoreProgress continues listening for progress
-func listenForMoreProgress(projectName string, progressChan <-chan string) tea.Cmd {
-	return func() tea.Msg {
-		msg, ok := <-progressChan
-		if !ok {
-			// Channel closed - sync complete
-			return DatabaseSyncCompletedMsg{
-				ProjectName: projectName,
-			}
-		}
-
-		// Check for special messages
-		if strings.HasPrefix(msg, "SKIP:") {
-			return DatabaseSyncCompletedMsg{
-				ProjectName: projectName,
-				Skipped:     true,
-				SkipReason:  strings.TrimPrefix(msg, "SKIP:"),
-			}
-		}
-
-		if strings.HasPrefix(msg, "ERROR:") {
-			return DatabaseSyncCompletedMsg{
-				ProjectName: projectName,
-				Err:         errors.New(strings.TrimPrefix(msg, "ERROR:")),
-			}
-		}
-
-		if strings.HasPrefix(msg, "DONE:") {
-			parts := strings.Split(strings.TrimPrefix(msg, "DONE:"), ":")
-			tableCount := 0
-			excludedCount := 0
-			durationMs := int64(0)
-			if len(parts) >= 3 {
-				_, _ = fmt.Sscanf(parts[0], "%d", &tableCount)
-				_, _ = fmt.Sscanf(parts[1], "%d", &excludedCount)
-				_, _ = fmt.Sscanf(parts[2], "%d", &durationMs)
-			}
-
-			homeDir, _ := os.UserHomeDir()
-			dbsyncDir := filepath.Join(homeDir, ".conductor", "dbsync")
-			goldenPath := filepath.Join(dbsyncDir, projectName, "golden.sql")
-			var goldenSize int64
-			if info, err := os.Stat(goldenPath); err == nil {
-				goldenSize = info.Size()
-			}
-
-			return DatabaseSyncCompletedMsg{
-				ProjectName:    projectName,
-				GoldenFileSize: goldenSize,
-				TableCount:     tableCount,
-				ExcludedCount:  excludedCount,
-				DurationMs:     durationMs,
-			}
-		}
-
-		// Regular progress
-		return progressMsgWithContinue{
-			progress: DatabaseSyncProgressMsg{
-				ProjectName: projectName,
-				Message:     msg,
-			},
-			next: func() tea.Msg {
-				return listenForMoreProgress(projectName, progressChan)()
-			},
-		}
-	}
-}
-
-// loadDatabaseMetadata creates a command that loads sync metadata from disk for all projects
-// This is used to populate SyncStatus from metadata.json files created by CLI sync commands
-func (m *Model) loadDatabaseMetadata() tea.Cmd {
-	return func() tea.Msg {
-		result := make(map[string]*config.DatabaseSyncStatus)
-
-		// Get dbsync directory
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return DatabaseMetadataLoadedMsg{Metadata: result}
-		}
-		dbsyncDir := filepath.Join(homeDir, ".conductor", "dbsync")
-
-		// Load metadata for each project with database config
-		for projectName, project := range m.config.Projects {
-			if project.Database == nil || project.Database.Source == "" {
-				continue
-			}
-
-			// Skip if already has valid SyncStatus
-			if project.Database.SyncStatus != nil && project.Database.SyncStatus.LastSyncAt != "" {
-				continue
-			}
-
-			// Try to load metadata from disk
-			metadata, err := database.LoadSyncMetadata(projectName, dbsyncDir)
-			if err != nil || metadata == nil {
-				continue
-			}
-
-			// Convert SyncMetadata to DatabaseSyncStatus
-			syncStatus := &config.DatabaseSyncStatus{
-				LastSyncAt:     metadata.LastSyncAt.Format("2006-01-02 15:04"),
-				GoldenCopySize: metadata.GoldenFileSize,
-				TableCount:     len(metadata.TableSizes),
-				ExcludedCount:  len(metadata.ExcludedTables),
-				Status:         "synced",
-			}
-
-			// Check if there was an error
-			if metadata.Error != "" {
-				syncStatus.Status = "failed"
-				syncStatus.LastError = metadata.Error
-			}
-
-			result[projectName] = syncStatus
-		}
-
-		return DatabaseMetadataLoadedMsg{Metadata: result}
 	}
 }
