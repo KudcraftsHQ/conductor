@@ -7,7 +7,7 @@ BINARY_NAME=conductor
 BUILD_DIR=build
 
 # Version (can be overridden)
-VERSION ?= 1.7.28.1
+VERSION ?= 1.7.28.2
 
 # Build flags
 LDFLAGS=-ldflags "-X main.version=$(VERSION)"
