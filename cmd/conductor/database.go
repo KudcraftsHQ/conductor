@@ -1,12 +1,8 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/signal"
-	"path/filepath"
-	"syscall"
 	"text/tabwriter"
 
 	"github.com/hammashamzah/conductor/internal/config"
@@ -174,125 +170,6 @@ var databaseSetLocalCmd = &cobra.Command{
 		}
 
 		fmt.Printf("\n✓ Local PostgreSQL configured: %s\n", maskURL(localURL))
-
-		return nil
-	},
-}
-
-var syncForce bool
-
-var databaseSyncCmd = &cobra.Command{
-	Use:   "sync",
-	Short: "Sync from source to local golden copy",
-	Long:  "Download a fresh copy of the source database to use for worktree cloning.\nBy default, checks if sync is needed (incremental). Use --force for full sync.",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		s, err := store.Load()
-		if err != nil {
-			return err
-		}
-		defer func() { _, _ = s.Close() }()
-
-		cfg := s.GetConfigSnapshot()
-
-		// Detect current project
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("failed to get current directory: %w", err)
-		}
-		projectName, project, _, err := cfg.DetectProject(cwd)
-		if err != nil {
-			return fmt.Errorf("not in a registered project. Run 'conductor project add .' first")
-		}
-
-		if project.Database == nil {
-			return fmt.Errorf("database not configured. Run 'conductor database set-source <url>' first")
-		}
-
-		defaults := s.GetDefaults()
-		conductorDir, err := config.ConductorDir()
-		if err != nil {
-			return err
-		}
-
-		// V3 sync needs local PostgreSQL URL for golden database
-		mgr := database.NewManager(defaults.LocalPostgresURL, conductorDir)
-
-		// Check if sync is needed (unless --force)
-		if !syncForce {
-			fmt.Printf("Checking for changes in %s...\n", projectName)
-			checkResult, err := mgr.CheckSyncNeeded(projectName, project.Database)
-			if err != nil {
-				fmt.Printf("  Warning: %v\n", err)
-				fmt.Println("  Proceeding with full sync...")
-			} else if !checkResult.NeedsSync {
-				fmt.Printf("\n✓ No sync needed: %s\n", checkResult.Reason)
-				fmt.Println("  Use --force to sync anyway")
-				return nil
-			} else {
-				fmt.Printf("  Sync needed: %s\n\n", checkResult.Reason)
-			}
-		}
-
-		fmt.Printf("Syncing database for %s...\n", projectName)
-		fmt.Printf("  Source: %s\n\n", database.MaskConnectionString(project.Database.Source))
-		fmt.Println("  (Press Ctrl+C to cancel)")
-
-		// Create context with signal handling for graceful cancellation
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		// Handle interrupt signal
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-		go func() {
-			<-sigChan
-			fmt.Println("\n\n  Cancelling sync...")
-			cancel()
-		}()
-
-		// Progress callback to show real-time progress
-		progress := func(msg string) {
-			fmt.Printf("  %s\n", msg)
-		}
-
-		metadata, err := mgr.SyncProjectWithProgressCtx(ctx, projectName, project.Database, progress)
-		if err != nil {
-			fmt.Println() // New line after progress
-			// Check if cancelled
-			if ctx.Err() != nil {
-				fmt.Println("\n✗ Sync cancelled by user")
-				return nil
-			}
-			// Update config with failed status
-			if project.Database.SyncStatus == nil {
-				project.Database.SyncStatus = &config.DatabaseSyncStatus{}
-			}
-			project.Database.SyncStatus.Status = "failed"
-			project.Database.SyncStatus.LastError = err.Error()
-			_ = s.SetDatabaseConfig(projectName, project.Database)
-			return fmt.Errorf("sync failed: %w", err)
-		}
-
-		fmt.Println() // New line after progress
-
-		// Update config with sync status (triggers TUI refresh via config file watcher)
-		if project.Database.SyncStatus == nil {
-			project.Database.SyncStatus = &config.DatabaseSyncStatus{}
-		}
-		project.Database.SyncStatus.Status = "synced"
-		project.Database.SyncStatus.LastSyncAt = metadata.LastSyncAt.Format("2006-01-02 15:04")
-		project.Database.SyncStatus.GoldenCopySize = metadata.GoldenFileSize
-		project.Database.SyncStatus.TableCount = len(metadata.TableSizes)
-		project.Database.SyncStatus.ExcludedCount = len(metadata.ExcludedTables)
-		project.Database.SyncStatus.LastError = ""
-		if err := s.SetDatabaseConfig(projectName, project.Database); err != nil {
-			fmt.Printf("  Warning: failed to update config: %v\n", err)
-		}
-
-		fmt.Printf("\n✓ Sync completed in %dms\n", metadata.SyncDurationMs)
-		fmt.Printf("  Tables: %d\n", len(metadata.TableSizes))
-		fmt.Printf("  Excluded: %d tables\n", len(metadata.ExcludedTables))
-		fmt.Printf("  Golden copy: %s\n", database.FormatSize(metadata.GoldenFileSize))
 
 		return nil
 	},
@@ -586,12 +463,12 @@ var databaseCloneCmd = &cobra.Command{
 	},
 }
 
-var reinitWorktree string
+var reinstantiateWorktree string
 
-var databaseReinitCmd = &cobra.Command{
-	Use:   "reinit",
-	Short: "Re-initialize a worktree database",
-	Long:  "Drop and re-clone a worktree database from the golden copy. Use after rebasing when migrations have changed.",
+var databaseReinstantiateCmd = &cobra.Command{
+	Use:   "reinstantiate",
+	Short: "Drop and re-clone worktree database from source (remote mode)",
+	Long:  "Drop the remote database via SSH and clone fresh data from source.\nThis is a destructive operation - all data in the database will be lost.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := store.Load()
 		if err != nil {
@@ -606,7 +483,7 @@ var databaseReinitCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to get current directory: %w", err)
 		}
-		projectName, project, _, err := cfg.DetectProject(cwd)
+		_, project, _, err := cfg.DetectProject(cwd)
 		if err != nil {
 			return fmt.Errorf("not in a registered project")
 		}
@@ -615,18 +492,22 @@ var databaseReinitCmd = &cobra.Command{
 			return fmt.Errorf("database not configured for this project")
 		}
 
-		defaults := s.GetDefaults()
-		if defaults.LocalPostgresURL == "" {
-			return fmt.Errorf("local PostgreSQL not configured")
+		// Check for remote mode
+		if project.Database.Mode != config.DatabaseModeRemote {
+			return fmt.Errorf("only remote database mode is supported. Configure with: conductor db set-source --mode remote")
+		}
+
+		if project.Database.SSHHost == "" {
+			return fmt.Errorf("SSH host not configured for remote database")
 		}
 
 		// Find the worktree
 		var worktreeName string
 		var worktree *config.Worktree
 
-		if reinitWorktree != "" {
+		if reinstantiateWorktree != "" {
 			// Use specified worktree
-			worktreeName = reinitWorktree
+			worktreeName = reinstantiateWorktree
 			worktree = project.Worktrees[worktreeName]
 			if worktree == nil {
 				return fmt.Errorf("worktree '%s' not found", worktreeName)
@@ -649,44 +530,34 @@ var databaseReinitCmd = &cobra.Command{
 			return fmt.Errorf("worktree '%s' does not have a database configured", worktreeName)
 		}
 
-		conductorDir, err := config.ConductorDir()
+		dbConfig := project.Database
+		dbName := worktree.DatabaseName
+
+		fmt.Printf("Reinstantiating database for worktree '%s'...\n", worktreeName)
+		fmt.Printf("  Database: %s\n", dbName)
+		fmt.Printf("  SSH Host: %s\n", dbConfig.SSHHost)
+		fmt.Println()
+
+		ctx := cmd.Context()
+
+		// Step 1: Drop existing database via SSH
+		fmt.Println("  Dropping existing database...")
+		err = database.RemoteDropDatabase(ctx, dbConfig.SSHHost, dbConfig.DevURL, dbName)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to drop database: %w", err)
 		}
 
-		mgr := database.NewManager(defaults.LocalPostgresURL, conductorDir)
-
-		// Check if golden database exists (V3 only)
-		if !mgr.HasGoldenCopy(projectName) {
-			return fmt.Errorf("golden copy not found. Run 'conductor database sync' first")
-		}
-
-		fmt.Printf("Re-initializing database for worktree '%s'...\n", worktreeName)
-		fmt.Printf("  Database: %s\n", worktree.DatabaseName)
-		fmt.Printf("  Worktree path: %s\n", worktree.Path)
-
-		// Reinitialize using V3 (drop and re-clone from golden DB)
-		result, err := database.ReinitializeDatabaseV3(
-			cmd.Context(),
-			defaults.LocalPostgresURL,
-			worktree.DatabaseName,
-			projectName,
-			worktree.Path,
-			func(msg string) { fmt.Printf("  %s\n", msg) },
-		)
+		// Step 2: Clone fresh from source via SSH
+		fmt.Println("  Cloning fresh data from source...")
+		err = database.RemoteCloneForWorktree(ctx, dbConfig.SSHHost, dbConfig.CloneURL,
+			dbConfig.DevURL, dbName, dbConfig.ExcludeTables, func(msg string) {
+				fmt.Printf("  %s\n", msg)
+			})
 		if err != nil {
-			return fmt.Errorf("failed to reinitialize: %w", err)
+			return fmt.Errorf("failed to clone database: %w", err)
 		}
 
-		fmt.Printf("\n✓ Database re-initialized: %s\n", result.DatabaseName)
-
-		if result.MigrationState != nil {
-			fmt.Printf("\nMigration status: %s\n", result.MigrationState.Compatibility)
-			if len(result.MigrationState.PendingMigrations) > 0 {
-				fmt.Printf("  Pending migrations: %d\n", len(result.MigrationState.PendingMigrations))
-				fmt.Printf("\nRun 'bunx prisma migrate deploy' to apply pending migrations\n")
-			}
-		}
+		fmt.Printf("\n✓ Database reinstantiated: %s\n", dbName)
 
 		return nil
 	},
@@ -792,84 +663,6 @@ var databaseMigrationStatusCmd = &cobra.Command{
 	},
 }
 
-var databaseCheckFreshnessCmd = &cobra.Command{
-	Use:   "check-freshness",
-	Short: "Check if golden copy needs updating",
-	Long:  "Compare golden copy's migration baseline with current main branch",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		s, err := store.Load()
-		if err != nil {
-			return err
-		}
-		defer func() { _, _ = s.Close() }()
-
-		cfg := s.GetConfigSnapshot()
-
-		// Detect current project
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("failed to get current directory: %w", err)
-		}
-		projectName, project, _, err := cfg.DetectProject(cwd)
-		if err != nil {
-			return fmt.Errorf("not in a registered project")
-		}
-
-		if project.Database == nil {
-			return fmt.Errorf("database not configured for this project")
-		}
-
-		conductorDir, err := config.ConductorDir()
-		if err != nil {
-			return err
-		}
-		dbsyncDir := filepath.Join(conductorDir, "dbsync")
-
-		// Load golden copy metadata
-		metadata, err := database.LoadSyncMetadata(projectName, dbsyncDir)
-		if err != nil {
-			return fmt.Errorf("failed to load golden copy metadata: %w. Run 'conductor database sync' first", err)
-		}
-		if metadata == nil {
-			return fmt.Errorf("no golden copy found. Run 'conductor database sync' first")
-		}
-
-		fmt.Printf("Golden copy status for %s:\n", projectName)
-		fmt.Printf("  Last sync: %s\n", metadata.LastSyncAt.Format("2006-01-02 15:04:05"))
-
-		if metadata.MigrationBaseline != nil {
-			fmt.Printf("  Migrations: %d\n", metadata.MigrationBaseline.TotalMigrations)
-			if metadata.MigrationBaseline.LastMigrationName != "" {
-				fmt.Printf("  Last migration: %s\n", metadata.MigrationBaseline.LastMigrationName)
-			}
-		}
-
-		// Get current branch's migrations
-		currentMigrations, err := database.GetWorktreeMigrations(project.Path)
-		if err != nil {
-			fmt.Printf("\n⚠️  Could not read migrations from project: %v\n", err)
-			return nil
-		}
-
-		if metadata.MigrationBaseline != nil {
-			goldenCount := metadata.MigrationBaseline.TotalMigrations
-			currentCount := len(currentMigrations)
-
-			if currentCount > goldenCount {
-				fmt.Printf("\n⚠️  Main branch has %d new migrations since last sync.\n", currentCount-goldenCount)
-				fmt.Println("   Consider running: conductor database sync")
-			} else if currentCount < goldenCount {
-				fmt.Printf("\n⚠️  Golden copy has %d more migrations than current branch.\n", goldenCount-currentCount)
-				fmt.Println("   This may happen if you're on an older branch.")
-			} else {
-				fmt.Printf("\n✓ Golden copy is up to date with current branch.\n")
-			}
-		}
-
-		return nil
-	},
-}
-
 var databaseAnalyzeCmd = &cobra.Command{
 	Use:   "analyze",
 	Short: "Analyze source database tables",
@@ -936,38 +729,111 @@ var databaseAnalyzeCmd = &cobra.Command{
 	},
 }
 
+var (
+	setupUsersAdminURL string
+	setupUsersSourceDB string
+)
+
+var databaseSetupUsersCmd = &cobra.Command{
+	Use:   "setup-users",
+	Short: "Setup conductor users on a PostgreSQL server",
+	Long: `Creates two users for secure remote database operations:
+  - conductor_clone: Read-only access to source DB, can create databases
+  - conductor_dev: Full access to dev_* databases only (no production access)
+
+This is a one-time setup command for each PostgreSQL server you want to use
+with remote database mode.
+
+After running this command, add the generated cloneUrl and devUrl to your
+project's conductor.json database configuration.`,
+	Example: `  # Setup users on a remote PostgreSQL server
+  conductor database setup-users \
+    --admin-url "postgres://postgres:password@host:5432/postgres" \
+    --source-db "trading-db"
+
+  # Then add to conductor.json:
+  # {
+  #   "database": {
+  #     "mode": "remote",
+  #     "source": "postgres://...@host:port/trading-db",
+  #     "cloneUrl": "<generated-clone-url>",
+  #     "devUrl": "<generated-dev-url>"
+  #   }
+  # }`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// Validate connection first
+		fmt.Println("Validating admin connection...")
+		if err := database.ValidateConnection(setupUsersAdminURL); err != nil {
+			return fmt.Errorf("failed to connect with admin URL: %w", err)
+		}
+
+		fmt.Printf("Creating users for source database: %s\n\n", setupUsersSourceDB)
+
+		result, err := database.SetupUsers(setupUsersAdminURL, setupUsersSourceDB)
+		if err != nil {
+			return fmt.Errorf("failed to setup users: %w", err)
+		}
+
+		fmt.Println("✓ Created users and granted permissions successfully")
+		fmt.Println()
+		fmt.Println("Clone user (read-only):")
+		fmt.Printf("  Username: %s\n", result.CloneUser.Username)
+		fmt.Printf("  URL:      %s\n", database.MaskConnectionString(result.CloneUser.URL))
+		fmt.Println()
+		fmt.Println("Dev user (dev_* databases only):")
+		fmt.Printf("  Username: %s\n", result.DevUser.Username)
+		fmt.Printf("  URL:      %s\n", database.MaskConnectionString(result.DevUser.URL))
+		fmt.Println()
+		fmt.Println("Add to your conductor.json database config:")
+		fmt.Println()
+		fmt.Println("  \"mode\": \"remote\",")
+		fmt.Println("  \"sshHost\": \"user@your-server-ip\",")
+		fmt.Printf("  \"cloneUrl\": \"%s\",\n", result.CloneUser.URL)
+		fmt.Printf("  \"devUrl\": \"%s\"\n", result.DevUser.URL)
+		fmt.Println()
+		fmt.Println("Note: cloneUrl and devUrl should use localhost since they run on the server via SSH.")
+		fmt.Println("      Replace the host in the URLs above with localhost if needed.")
+		fmt.Println()
+		fmt.Println("⚠️  Save these URLs securely - the passwords won't be shown again!")
+
+		return nil
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(databaseCmd)
 
 	databaseCmd.AddCommand(databaseConfigCmd)
 	databaseCmd.AddCommand(databaseSetSourceCmd)
 	databaseCmd.AddCommand(databaseSetLocalCmd)
-	databaseCmd.AddCommand(databaseSyncCmd)
 	databaseCmd.AddCommand(databaseStatusCmd)
 	databaseCmd.AddCommand(databaseListCmd)
 	databaseCmd.AddCommand(databaseCloneCmd)
 	databaseCmd.AddCommand(databaseDropCmd)
 	databaseCmd.AddCommand(databaseAnalyzeCmd)
-	databaseCmd.AddCommand(databaseReinitCmd)
+	databaseCmd.AddCommand(databaseReinstantiateCmd)
 	databaseCmd.AddCommand(databaseMigrationStatusCmd)
-	databaseCmd.AddCommand(databaseCheckFreshnessCmd)
+	databaseCmd.AddCommand(databaseSetupUsersCmd)
 
 	// set-source flags
 	databaseSetSourceCmd.Flags().IntVar(&setSourceThreshold, "threshold", 0, "Auto-exclude tables larger than N MB")
 	databaseSetSourceCmd.Flags().StringSliceVar(&setSourceExclude, "exclude", nil, "Tables to exclude from data sync")
 	databaseSetSourceCmd.Flags().StringVar(&setSourcePattern, "pattern", "", "Database name pattern (default: {project}-{port})")
 
-	// sync flags
-	databaseSyncCmd.Flags().BoolVarP(&syncForce, "force", "f", false, "Force full sync even if no changes detected")
-
 	// clone flags
 	databaseCloneCmd.Flags().StringVar(&cloneWorktree, "worktree", "", "Worktree name (auto-detected if in worktree directory)")
 
-	// reinit flags
-	databaseReinitCmd.Flags().StringVar(&reinitWorktree, "worktree", "", "Worktree name (auto-detected if in worktree directory)")
+	// reinstantiate flags
+	databaseReinstantiateCmd.Flags().StringVar(&reinstantiateWorktree, "worktree", "", "Worktree name (auto-detected if in worktree directory)")
 
 	// migration-status flags
 	databaseMigrationStatusCmd.Flags().StringVar(&migrationWorktree, "worktree", "", "Worktree name (auto-detected if in worktree directory)")
+
+	// setup-users flags
+	databaseSetupUsersCmd.Flags().StringVar(&setupUsersAdminURL, "admin-url", "", "Admin PostgreSQL URL with superuser privileges (required)")
+	databaseSetupUsersCmd.Flags().StringVar(&setupUsersSourceDB, "source-db", "", "Source database name to grant read access for cloning (required)")
+	_ = databaseSetupUsersCmd.MarkFlagRequired("admin-url")
+	_ = databaseSetupUsersCmd.MarkFlagRequired("source-db")
 }
 
 // maskURL masks the password in a URL for display

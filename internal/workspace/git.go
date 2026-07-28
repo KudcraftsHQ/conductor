@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,17 @@ import (
 	"strings"
 	"time"
 )
+
+const gitTimeout = 5 * time.Minute
+
+// runGit runs a git command with a 5-minute timeout, returning combined output.
+func runGit(repoPath string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = repoPath
+	return cmd.CombinedOutput()
+}
 
 // WorktreeExists checks if a worktree directory exists
 func WorktreeExists(path string) bool {
@@ -21,9 +33,7 @@ func WorktreeExists(path string) bool {
 
 // GitRemoteBranchExists checks if a remote branch exists
 func GitRemoteBranchExists(repoPath, remote, branch string) bool {
-	cmd := exec.Command("git", "ls-remote", "--heads", remote, branch)
-	cmd.Dir = repoPath
-	out, err := cmd.Output()
+	out, err := runGit(repoPath, "ls-remote", "--heads", remote, branch)
 	if err != nil {
 		return false
 	}
@@ -49,23 +59,14 @@ func GitWorktreeAdd(repoPath, worktreePath, branch string) error {
 	remoteBranchExists := GitRemoteBranchExists(repoPath, "origin", branch)
 
 	if remoteBranchExists {
-		// Fetch the specific branch from origin and update the remote tracking branch
-		// Using refspec to ensure origin/<branch> is updated locally
 		refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", branch, branch)
-		fetchCmd := exec.Command("git", "fetch", "origin", refspec)
-		fetchCmd.Dir = repoPath
-		_, _ = fetchCmd.CombinedOutput() // Ignore error - will fallback below
+		_, _ = runGit(repoPath, "fetch", "origin", refspec) // ignore error - will fallback below
 
-		// Create worktree tracking the remote branch
-		cmd := exec.Command("git", "worktree", "add", "--track", "-b", branch, worktreePath, "origin/"+branch)
-		cmd.Dir = repoPath
-		if _, err := cmd.CombinedOutput(); err == nil {
+		if _, err := runGit(repoPath, "worktree", "add", "--track", "-b", branch, worktreePath, "origin/"+branch); err == nil {
 			return nil
 		}
 		// If tracking failed, try without --track
-		cmd = exec.Command("git", "worktree", "add", "-b", branch, worktreePath, "origin/"+branch)
-		cmd.Dir = repoPath
-		out, err := cmd.CombinedOutput()
+		out, err := runGit(repoPath, "worktree", "add", "-b", branch, worktreePath, "origin/"+branch)
 		if err != nil {
 			return fmt.Errorf("git worktree add failed: %s", string(out))
 		}
@@ -75,19 +76,11 @@ func GitWorktreeAdd(repoPath, worktreePath, branch string) error {
 	// Remote branch doesn't exist - create from default branch
 	defaultBranch := GitGetDefaultBranch(repoPath)
 
-	// Fetch latest from origin first
-	fetchCmd := exec.Command("git", "fetch", "origin", defaultBranch)
-	fetchCmd.Dir = repoPath
-	_, _ = fetchCmd.CombinedOutput() // Ignore error - remote might not exist
+	_, _ = runGit(repoPath, "fetch", "origin", defaultBranch) // ignore error - remote might not exist
 
-	// Create worktree with new branch based on origin's default branch
-	cmd := exec.Command("git", "worktree", "add", "-b", branch, worktreePath, "origin/"+defaultBranch)
-	cmd.Dir = repoPath
-	if _, err := cmd.CombinedOutput(); err != nil {
+	if _, err := runGit(repoPath, "worktree", "add", "-b", branch, worktreePath, "origin/"+defaultBranch); err != nil {
 		// Fallback to creating from current HEAD if origin doesn't exist
-		cmd = exec.Command("git", "worktree", "add", "-b", branch, worktreePath)
-		cmd.Dir = repoPath
-		out, err := cmd.CombinedOutput()
+		out, err := runGit(repoPath, "worktree", "add", "-b", branch, worktreePath)
 		if err != nil {
 			return fmt.Errorf("git worktree add failed: %s", string(out))
 		}
@@ -98,16 +91,10 @@ func GitWorktreeAdd(repoPath, worktreePath, branch string) error {
 // GitWorktreeAddNewBranch creates a worktree with a new branch based on another branch from origin
 // This is used when the original branch is already checked out elsewhere
 func GitWorktreeAddNewBranch(repoPath, worktreePath, newBranch, baseBranch string) error {
-	// First fetch the base branch from origin
 	refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", baseBranch, baseBranch)
-	fetchCmd := exec.Command("git", "fetch", "origin", refspec)
-	fetchCmd.Dir = repoPath
-	_, _ = fetchCmd.CombinedOutput() // Ignore error - will fallback below
+	_, _ = runGit(repoPath, "fetch", "origin", refspec) // ignore error - will fallback below
 
-	// Create worktree with new branch based on origin/<baseBranch>
-	cmd := exec.Command("git", "worktree", "add", "-b", newBranch, worktreePath, "origin/"+baseBranch)
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(repoPath, "worktree", "add", "-b", newBranch, worktreePath, "origin/"+baseBranch)
 	if err != nil {
 		return fmt.Errorf("git worktree add failed: %s", string(out))
 	}
@@ -116,9 +103,7 @@ func GitWorktreeAddNewBranch(repoPath, worktreePath, newBranch, baseBranch strin
 
 // GitWorktreeAddExisting creates a worktree for an existing branch
 func GitWorktreeAddExisting(repoPath, worktreePath, branch string) error {
-	cmd := exec.Command("git", "worktree", "add", worktreePath, branch)
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(repoPath, "worktree", "add", worktreePath, branch)
 	if err != nil {
 		return fmt.Errorf("git worktree add failed: %s", string(out))
 	}
@@ -127,9 +112,7 @@ func GitWorktreeAddExisting(repoPath, worktreePath, branch string) error {
 
 // GitWorktreeRemove removes a git worktree
 func GitWorktreeRemove(repoPath, worktreePath string) error {
-	cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(repoPath, "worktree", "remove", worktreePath, "--force")
 	if err != nil {
 		return fmt.Errorf("git worktree remove failed: %s", string(out))
 	}

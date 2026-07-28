@@ -101,6 +101,16 @@ func SyncToGoldenDB(ctx context.Context, sourceURL string, localURL string, proj
 		filteredTables = make(map[string]string)
 	}
 
+	// Display table sizes summary
+	if progress != nil {
+		progress("")
+		progress("Table sizes (top 20 by size):")
+		progress("─────────────────────────────────────────────────────")
+		displayTableSizes(tables, excludedTables, filteredTables, progress)
+		progress("─────────────────────────────────────────────────────")
+		progress("")
+	}
+
 	// Get row counts before sync
 	stepStart = time.Now()
 	rowCounts, err := GetAccurateRowCounts(sourceURL)
@@ -737,6 +747,82 @@ func formatMs(ms int64) string {
 	return fmt.Sprintf("%d:%02d", mins, remainSecs)
 }
 
+// displayTableSizes shows a formatted table of table sizes at sync start
+func displayTableSizes(tables []TableInfo, excludedTables []string, filteredTables map[string]string, progress ProgressFunc) {
+	if progress == nil || len(tables) == 0 {
+		return
+	}
+
+	// Build lookup maps
+	excludedMap := make(map[string]bool)
+	for _, t := range excludedTables {
+		excludedMap[t] = true
+	}
+
+	// Sort by size descending (tables should already be sorted, but ensure it)
+	sorted := make([]TableInfo, len(tables))
+	copy(sorted, tables)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].SizeBytes > sorted[j].SizeBytes
+	})
+
+	// Display top 20
+	count := 20
+	if len(sorted) < count {
+		count = len(sorted)
+	}
+
+	// Calculate column widths
+	maxNameLen := 4 // "Name"
+	for i := 0; i < count; i++ {
+		fullName := sorted[i].Schema + "." + sorted[i].Name
+		if len(fullName) > maxNameLen {
+			maxNameLen = len(fullName)
+		}
+	}
+	if maxNameLen > 40 {
+		maxNameLen = 40 // Cap at 40 chars
+	}
+
+	// Header
+	progress(fmt.Sprintf("  %-*s  %10s  %10s  %s", maxNameLen, "Table", "Size", "Rows", "Status"))
+
+	for i := 0; i < count; i++ {
+		t := sorted[i]
+		fullName := t.Schema + "." + t.Name
+		if len(fullName) > maxNameLen {
+			fullName = fullName[:maxNameLen-3] + "..."
+		}
+
+		// Determine status
+		status := "sync"
+		if excludedMap[t.Schema+"."+t.Name] {
+			status = "EXCLUDE"
+		} else if _, isFiltered := filteredTables[t.Schema+"."+t.Name]; isFiltered {
+			status = "FILTER"
+		}
+
+		progress(fmt.Sprintf("  %-*s  %10s  %10d  %s",
+			maxNameLen,
+			fullName,
+			FormatSize(t.SizeBytes),
+			t.RowCount,
+			status,
+		))
+	}
+
+	if len(sorted) > count {
+		progress(fmt.Sprintf("  ... and %d more tables", len(sorted)-count))
+	}
+
+	// Summary
+	var totalSize int64
+	for _, t := range tables {
+		totalSize += t.SizeBytes
+	}
+	progress(fmt.Sprintf("  Total: %d tables, %s", len(tables), FormatSize(totalSize)))
+}
+
 // LoadGoldenDBMetadata loads sync metadata from the golden database (V3)
 func LoadGoldenDBMetadata(localURL string, projectName string) (*SyncMetadata, error) {
 	exists, err := GoldenDBExists(localURL, projectName)
@@ -948,7 +1034,7 @@ func extractColumnsFromWhere(whereClause string) []string {
 	// Common patterns: "column_name >" , "column_name <", "column_name =", "column_name IN"
 	// Also handles: "column_name BETWEEN", "column_name IS", "column_name LIKE"
 	patterns := []string{
-		`(\w+)\s*[><=!]+`,           // column > value, column = value, etc.
+		`(\w+)\s*[><=!]+`,                     // column > value, column = value, etc.
 		`(\w+)\s+(?i:IN|BETWEEN|IS|LIKE|NOT)`, // column IN (...), column BETWEEN, etc.
 	}
 

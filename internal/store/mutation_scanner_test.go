@@ -26,14 +26,14 @@ var mutationPatterns = []string{
 // allowedPackages are packages that are allowed to mutate config directly
 // (besides the store package itself)
 var allowedPackages = map[string]bool{
-	"store":      true, // The store package itself
-	"config":     true, // Config package can set defaults in NewXxx functions
-	"workspace":  true, // TODO: Remove after refactoring workspace package
-	"tui":        true, // TODO: Remove after refactoring TUI
-	"tunnel":     true, // TODO: Remove after refactoring tunnel package
-	"conductor":  true, // TODO: Remove after refactoring CLI commands
-	"runner":     true, // TODO: Remove after refactoring runner package
-	"updater":    true, // TODO: Remove after refactoring updater package
+	"store":     true, // The store package itself
+	"config":    true, // Config package can set defaults in NewXxx functions
+	"workspace": true, // TODO: Remove after refactoring workspace package
+	"tui":       true, // TODO: Remove after refactoring TUI
+	"tunnel":    true, // TODO: Remove after refactoring tunnel package
+	"conductor": true, // TODO: Remove after refactoring CLI commands
+	"runner":    true, // TODO: Remove after refactoring runner package
+	"updater":   true, // TODO: Remove after refactoring updater package
 }
 
 // TestNoDirectMutationsOutsideStore scans all Go files for direct config mutations

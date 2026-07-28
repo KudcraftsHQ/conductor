@@ -24,7 +24,7 @@ Conductor solves these problems by:
 
 ## Requirements
 
-- **tmux** - Required for the TUI to work
+- **A terminal multiplexer** — either [tmux](https://github.com/tmux/tmux) (default) or [herdr](https://herdr.dev). See [Choosing a multiplexer](#choosing-a-multiplexer).
 - **git** - For worktree operations
 - **gh** (optional) - GitHub CLI for PR integration
 - **cloudflared** (optional) - For Cloudflare tunnel support
@@ -345,12 +345,35 @@ Conductor stores its configuration in `~/.conductor/conductor.json`:
     "portRangeStart": 3100,
     "portRangeEnd": 3999,
     "openWith": "iterm",
-    "ideCommand": "cursor"
+    "ideCommand": "cursor",
+    "multiplexer": "auto"
   },
   "portAllocations": {},
   "projects": {}
 }
 ```
+
+### Choosing a multiplexer
+
+Conductor provisions worktrees, ports and databases; the terminal multiplexer is
+the layer that hosts the coding-agent and dev-server panes. Two are supported:
+
+| Value | Behaviour |
+|-------|-----------|
+| `"auto"` (default) | Uses herdr when conductor is running inside a herdr pane, or when herdr is installed and tmux is not. Otherwise uses tmux. |
+| `"tmux"` | Always use tmux. Each worktree becomes a tmux window named `project/branch`. |
+| `"herdr"` | Always use [herdr](https://herdr.dev). Each worktree becomes a herdr workspace labelled `project/branch`. |
+
+Set it in `~/.conductor/conductor.json` under `defaults.multiplexer`, or override
+per-invocation with the `CONDUCTOR_MUX` environment variable:
+
+```bash
+CONDUCTOR_MUX=herdr conductor
+```
+
+Either way the pane layout is the same: coding agent on the left, dev server on
+the right. Under tmux, conductor annotates window names with agent status icons;
+under herdr this is skipped because herdr detects and renders agent status itself.
 
 ### Project Configuration
 

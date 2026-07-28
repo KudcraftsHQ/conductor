@@ -936,7 +936,6 @@ func formatValue(v interface{}) string {
 	}
 }
 
-
 // isIntegerType checks if a PostgreSQL type is an integer type
 func isIntegerType(t string) bool {
 	t = strings.ToLower(t)

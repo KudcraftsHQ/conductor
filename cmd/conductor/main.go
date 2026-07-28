@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/hammashamzah/conductor/internal/tmux"
+	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/spf13/cobra"
 )
 
@@ -46,6 +46,7 @@ func init() {
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(migrateCmd)
+	rootCmd.AddCommand(agentCmd)
 }
 
 var versionCmd = &cobra.Command{
@@ -57,10 +58,10 @@ var versionCmd = &cobra.Command{
 }
 
 func checkDependencies() {
-	if err := tmux.CheckInstalled(); err != nil {
+	if err := mux.Current().CheckInstalled(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, tmux.TmuxInstallGuide())
+		fmt.Fprintln(os.Stderr, mux.Current().InstallGuide())
 		os.Exit(1)
 	}
 }

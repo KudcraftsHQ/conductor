@@ -10,9 +10,10 @@ import (
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/database"
 	"github.com/hammashamzah/conductor/internal/github"
+	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/store"
-	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/tunnel"
 	_ "github.com/lib/pq"
 )
@@ -306,8 +307,17 @@ func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 	_ = GetSetupManager().RunArchiveScript(project, projectName, worktreeName, worktree)
 
 	// Drop database if one was created for this worktree
-	if worktree.DatabaseName != "" && m.config.Defaults.LocalPostgresURL != "" {
-		_ = dropWorktreeDB(m.config.Defaults.LocalPostgresURL, worktree.DatabaseName)
+	if worktree.DatabaseName != "" {
+		// Check if this is a remote database (dev_* prefix indicates remote mode)
+		if strings.HasPrefix(worktree.DatabaseName, "dev_") && project.Database != nil && project.Database.SSHHost != "" {
+			// Drop remote database via SSH
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = database.RemoteDropDatabase(ctx, project.Database.SSHHost, project.Database.DevURL, worktree.DatabaseName)
+			cancel()
+		} else if m.config.Defaults.LocalPostgresURL != "" {
+			// Drop local database
+			_ = dropWorktreeDB(m.config.Defaults.LocalPostgresURL, worktree.DatabaseName)
+		}
 	}
 
 	// Stop tunnel if active
@@ -322,7 +332,7 @@ func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 	}
 
 	// Kill tmux window if it exists
-	_ = tmux.KillWindow(projectName, worktree.Branch)
+	_ = mux.Current().KillWindow(projectName, worktree.Branch)
 
 	// Remove git worktree
 	if err := GitWorktreeRemove(project.Path, worktree.Path); err != nil {
@@ -628,13 +638,13 @@ func (m *Manager) CreateWorktreeWithNewBranch(projectName string, pr config.PRIn
 
 	// Queue worktree creation with special handling for new branch based on original
 	GetWorktreeQueue().Enqueue(&WorktreeJob{
-		ProjectName:    projectName,
-		WorktreeName:   name,
-		Worktree:       worktree,
-		Store:          m.store,
-		Manager:        m,
-		OnComplete:     nil,
-		BaseBranch:     originalBranch, // Create new branch based on this
+		ProjectName:  projectName,
+		WorktreeName: name,
+		Worktree:     worktree,
+		Store:        m.store,
+		Manager:      m,
+		OnComplete:   nil,
+		BaseBranch:   originalBranch, // Create new branch based on this
 	})
 
 	return name, worktree, nil
@@ -854,8 +864,6 @@ func (m *Manager) FetchGitStatusForProject(projectName string) (map[string]*GitS
 	return result, nil
 }
 
-
-
 // generateDBName generates a database name from project and port using a pattern
 func generateDBName(projectName string, port int, pattern string) string {
 	name := pattern
@@ -942,4 +950,3 @@ func dropWorktreeDB(localURL, dbName string) error {
 
 	return nil
 }
-

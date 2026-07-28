@@ -651,6 +651,151 @@ func GetForeignKeys(connStr string, tables []string) ([]ForeignKeyInfo, error) {
 	return fks, rows.Err()
 }
 
+// GetAllForeignKeys returns ALL FK relationships in the database (excluding system schemas)
+func GetAllForeignKeys(connStr string) ([]ForeignKeyInfo, error) {
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Query all FK relationships
+	query := `
+		SELECT
+			tc.table_schema,
+			tc.table_name,
+			kcu.column_name,
+			ccu.table_schema AS referenced_schema,
+			ccu.table_name AS referenced_table,
+			ccu.column_name AS referenced_column,
+			tc.constraint_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON tc.constraint_name = kcu.constraint_name
+			AND tc.table_schema = kcu.table_schema
+		JOIN information_schema.constraint_column_usage ccu
+			ON tc.constraint_name = ccu.constraint_name
+		WHERE tc.constraint_type = 'FOREIGN KEY'
+		  AND tc.table_schema NOT IN ('pg_catalog', 'information_schema')
+	`
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query all foreign keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var fks []ForeignKeyInfo
+	for rows.Next() {
+		var fk ForeignKeyInfo
+		if err := rows.Scan(
+			&fk.TableSchema,
+			&fk.TableName,
+			&fk.ColumnName,
+			&fk.ReferencedSchema,
+			&fk.ReferencedTable,
+			&fk.ReferencedColumn,
+			&fk.ConstraintName,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan FK row: %w", err)
+		}
+		fks = append(fks, fk)
+	}
+
+	return fks, rows.Err()
+}
+
+// ExpandFiltersWithFKCascade takes explicit filters and expands them to include
+// child tables that have FK relationships to filtered tables.
+// This prevents orphaned rows in child tables when parent tables are filtered.
+//
+// Example: If you filter "orders" to last 7 days, this will automatically add
+// filters for "order_packages", "order_items", etc. that reference "orders".
+func ExpandFiltersWithFKCascade(sourceURL string, explicitFilters map[string]string, allFKs []ForeignKeyInfo, progress ProgressFunc) (map[string]string, error) {
+	if len(explicitFilters) == 0 {
+		return explicitFilters, nil
+	}
+
+	// Result includes all explicit filters plus auto-generated ones
+	result := make(map[string]string)
+	for k, v := range explicitFilters {
+		result[k] = v
+	}
+
+	// Build a map of table -> FKs that reference it (children)
+	// Key: "schema.table" (parent), Value: list of FKs from child tables
+	childFKs := make(map[string][]ForeignKeyInfo)
+	for _, fk := range allFKs {
+		parentTable := fk.ReferencedSchema + "." + fk.ReferencedTable
+		childFKs[parentTable] = append(childFKs[parentTable], fk)
+	}
+
+	// For each explicitly filtered table, find all child tables and generate filters
+	// We need to do this recursively in case of multi-level relationships
+	// Use BFS to handle dependency order
+	processed := make(map[string]bool)
+	queue := make([]string, 0, len(explicitFilters))
+
+	// Start with explicitly filtered tables
+	for table := range explicitFilters {
+		queue = append(queue, table)
+		processed[table] = true
+	}
+
+	for len(queue) > 0 {
+		parentTable := queue[0]
+		queue = queue[1:]
+
+		// Find all child tables that reference this parent
+		children := childFKs[parentTable]
+		for _, fk := range children {
+			childTable := fk.TableSchema + "." + fk.TableName
+
+			// Skip if already has an explicit filter
+			if _, hasExplicit := explicitFilters[childTable]; hasExplicit {
+				continue
+			}
+
+			// Skip if already processed (prevents infinite loops in circular FKs)
+			if processed[childTable] {
+				continue
+			}
+
+			// Generate filter: child.fk_column IN (SELECT parent.pk FROM parent WHERE parent_filter)
+			parentFilter, hasFilter := result[parentTable]
+			if !hasFilter {
+				// Parent has no filter (maybe it's a transitive parent), skip
+				continue
+			}
+
+			// Build the cascading filter
+			// Format: column_name IN (SELECT referenced_column FROM referenced_table WHERE parent_filter)
+			cascadeFilter := fmt.Sprintf(
+				"%s IN (SELECT %s FROM %s.%s WHERE %s)",
+				quoteIdentifier(fk.ColumnName),
+				quoteIdentifier(fk.ReferencedColumn),
+				quoteIdentifier(fk.ReferencedSchema),
+				quoteIdentifier(fk.ReferencedTable),
+				parentFilter,
+			)
+
+			result[childTable] = cascadeFilter
+			processed[childTable] = true
+			queue = append(queue, childTable) // Process this child's children too
+
+			if progress != nil {
+				progress(fmt.Sprintf("Auto-filter: %s → %s (via %s)",
+					parentTable, childTable, fk.ColumnName))
+			}
+		}
+	}
+
+	return result, nil
+}
+
 // GetTableIndexes returns index info for specified tables
 func GetTableIndexes(connStr string, tables []string) (map[string][]IndexInfo, error) {
 	if len(tables) == 0 {
@@ -733,4 +878,3 @@ func parseIndexColumns(indexDef string) []string {
 	}
 	return columns
 }
-

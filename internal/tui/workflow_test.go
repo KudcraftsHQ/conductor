@@ -84,13 +84,7 @@ func TestWorkflow_NavigateProjectsToWorktrees(t *testing.T) {
 	m := createTestModelWithProjects(t, projects)
 	h := NewWorkflowHarness(t, m)
 
-	// Start in projects view
-	h.AssertView(ViewProjects)
-
-	// Press enter to select project
-	h.SendKey("enter")
-
-	// Should be in worktrees view
+	// Single project auto-selects and jumps to worktrees view
 	h.AssertView(ViewWorktrees)
 	assert.Equal(t, "my-project", h.GetModel().selectedProject)
 }

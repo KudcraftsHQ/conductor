@@ -16,6 +16,11 @@ func (m *Model) View() string {
 		return "Loading..."
 	}
 
+	return m.renderMainView()
+}
+
+// renderMainView renders the main TUI content (projects, worktrees, etc.)
+func (m *Model) renderMainView() string {
 	var sections []string
 
 	// Header
@@ -38,6 +43,9 @@ func (m *Model) View() string {
 	case ViewCreateWorktree:
 		// Render worktree table as background
 		sections = append(sections, m.renderWorktreesTable())
+	case ViewAgentPicker:
+		// Render worktrees table as background
+		sections = append(sections, m.renderWorktreesTable())
 	case ViewConfirmDelete:
 		// Render previous view as background
 		if m.prevView == ViewWorktrees {
@@ -45,7 +53,7 @@ func (m *Model) View() string {
 		} else {
 			sections = append(sections, m.renderProjectsTable())
 		}
-	case ViewConfirmDbReinit:
+	case ViewConfirmDbReinstantiate:
 		// Render worktrees table as background (reinit is always from worktrees view)
 		sections = append(sections, m.renderWorktreesTable())
 	case ViewHelp:
@@ -87,12 +95,14 @@ func (m *Model) View() string {
 
 	// Overlay modal if in a modal view
 	switch m.currentView {
+	case ViewAgentPicker:
+		return m.overlayModal(baseView, m.renderAgentPickerModal())
 	case ViewCreateWorktree:
 		return m.overlayModal(baseView, m.renderCreateWorktreeModal())
 	case ViewConfirmDelete:
 		return m.overlayModal(baseView, m.renderConfirmDeleteModal())
-	case ViewConfirmDbReinit:
-		return m.overlayModal(baseView, m.renderConfirmDbReinitModal())
+	case ViewConfirmDbReinstantiate:
+		return m.overlayModal(baseView, m.renderConfirmDbReinstantiateModal())
 	case ViewHelp:
 		return m.overlayModal(baseView, m.renderHelpModal())
 	case ViewQuit:
@@ -118,10 +128,10 @@ func (m *Model) renderHeader() string {
 
 	// Version info (right side)
 	versionStr := fmt.Sprintf("v%s", m.version)
-	if m.updateAvailable {
+	if m.updateDownloaded {
+		versionStr = fmt.Sprintf("v%s → v%s (U to update)", m.version, m.latestVersion)
+	} else if m.updateAvailable {
 		versionStr = fmt.Sprintf("v%s → v%s ✨", m.version, m.latestVersion)
-	} else if m.updateDownloaded {
-		versionStr = fmt.Sprintf("v%s (updated, restart) ✓", m.version)
 	}
 	versionInfo := m.styles.HeaderInfo.Render(versionStr)
 
@@ -173,10 +183,13 @@ func (m *Model) renderTitleBar() string {
 	case ViewCreateWorktree:
 		title = "CREATE WORKTREE"
 		count = 0
+	case ViewAgentPicker:
+		title = "WORKTREES"
+		count = len(m.worktreeNames)
 	case ViewConfirmDelete:
 		title = "CONFIRM"
 		count = 0
-	case ViewConfirmDbReinit:
+	case ViewConfirmDbReinstantiate:
 		title = "CONFIRM REINIT"
 		count = 0
 	case ViewHelp:
@@ -556,7 +569,7 @@ func (m *Model) getContextKeys() []CommandKey {
 	case ViewProjects:
 		return []CommandKey{{"enter", "select"}, {"d", "delete"}, {"p", "ports"}, {"3", "databases"}, {"?", "help"}, {"q", "quit"}}
 	case ViewWorktrees:
-		return []CommandKey{{"c", "create"}, {"a", "archive"}, {"o", "open"}, {"C", "cursor"}, {"T", "tunnel"}, {"m", "PRs"}, {"?", "help"}}
+		return []CommandKey{{"c", "create"}, {"a", "archive"}, {"enter/o", "open"}, {"C", "cursor"}, {"T", "tunnel"}, {"m", "PRs"}, {"?", "help"}}
 	case ViewPorts:
 		return []CommandKey{{"1", "projects"}, {"3", "databases"}, {"?", "help"}, {"esc", "back"}}
 	case ViewDatabases:
@@ -578,7 +591,7 @@ func (m *Model) getContextKeys() []CommandKey {
 		return []CommandKey{{"enter", "create"}, {"tab", "next"}, {"esc", "cancel"}}
 	case ViewConfirmDelete:
 		return []CommandKey{{"enter", "confirm"}, {"esc", "cancel"}}
-	case ViewConfirmDbReinit:
+	case ViewConfirmDbReinstantiate:
 		return []CommandKey{{"y", "yes"}, {"n", "no"}, {"esc", "cancel"}}
 	case ViewTunnelModal:
 		return []CommandKey{{"enter", "start"}, {"tab", "switch"}, {"esc", "cancel"}}
@@ -619,11 +632,15 @@ func (m *Model) renderFooter() string {
 		breadcrumbs = append(breadcrumbs, "projects")
 		breadcrumbs = append(breadcrumbs, m.selectedProject)
 		breadcrumbs = append(breadcrumbs, "create")
+	case ViewAgentPicker:
+		breadcrumbs = append(breadcrumbs, "projects")
+		breadcrumbs = append(breadcrumbs, m.selectedProject)
+		breadcrumbs = append(breadcrumbs, "open")
 	case ViewConfirmDelete:
 		breadcrumbs = append(breadcrumbs, "confirm")
-	case ViewConfirmDbReinit:
+	case ViewConfirmDbReinstantiate:
 		breadcrumbs = append(breadcrumbs, "projects")
-		breadcrumbs = append(breadcrumbs, m.dbReinitProject)
+		breadcrumbs = append(breadcrumbs, m.dbReinstantiateProject)
 		breadcrumbs = append(breadcrumbs, "reinit-db")
 	case ViewPRs:
 		breadcrumbs = append(breadcrumbs, "projects")
@@ -780,20 +797,21 @@ func (m *Model) renderConfirmDeleteModal() string {
 	return modal
 }
 
-func (m *Model) renderConfirmDbReinitModal() string {
-	width := 55
+func (m *Model) renderConfirmDbReinstantiateModal() string {
+	width := 60
 	if width > m.width-4 {
 		width = m.width - 4
 	}
 
 	var content strings.Builder
 
-	content.WriteString(m.styles.ModalTitle.Render("Confirm Database Reinit"))
+	content.WriteString(m.styles.ModalTitle.Render("Confirm Database Reinstantiate"))
 	content.WriteString("\n\n")
-	content.WriteString(fmt.Sprintf("  Reinitialize database '%s'?\n\n", m.dbReinitDBName))
-	content.WriteString(m.styles.Muted.Render("  This will DROP the existing database and clone\n"))
-	content.WriteString(m.styles.Muted.Render("  fresh data from the golden database.\n\n"))
-	content.WriteString(m.styles.StatusError.Render("  ⚠ All local changes will be lost!"))
+	content.WriteString(fmt.Sprintf("  Reinstantiate database '%s'?\n\n", m.dbReinstantiateDBName))
+	content.WriteString(m.styles.Muted.Render("  This will:\n"))
+	content.WriteString(m.styles.Muted.Render("  1. DROP the remote database via SSH\n"))
+	content.WriteString(m.styles.Muted.Render("  2. Clone fresh data from source\n\n"))
+	content.WriteString(m.styles.StatusError.Render("  ⚠ ALL DATA IN THIS DATABASE WILL BE LOST!"))
 
 	content.WriteString("\n\n  ")
 	content.WriteString(m.styles.RenderKeyHelp("y", "yes"))
@@ -874,6 +892,50 @@ func (m *Model) renderHelpModal() string {
 
 	modal := m.styles.Modal.Width(width).Render(content.String())
 
+	return modal
+}
+
+func (m *Model) renderAgentPickerModal() string {
+	width := 34
+	if width > m.width-4 {
+		width = m.width - 4
+	}
+
+	var content strings.Builder
+
+	content.WriteString(m.styles.ModalTitle.Render("Open with"))
+	content.WriteString("\n\n")
+
+	agents := []struct {
+		label string
+		desc  string
+	}{
+		{"Claude Code", "Anthropic's AI coding agent"},
+		{"OpenCode", "Open-source AI coding agent"},
+		{"Codex", "OpenAI's AI coding agent"},
+	}
+
+	for i, a := range agents {
+		if i == m.agentPickerCursor {
+			content.WriteString(m.styles.Cursor.Render("► "))
+			content.WriteString(m.styles.TableRowSelected.Render(a.label))
+		} else {
+			content.WriteString("  " + a.label)
+		}
+		content.WriteString("\n")
+		content.WriteString("    " + m.styles.Muted.Render(a.desc))
+		if i < len(agents)-1 {
+			content.WriteString("\n\n")
+		}
+	}
+
+	content.WriteString("\n\n")
+	content.WriteString("  ")
+	content.WriteString(m.styles.RenderKeyHelp("enter", "select"))
+	content.WriteString("  ")
+	content.WriteString(m.styles.RenderKeyHelp("esc", "cancel"))
+
+	modal := m.styles.Modal.Width(width).Render(content.String())
 	return modal
 }
 
@@ -1634,7 +1696,7 @@ func (m *Model) renderDatabasesTable() string {
 	// Build list of projects with database config
 	m.databaseProjects = m.databaseProjects[:0]
 	for name, project := range m.config.Projects {
-		if project.Database != nil && project.Database.Source != "" {
+		if project.Database != nil && project.Database.Mode == "remote" {
 			m.databaseProjects = append(m.databaseProjects, name)
 		}
 	}
@@ -1643,32 +1705,28 @@ func (m *Model) renderDatabasesTable() string {
 	sort.Strings(m.databaseProjects)
 
 	if len(m.databaseProjects) == 0 {
-		empty := m.styles.Muted.Render("No projects with database config. Use 'conductor db set-source <project> <url>' to configure.")
+		empty := m.styles.Muted.Render("No projects with remote database config.")
 		return m.padContent(empty)
 	}
 
 	// Column widths (dynamic based on terminal width)
 	nameW := 18
-	statusW := 12
-	lastSyncW := 18
-	sizeW := 10
-	tablesW := 10
-	// Source gets remaining space
-	sourceW := m.width - nameW - statusW - lastSyncW - sizeW - tablesW - 14 // 14 for spacing and margins
-	if sourceW < 20 {
-		sourceW = 20
+	modeW := 10
+	sshHostW := 25
+	// Clone URL gets remaining space
+	cloneW := m.width - nameW - modeW - sshHostW - 12 // 12 for spacing and margins
+	if cloneW < 20 {
+		cloneW = 20
 	}
 
 	var rows []string
 
 	// Header - full width
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s",
 		nameW, "PROJECT",
-		sourceW, "SOURCE",
-		statusW, "STATUS",
-		lastSyncW, "LAST SYNC",
-		sizeW, "SIZE",
-		tablesW, "TABLES")
+		modeW, "MODE",
+		sshHostW, "SSH HOST",
+		cloneW, "CLONE SOURCE")
 	header = padRight(header, m.width-2)
 	rows = append(rows, m.styles.TableHeader.Render(header))
 
@@ -1686,62 +1744,34 @@ func (m *Model) renderDatabasesTable() string {
 		project := m.config.Projects[name]
 		dbConfig := project.Database
 
-		// Mask source URL for display
-		sourceDisplay := "-"
-		if dbConfig.Source != "" {
-			// Just show host/db, mask everything else
-			if info, err := parseDBSource(dbConfig.Source); err == nil {
-				sourceDisplay = truncate(fmt.Sprintf("%s/%s", info.host, info.db), sourceW)
+		// Mode
+		mode := string(dbConfig.Mode)
+		if mode == "" {
+			mode = "remote"
+		}
+
+		// SSH Host
+		sshHost := "-"
+		if dbConfig.SSHHost != "" {
+			sshHost = truncate(dbConfig.SSHHost, sshHostW)
+		}
+
+		// Clone source - show host/db from CloneURL
+		cloneDisplay := "-"
+		if dbConfig.CloneURL != "" {
+			if info, err := parseDBSource(dbConfig.CloneURL); err == nil {
+				cloneDisplay = truncate(fmt.Sprintf("%s/%s", info.host, info.db), cloneW)
 			} else {
-				sourceDisplay = truncate("configured", sourceW)
-			}
-		}
-
-		// Status - show progress if syncing
-		status := "never"
-		if m.databaseSyncing[name] {
-			if progress, ok := m.databaseProgress[name]; ok && progress != "" {
-				// Truncate progress for display in status column
-				status = truncate(progress, statusW)
-			} else {
-				status = "syncing..."
-			}
-		} else if dbConfig.SyncStatus != nil {
-			if dbConfig.SyncStatus.Status != "" {
-				status = dbConfig.SyncStatus.Status
-			}
-		}
-
-		// Last sync time
-		lastSync := "-"
-		if dbConfig.SyncStatus != nil && dbConfig.SyncStatus.LastSyncAt != "" {
-			lastSync = dbConfig.SyncStatus.LastSyncAt
-		}
-
-		// Size
-		sizeStr := "-"
-		if dbConfig.SyncStatus != nil && dbConfig.SyncStatus.GoldenCopySize > 0 {
-			sizeStr = formatSize(dbConfig.SyncStatus.GoldenCopySize)
-		}
-
-		// Tables
-		tablesStr := "-"
-		if dbConfig.SyncStatus != nil && dbConfig.SyncStatus.TableCount > 0 {
-			if dbConfig.SyncStatus.ExcludedCount > 0 {
-				tablesStr = fmt.Sprintf("%d (-%d)", dbConfig.SyncStatus.TableCount, dbConfig.SyncStatus.ExcludedCount)
-			} else {
-				tablesStr = fmt.Sprintf("%d", dbConfig.SyncStatus.TableCount)
+				cloneDisplay = truncate("configured", cloneW)
 			}
 		}
 
 		// Build row content
-		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %-*s",
 			nameW, truncate(name, nameW),
-			sourceW, sourceDisplay,
-			statusW, status,
-			lastSyncW, lastSync,
-			sizeW, sizeStr,
-			tablesW, tablesStr)
+			modeW, mode,
+			sshHostW, sshHost,
+			cloneW, cloneDisplay)
 
 		// Pad to full width
 		rowContent = padRight(rowContent, m.width-2)
@@ -1789,26 +1819,6 @@ func parseDBSource(source string) (*dbSourceInfo, error) {
 	}
 
 	return &dbSourceInfo{host: host, db: db}, nil
-}
-
-// formatSize formats bytes to human readable format
-func formatSize(bytes int64) string {
-	const (
-		KB = 1024
-		MB = KB * 1024
-		GB = MB * 1024
-	)
-
-	switch {
-	case bytes >= GB:
-		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(GB))
-	case bytes >= MB:
-		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(MB))
-	case bytes >= KB:
-		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(KB))
-	default:
-		return fmt.Sprintf("%d B", bytes)
-	}
 }
 
 // renderDatabaseLogsView renders the database sync logs view

@@ -75,6 +75,48 @@ func BuildEnv(projectName string, project *config.Project, worktreeName string, 
 		env = append(env, fmt.Sprintf("CONDUCTOR_DB_SOURCE=%s", project.Database.Source))
 	}
 
+	// ClickUp task environment variables
+	if worktree.ClickUpTaskID != "" {
+		env = append(env, fmt.Sprintf("CONDUCTOR_TASK_ID=%s", worktree.ClickUpTaskID))
+		env = append(env, fmt.Sprintf("CONDUCTOR_TASK_URL=%s", worktree.ClickUpTaskURL))
+	}
+
+	// Tooling detection environment variables
+	if project.Tooling != nil {
+		env = append(env, fmt.Sprintf("CONDUCTOR_FRAMEWORK=%s", project.Tooling.Framework))
+		env = append(env, fmt.Sprintf("CONDUCTOR_WEB_ELIGIBLE=%t", project.Tooling.WebEligible))
+		env = append(env, fmt.Sprintf("CONDUCTOR_UI_TYPE=%s", project.Tooling.UIType))
+
+		// ProofShot environment variables (only for web-eligible projects with ProofShot installed)
+		if project.Tooling.ProofShotReady && project.Tooling.WebEligible && len(worktree.Ports) > 0 {
+			env = append(env, fmt.Sprintf("PROOFSHOT_PORT=%d", worktree.Ports[0]))
+			if projectConfig != nil {
+				if runCmd, ok := projectConfig.Scripts["run"]; ok {
+					env = append(env, fmt.Sprintf("PROOFSHOT_RUN_CMD=%s", runCmd))
+				}
+			}
+		}
+
+		// TrustLayer environment variable
+		if project.Tooling.TrustLayerInit {
+			env = append(env, "CONDUCTOR_TRUSTLAYER=true")
+		}
+	}
+
+	// Auth environment variables
+	if projectConfig != nil && projectConfig.Auth != nil {
+		env = append(env, fmt.Sprintf("CONDUCTOR_AUTH_TYPE=%s", projectConfig.Auth.Type))
+		if projectConfig.Auth.LoginURL != "" {
+			env = append(env, fmt.Sprintf("CONDUCTOR_AUTH_LOGIN_URL=%s", projectConfig.Auth.LoginURL))
+		}
+		if projectConfig.Auth.CallbackURL != "" {
+			env = append(env, fmt.Sprintf("CONDUCTOR_AUTH_CALLBACK_URL=%s", projectConfig.Auth.CallbackURL))
+		}
+		if projectConfig.Auth.SeedCommand != "" {
+			env = append(env, fmt.Sprintf("CONDUCTOR_AUTH_SEED_CMD=%s", projectConfig.Auth.SeedCommand))
+		}
+	}
+
 	return env
 }
 
@@ -134,6 +176,48 @@ func GetEnvMap(projectName string, project *config.Project, worktreeName string,
 	// Source database reference
 	if project.Database != nil && project.Database.Source != "" {
 		result["CONDUCTOR_DB_SOURCE"] = project.Database.Source
+	}
+
+	// ClickUp task environment variables
+	if worktree.ClickUpTaskID != "" {
+		result["CONDUCTOR_TASK_ID"] = worktree.ClickUpTaskID
+		result["CONDUCTOR_TASK_URL"] = worktree.ClickUpTaskURL
+	}
+
+	// Tooling detection environment variables
+	if project.Tooling != nil {
+		result["CONDUCTOR_FRAMEWORK"] = project.Tooling.Framework
+		result["CONDUCTOR_WEB_ELIGIBLE"] = strconv.FormatBool(project.Tooling.WebEligible)
+		result["CONDUCTOR_UI_TYPE"] = project.Tooling.UIType
+
+		// ProofShot environment variables
+		if project.Tooling.ProofShotReady && project.Tooling.WebEligible && len(worktree.Ports) > 0 {
+			result["PROOFSHOT_PORT"] = strconv.Itoa(worktree.Ports[0])
+			if projectConfig != nil {
+				if runCmd, ok := projectConfig.Scripts["run"]; ok {
+					result["PROOFSHOT_RUN_CMD"] = runCmd
+				}
+			}
+		}
+
+		// TrustLayer environment variable
+		if project.Tooling.TrustLayerInit {
+			result["CONDUCTOR_TRUSTLAYER"] = "true"
+		}
+	}
+
+	// Auth environment variables
+	if projectConfig != nil && projectConfig.Auth != nil {
+		result["CONDUCTOR_AUTH_TYPE"] = projectConfig.Auth.Type
+		if projectConfig.Auth.LoginURL != "" {
+			result["CONDUCTOR_AUTH_LOGIN_URL"] = projectConfig.Auth.LoginURL
+		}
+		if projectConfig.Auth.CallbackURL != "" {
+			result["CONDUCTOR_AUTH_CALLBACK_URL"] = projectConfig.Auth.CallbackURL
+		}
+		if projectConfig.Auth.SeedCommand != "" {
+			result["CONDUCTOR_AUTH_SEED_CMD"] = projectConfig.Auth.SeedCommand
+		}
 	}
 
 	return result

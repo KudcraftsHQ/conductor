@@ -4,39 +4,38 @@ import "github.com/charmbracelet/bubbles/key"
 
 // KeyMap defines all keybindings
 type KeyMap struct {
-	Up                   key.Binding
-	Down                 key.Binding
-	Enter                key.Binding
-	Back                 key.Binding
-	Quit                 key.Binding
-	Help                 key.Binding
-	Filter               key.Binding
-	Create               key.Binding
-	Archive              key.Binding
-	Open                 key.Binding
-	OpenCursor           key.Binding
-	OpenVSCode           key.Binding
-	OpenTerminal         key.Binding
-	Refresh              key.Binding
-	Add                  key.Binding
-	Delete               key.Binding
-	Tab                  key.Binding
-	Ports                key.Binding
-	MergeReqs            key.Binding
-	AllPRs               key.Binding
-	AutoSetupClaude      key.Binding
-	Retry                key.Binding
-	CreateWorktreeFromPR key.Binding
-	Tunnel               key.Binding
-	CopyURL              key.Binding
-	ArchivedList         key.Binding
-	StatusHistory        key.Binding
-	DatabaseSync            key.Binding
-	DatabaseSyncForce       key.Binding
+	Up                      key.Binding
+	Down                    key.Binding
+	Enter                   key.Binding
+	Back                    key.Binding
+	Quit                    key.Binding
+	Help                    key.Binding
+	Filter                  key.Binding
+	Create                  key.Binding
+	Archive                 key.Binding
+	Open                    key.Binding
+	OpenCursor              key.Binding
+	OpenVSCode              key.Binding
+	OpenTerminal            key.Binding
+	Refresh                 key.Binding
+	Add                     key.Binding
+	Delete                  key.Binding
+	Tab                     key.Binding
+	Ports                   key.Binding
+	MergeReqs               key.Binding
+	AllPRs                  key.Binding
+	AutoSetupClaude         key.Binding
+	Retry                   key.Binding
+	CreateWorktreeFromPR    key.Binding
+	Tunnel                  key.Binding
+	CopyURL                 key.Binding
+	ArchivedList            key.Binding
+	StatusHistory           key.Binding
 	DatabaseList            key.Binding
-	DatabaseReinit          key.Binding
+	DatabaseReinstantiate   key.Binding
 	DatabaseMigrationStatus key.Binding
 	DatabaseLogs            key.Binding
+	ApplyUpdate             key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings
@@ -150,21 +149,13 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("H"),
 			key.WithHelp("H", "message history"),
 		),
-		DatabaseSync: key.NewBinding(
-			key.WithKeys("S"),
-			key.WithHelp("S", "sync database"),
-		),
-		DatabaseSyncForce: key.NewBinding(
-			key.WithKeys("F"),
-			key.WithHelp("F", "force sync"),
-		),
 		DatabaseList: key.NewBinding(
 			key.WithKeys("3"),
 			key.WithHelp("3", "databases"),
 		),
-		DatabaseReinit: key.NewBinding(
+		DatabaseReinstantiate: key.NewBinding(
 			key.WithKeys("I"),
-			key.WithHelp("I", "reinit DB"),
+			key.WithHelp("I", "reinstantiate DB"),
 		),
 		DatabaseMigrationStatus: key.NewBinding(
 			key.WithKeys("B"),
@@ -173,6 +164,10 @@ func DefaultKeyMap() KeyMap {
 		DatabaseLogs: key.NewBinding(
 			key.WithKeys("l"),
 			key.WithHelp("l", "sync logs"),
+		),
+		ApplyUpdate: key.NewBinding(
+			key.WithKeys("U"),
+			key.WithHelp("U", "apply update"),
 		),
 	}
 }
@@ -189,7 +184,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Create, k.Archive, k.Delete, k.Retry},
 		{k.Open, k.OpenCursor, k.OpenVSCode, k.OpenTerminal},
 		{k.Filter, k.Refresh, k.Ports, k.MergeReqs, k.AllPRs, k.AutoSetupClaude},
-		{k.Tunnel, k.CopyURL, k.DatabaseList, k.DatabaseSync, k.DatabaseReinit, k.DatabaseMigrationStatus},
+		{k.Tunnel, k.CopyURL, k.DatabaseList, k.DatabaseReinstantiate, k.DatabaseMigrationStatus},
 		{k.Help, k.Quit},
 	}
 }
@@ -229,11 +224,11 @@ func (k KeyMap) KeyGroups() []KeyGroup {
 		},
 		{
 			Name: "Database",
-			Keys: []key.Binding{k.DatabaseSync, k.DatabaseSyncForce, k.DatabaseList, k.DatabaseReinit, k.DatabaseMigrationStatus, k.DatabaseLogs},
+			Keys: []key.Binding{k.DatabaseList, k.DatabaseReinstantiate, k.DatabaseMigrationStatus, k.DatabaseLogs},
 		},
 		{
 			Name: "Utility",
-			Keys: []key.Binding{k.Help, k.Filter, k.Quit},
+			Keys: []key.Binding{k.Help, k.Filter, k.ApplyUpdate, k.Quit},
 		},
 	}
 }

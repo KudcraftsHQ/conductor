@@ -193,6 +193,118 @@ func TestGetEnvMap_WithLabels(t *testing.T) {
 	assert.Equal(t, "3101", envMap["CONDUCTOR_PORT_BACKEND"])
 }
 
+func TestBuildEnv_WithTooling(t *testing.T) {
+	project := &config.Project{
+		Path: "/path/to/project",
+		Tooling: &config.ProjectTooling{
+			Framework:      "nextjs",
+			Language:       "typescript",
+			PackageManager: "bun",
+			WebEligible:    true,
+			UIType:         "browser",
+			ProofShotReady: true,
+			TrustLayerInit: true,
+		},
+	}
+	worktree := &config.Worktree{
+		Path:   "/path/to/worktree",
+		Branch: "main",
+		Ports:  []int{3100},
+	}
+	projectConfig := &config.ProjectConfig{
+		Scripts: map[string]string{
+			"run": "bun run dev",
+		},
+	}
+
+	env := BuildEnv("myproject", project, "tokyo", worktree, projectConfig)
+
+	envMap := make(map[string]string)
+	for _, e := range env {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			envMap[parts[0]] = parts[1]
+		}
+	}
+
+	assert.Equal(t, "nextjs", envMap["CONDUCTOR_FRAMEWORK"])
+	assert.Equal(t, "true", envMap["CONDUCTOR_WEB_ELIGIBLE"])
+	assert.Equal(t, "browser", envMap["CONDUCTOR_UI_TYPE"])
+	assert.Equal(t, "3100", envMap["PROOFSHOT_PORT"])
+	assert.Equal(t, "bun run dev", envMap["PROOFSHOT_RUN_CMD"])
+	assert.Equal(t, "true", envMap["CONDUCTOR_TRUSTLAYER"])
+}
+
+func TestBuildEnv_ToolingNotWebEligible(t *testing.T) {
+	project := &config.Project{
+		Path: "/path/to/project",
+		Tooling: &config.ProjectTooling{
+			Framework:   "go",
+			Language:    "go",
+			WebEligible: false,
+			UIType:      "none",
+		},
+	}
+	worktree := &config.Worktree{
+		Path:   "/path/to/worktree",
+		Branch: "main",
+		Ports:  []int{3100},
+	}
+
+	env := BuildEnv("myproject", project, "tokyo", worktree, nil)
+
+	envMap := make(map[string]string)
+	for _, e := range env {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			envMap[parts[0]] = parts[1]
+		}
+	}
+
+	assert.Equal(t, "go", envMap["CONDUCTOR_FRAMEWORK"])
+	assert.Equal(t, "false", envMap["CONDUCTOR_WEB_ELIGIBLE"])
+	assert.Equal(t, "none", envMap["CONDUCTOR_UI_TYPE"])
+	// ProofShot vars should NOT be set
+	_, hasProofPort := envMap["PROOFSHOT_PORT"]
+	assert.False(t, hasProofPort)
+	_, hasProofCmd := envMap["PROOFSHOT_RUN_CMD"]
+	assert.False(t, hasProofCmd)
+	// TrustLayer should NOT be set
+	_, hasTL := envMap["CONDUCTOR_TRUSTLAYER"]
+	assert.False(t, hasTL)
+}
+
+func TestGetEnvMap_WithTooling(t *testing.T) {
+	project := &config.Project{
+		Path: "/path/to/project",
+		Tooling: &config.ProjectTooling{
+			Framework:      "vite",
+			Language:       "typescript",
+			WebEligible:    true,
+			UIType:         "browser",
+			ProofShotReady: true,
+		},
+	}
+	worktree := &config.Worktree{
+		Path:   "/path/to/worktree",
+		Branch: "main",
+		Ports:  []int{3200},
+	}
+	projectConfig := &config.ProjectConfig{
+		Scripts: map[string]string{
+			"run": "pnpm dev",
+		},
+	}
+
+	envMap := GetEnvMap("myproject", project, "tokyo", worktree, projectConfig)
+
+	assert.Equal(t, "vite", envMap["CONDUCTOR_FRAMEWORK"])
+	assert.Equal(t, "true", envMap["CONDUCTOR_WEB_ELIGIBLE"])
+	assert.Equal(t, "browser", envMap["CONDUCTOR_UI_TYPE"])
+	assert.Equal(t, "3200", envMap["PROOFSHOT_PORT"])
+	assert.Equal(t, "pnpm dev", envMap["PROOFSHOT_RUN_CMD"])
+}
+
 func TestGetEnvMap_MoreLabelsThanPorts(t *testing.T) {
 	project := &config.Project{
 		Path: "/path/to/project",
