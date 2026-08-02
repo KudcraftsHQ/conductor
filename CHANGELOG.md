@@ -8,7 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Chat-Originated Task Orchestration**: new `conductor orchestrate` command group and `internal/orchestration` package, the Conductor half of the Conductor → Herdr → Hermes contract
+  - `orchestrate launch` creates a **fresh worktree** for a registered project and starts Claude Code in it; a launch that would land in the project's root checkout is refused
+  - Launch returns once the agent is confirmed working (bounded budget) and never waits for the task to finish, so a three-hour task answers a Discord interaction as fast as a three-second one
+  - `--request-id` (the originating message id) is the idempotency key: a redelivered chat message returns the running task instead of creating a second worktree, agent or prompt; a launch that crashed before producing an agent is retried under the same task id
+  - `orchestrate observe` records progress only from real Herdr observations (status changes, `state_change_seq`); polling a quiet agent records nothing
+  - Recovery: task state persists in `~/.conductor/orchestration/tasks.json`, a Herdr outage is treated as a disconnect rather than a lost agent, and a recycled pane (changed `terminal_id`) is reported lost rather than silently relaunched
+  - `orchestrate complete` renders a concise Discord-ready completion with worktree, branch, test status and Readback publishing metadata
+  - `orchestrate status`, `list`, `tests`, `summary`, `readback` and `gate` round out the surface; every subcommand supports `--json`
+- **Readback completion gate**: an explicit, persisted three-way state (`readback_required`, `no_readback_needed`, `awaiting_readback_decision`) deciding whether a task owes a write-up before it is reported complete
+  - Report/research/audit requests default to `readback_required`; clearly code-only work to `no_readback_needed`; anything ambiguous asks the requester **once**, when the agent finishes
+  - Asking never blocks: the agent keeps running and the worktree is untouched while the question is outstanding, and the task is simply not reported complete
+  - The decision, the record of having asked, and the published URL all survive a restart, so a duplicate delivery cannot re-ask a question already answered
 - **Herdr Worktree Opener**: `conductor worktree open <name> --herdr` opens a focused Herdr workspace for the worktree
+  - Note: `--prompt` (one-shot Claude Code) now also passes `--dangerously-skip-permissions` and `CLAUDE_CODE_NO_FLICKER=1`; without them a one-shot run has no TUI to answer a permission prompt and stalls until killed
   - `--claude` starts interactive Claude Code, `--dev` starts the project dev server through `conductor run`, and `--prompt` runs Claude Code non-interactively
   - Options can be combined, including a one-shot Claude task alongside the dev-server pane
 - **Pluggable Terminal Multiplexer**: Conductor now drives either tmux or [herdr](https://herdr.dev)

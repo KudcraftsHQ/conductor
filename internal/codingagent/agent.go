@@ -106,6 +106,11 @@ func (a Agent) TaskArgs(systemPrompt, taskPrompt string) []string {
 }
 
 // OneShotArgs returns CLI args for running a one-shot prompt (no TUI, just get a response).
+//
+// Claude Code gets --dangerously-skip-permissions here for the same reason it
+// does in the interactive paths: a one-shot run has no TUI and therefore nobody
+// to answer a permission prompt, so without the flag it stalls until it is
+// killed rather than producing the response the caller asked for.
 func (a Agent) OneShotArgs(prompt string) []string {
 	switch a {
 	case OpenCode:
@@ -113,7 +118,12 @@ func (a Agent) OneShotArgs(prompt string) []string {
 	case Codex:
 		return []string{"codex", "exec", "--dangerously-bypass-approvals-and-sandbox", prompt}
 	default:
-		return []string{"claude", "--print", prompt}
+		return []string{
+			"env", "CLAUDE_CODE_NO_FLICKER=1",
+			"claude",
+			"--dangerously-skip-permissions",
+			"--print", prompt,
+		}
 	}
 }
 

@@ -32,7 +32,14 @@ func TestHerdrOpenPlanStartsOneShotClaudeWithoutInteractiveMode(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "claude", plan.RootLabel)
-	assert.Equal(t, []string{"claude", "--print", "fix the totals"}, plan.RootCommand)
+	// A one-shot run has no TUI, so nobody is there to answer a permission
+	// prompt: without --dangerously-skip-permissions it stalls until killed
+	// instead of producing the response the caller asked for.
+	assert.Equal(t, []string{
+		"env", "CLAUDE_CODE_NO_FLICKER=1",
+		"claude", "--dangerously-skip-permissions",
+		"--print", "fix the totals",
+	}, plan.RootCommand)
 	assert.False(t, plan.NeedsDevPane)
 }
 

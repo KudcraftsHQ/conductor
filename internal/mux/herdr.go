@@ -306,6 +306,14 @@ func (herdrMux) runJSON(v any, args ...string) error {
 	return json.Unmarshal(out, v)
 }
 
+// ShellJoin renders argv as a single shell command line for `herdr pane run`,
+// for callers outside this package that drive herdr panes directly.
+func ShellJoin(argv []string) string { return shellJoin(argv) }
+
+// HerdrAgentPrompt is the system prompt handed to agents started in a herdr
+// worktree workspace, exported for the orchestration launch path.
+func HerdrAgentPrompt() string { return herdrAgentPrompt() }
+
 // shellJoin renders argv as a single shell command line for `herdr pane run`,
 // which takes command text rather than an argv vector.
 func shellJoin(argv []string) string {

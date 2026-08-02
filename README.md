@@ -456,6 +456,97 @@ By default, worktrees are named after cities (tokyo, paris, london, etc.) for ea
         └── tokyo-archive.log
 ```
 
+## Chat-Originated Tasks (`conductor orchestrate`)
+
+`conductor orchestrate` is the machine-facing entry point used by the
+Herdr/Hermes bridge: a Discord message asks for work on a registered project,
+and Conductor answers with a coding agent running in a **brand-new worktree**.
+Every subcommand takes `--json` and none of them prompt.
+
+```bash
+# Start work. --request-id is the originating message id, and it is required.
+conductor orchestrate launch --project myapp \
+  --prompt "have a look at why the uploader keeps dying" \
+  --request-id 1402998877665544332 --channel-id C --thread-id T --json
+
+# Sample live agent state and record any real progress (all live tasks if no id).
+conductor orchestrate observe [task-id] [--json]
+
+# Record what the completion message needs.
+conductor orchestrate tests <task-id> --status passed --detail "go test ./... — ok"
+conductor orchestrate summary <task-id> "dropped the double fetch"
+conductor orchestrate readback <task-id> --slug herdr-<task-id> --url <printed-url>
+
+# Answer the Readback question, then post the completion.
+conductor orchestrate gate <task-id> yes|no
+conductor orchestrate complete <task-id> [--json]
+
+conductor orchestrate status <task-id>
+conductor orchestrate list
+```
+
+### What it guarantees
+
+- **A fresh worktree, always.** The agent never runs in the project's root
+  checkout; a launch that would land there is refused rather than run.
+- **Unattended agent flags.** Claude Code always starts with
+  `--dangerously-skip-permissions` and `CLAUDE_CODE_NO_FLICKER=1` — there is no
+  human in the pane to answer a permission prompt. The launch fails loudly if
+  those flags are ever missing from the argv.
+- **Launch returns on dispatch, not completion.** The caller is a Discord
+  interaction, so launch has a budget to *confirm the agent started* (default
+  20s after readiness) and never a budget to watch it run. A three-hour task
+  and a three-second task return in the same time.
+- **Real progress only.** Progress events come from Herdr observations —
+  an agent status change, or its `state_change_seq` moving. Polling a quiet
+  agent a hundred times records nothing, so "no progress for an hour" is a fact
+  about the agent rather than an artefact of polling.
+- **Idempotency.** The originating message id is the key. Redelivering the same
+  Discord message returns the running task; it never creates a second worktree,
+  a second agent, or a second copy of the prompt. A launch that crashed before
+  producing an agent is retried under the same task id.
+- **Recovery.** State lives in `~/.conductor/orchestration/tasks.json`, so a
+  restarted process re-attaches to whatever is running. A Herdr outage is a
+  disconnect, not a lost agent; only a persistently unreadable pane — or one
+  whose terminal id changed, meaning it was recycled — is reported lost, and a
+  lost agent is never silently relaunched.
+
+### The Readback gate
+
+Readback is an **optional completion gate, not an automatic blocker**. Whether a
+task owes a write-up is modelled explicitly and persisted, so a restart neither
+forgets an outstanding question nor asks it twice:
+
+| Gate | Meaning | Set by |
+|---|---|---|
+| `readback_required` | The request asked for a report, research, an audit or a Readback | classifier at launch, `--readback required`, or the requester |
+| `no_readback_needed` | Clearly code-only work; completes without a document | classifier at launch, `--readback not-needed`, or the requester |
+| `awaiting_readback_decision` | The request did not say; the requester is asked **once**, when the agent finishes | classifier at launch |
+
+While the gate is open the task is simply **not reported complete**. Asking is
+not blocking: the agent keeps running, the worktree is untouched, and nothing
+is cleaned up. `conductor orchestrate observe` surfaces the question to put to
+the requester exactly once; `conductor orchestrate gate <task> yes|no` records
+their answer, which outranks the classifier and is never re-derived.
+
+A task whose gate is `readback_required` completes only once a published URL is
+recorded — and the URL is always the one the `readback` CLI printed, never one
+constructed from a slug.
+
+### The completion message
+
+```
+**Task complete** — `myapp-a1b2c3`
+project `myapp` · branch `edinburgh` · worktree `~/.conductor/myapp/edinburgh`
+tests: passed — go test ./... — ok
+Report: https://notes.kudcrafts.com/d/herdr-myapp-a1b2c3 (slug `herdr-myapp-a1b2c3`)
+nil multipart boundary killed the uploader; patched and covered
+```
+
+Tests are reported as `unknown` unless something recorded them. Conductor does
+not run the agent's tests, and saying "passed" because nothing said otherwise
+is the claim this contract exists to prevent.
+
 ## IDE Integration
 
 Conductor supports opening worktrees in:
