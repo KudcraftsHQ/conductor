@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,64 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPrepareWorktree_ExcludesNamesFromAllProjects(t *testing.T) {
+	// Remote dev databases (dev_<city>) live on a shared server across all
+	// projects, so a city already used by ANY project must be excluded.
+	cfg := config.NewConfig()
+	cfg.Projects["project-a"] = &config.Project{
+		Path:      "/tmp/project-a",
+		Worktrees: make(map[string]*config.Worktree),
+	}
+	cfg.Projects["project-b"] = &config.Project{
+		Path:      "/tmp/project-b",
+		Worktrees: make(map[string]*config.Worktree),
+	}
+	// project-b already occupies most city names
+	for _, city := range AllCities()[:len(AllCities())-3] {
+		cfg.Projects["project-b"].Worktrees[city] = &config.Worktree{
+			Path:   "/tmp/project-b/" + city,
+			Branch: "feat/" + city,
+		}
+	}
+
+	manager := NewManager(cfg)
+	name, _, err := manager.PrepareWorktree("project-a", "feature-x", 1)
+	require.NoError(t, err)
+
+	// PrepareWorktree registers the name on the target project, but the
+	// generated name must never collide with ANOTHER project's worktrees —
+	// that is what causes shared remote dev-DB (dev_<name>) collisions.
+	assert.Contains(t, cfg.Projects["project-a"].Worktrees, name)
+	assert.NotContains(t, cfg.Projects["project-b"].Worktrees, name)
+}
+
+func TestPrepareWorktree_UniquenessAcrossProjects(t *testing.T) {
+	// Even with many existing worktrees, names stay unique per project
+	cfg := config.NewConfig()
+	cfg.Projects["alpha"] = &config.Project{
+		Path:      "/tmp/alpha",
+		Worktrees: make(map[string]*config.Worktree),
+	}
+	cfg.Projects["beta"] = &config.Project{
+		Path:      "/tmp/beta",
+		Worktrees: make(map[string]*config.Worktree),
+	}
+	cfg.Projects["alpha"].Worktrees["tokyo"] = &config.Worktree{Path: "/tmp/alpha/tokyo", Branch: "feat/tokyo"}
+
+	manager := NewManager(cfg)
+
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		name, wt, err := manager.PrepareWorktree("beta", fmt.Sprintf("feat-%d", i), 1)
+		require.NoError(t, err)
+		require.NotNil(t, wt)
+		assert.False(t, seen[name], "duplicate worktree name %q across iterations", name)
+		seen[name] = true
+		assert.NotEqual(t, "tokyo", name)
+		cfg.Projects["beta"].Worktrees[name] = wt
+	}
+}
 
 func TestRecoverInterruptedStates_CreatingWithoutDirectory(t *testing.T) {
 	// Create a temp config with a worktree in "creating" state but no directory

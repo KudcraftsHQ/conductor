@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"fmt"
 	"math/rand"
 )
 
@@ -43,8 +44,15 @@ func RandomCityExcluding(exclude []string) string {
 	}
 
 	if len(available) == 0 {
-		// All cities used, just return a random one
-		return RandomCity()
+		// All city names taken — append a numeric suffix (city-2, city-3, …)
+		// until an unused name is found. The remote dev DB name (dev_<name>)
+		// sanitises hyphens to underscores, so the suffix stays unique.
+		for i := 2; ; i++ {
+			candidate := fmt.Sprintf("%s-%d", RandomCity(), i)
+			if !excludeSet[candidate] {
+				return candidate
+			}
+		}
 	}
 
 	return available[rand.Intn(len(available))]
