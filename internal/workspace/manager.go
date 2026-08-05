@@ -113,10 +113,17 @@ func (m *Manager) PrepareWorktree(projectName, branch string, portCount int) (st
 		return "", nil, fmt.Errorf("project '%s' not found", projectName)
 	}
 
-	// Get existing worktree names
-	existingNames := make([]string, 0, len(project.Worktrees))
-	for name := range project.Worktrees {
-		existingNames = append(existingNames, name)
+	// Get existing worktree names across ALL projects. Remote dev databases
+	// (dev_<city>) are created on a shared server, so a city already used by
+	// any project must be excluded or the remote DB clone collides.
+	existingNames := make([]string, 0)
+	for _, p := range m.config.Projects {
+		if p == nil {
+			continue
+		}
+		for name := range p.Worktrees {
+			existingNames = append(existingNames, name)
+		}
 	}
 
 	// Generate unique city name

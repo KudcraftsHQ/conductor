@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Worktree name collisions across projects**: `conductor worktree create` now excludes city names already used by *any* project's worktrees, not just the current project's. Remote dev databases (`dev_<city>`) live on a shared server, so a name reused by another project caused the remote DB clone to fail with `database "dev_<city>" already exists`. When every city name is taken, a unique suffixed name (`city-2`, `city-3`, …) is generated instead of returning a colliding city.
+
 ### Added
 - **Herdr Worktree Opener**: `conductor worktree open <name> --herdr` opens a focused Herdr workspace for the worktree
   - `--claude` starts interactive Claude Code, `--dev` starts the project dev server through `conductor run`, and `--prompt` runs Claude Code non-interactively

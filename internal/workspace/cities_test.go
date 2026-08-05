@@ -36,12 +36,16 @@ func TestRandomCityExcluding_EmptyExclude(t *testing.T) {
 }
 
 func TestRandomCityExcluding_AllExcluded(t *testing.T) {
-	// When all cities are excluded, it should still return a city
+	// When all cities are excluded, it should still return a unique name
 	allCities := AllCities()
 	city := RandomCityExcluding(allCities)
 	assert.NotEmpty(t, city)
-	// It falls back to RandomCity when all are excluded
-	assert.Contains(t, cities, city)
+	// It falls back to a suffixed variant (city-2) not present in the base list
+	assert.NotContains(t, cities, city)
+	// A second call with the first result also excluded must not return it again
+	excluded := append(allCities, city)
+	second := RandomCityExcluding(excluded)
+	assert.NotEqual(t, city, second)
 }
 
 func TestAllCities(t *testing.T) {
