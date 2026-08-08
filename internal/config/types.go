@@ -27,8 +27,9 @@ type Defaults struct {
 	// Tmux contains tmux session settings
 	Tmux TmuxDefaults `json:"tmux,omitempty"`
 	// Multiplexer selects the terminal multiplexer conductor drives:
-	// "tmux", "herdr", or "auto" (default). Auto picks herdr when conductor is
-	// running inside a herdr pane or tmux is unavailable, tmux otherwise.
+	// "tmux", "herdr", "t3", or "auto" (default). Auto picks whichever of T3
+	// Code or herdr conductor is already running inside, then herdr when tmux
+	// is unavailable, and tmux otherwise.
 	Multiplexer string `json:"multiplexer,omitempty"`
 }
 

@@ -33,9 +33,36 @@ internal/
 ├── runner/        Script execution with environment injection
 ├── opener/        IDE & terminal launchers (Cursor, VS Code, iTerm)
 ├── tmux/          Tmux session management
+├── mux/           Multiplexer abstraction (tmux, herdr, T3 Code)
+├── t3/            T3 Code client (HTTP orchestration bus + WebSocket RPC)
 ├── tunnel/        Cloudflare tunnel management (quick & named tunnels)
 └── github/        GitHub PR integration via gh CLI
 ```
+
+### Multiplexer backends
+
+`internal/mux` abstracts where a worktree's agent and dev server are hosted.
+Selected by `defaults.multiplexer` in config, `CONDUCTOR_MUX`, or auto-detection.
+
+| Backend | Window is | Dev server runs in |
+|---|---|---|
+| `tmux` | a tmux window | a pane |
+| `herdr` | a herdr workspace | a pane |
+| `t3` | a T3 Code thread | a terminal owned by that thread |
+
+The T3 backend differs in kind from the other two: T3 runs the agent itself
+rather than conductor spawning one, so `StartAgentPane` is unsupported and
+`TracksAgentStatus()` is true. Its terminals are keyed `(threadId, terminalId)`
+and are reaped when the thread is archived, so conductor does not track the dev
+server process.
+
+Two things are load-bearing there:
+
+- **The join key is the worktree path**, not the thread title — T3 rewrites
+  titles from the conversation.
+- **`.conductor-t3-thread`** in a worktree marks it as T3-hosted. `conductor t3
+  reconcile` only considers marked worktrees; without that filter every worktree
+  created under tmux or herdr reads as drift.
 
 ### Key Data Flow
 

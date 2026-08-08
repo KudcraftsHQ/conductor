@@ -47,6 +47,7 @@ func init() {
 	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(migrateCmd)
 	rootCmd.AddCommand(agentCmd)
+	rootCmd.AddCommand(t3Cmd)
 }
 
 var versionCmd = &cobra.Command{
