@@ -66,6 +66,91 @@ func SessionExists() bool {
 	return cmd.Run() == nil
 }
 
+// DevCommand keeps a dev server pane alive: it reruns `conductor run` when the
+// server exits, and offers a shell prompt in between.
+const DevCommand = `trap '' INT; while true; do conductor run; ec=$?; echo ''; if [ $ec -eq 130 ]; then echo 'Dev server stopped. Press Enter to restart or type command...'; else echo 'Dev server exited. Press Enter to restart or type command...'; fi; read -r cmd; [ -n "$cmd" ] && eval "$cmd" || continue; done`
+
+// EnsureSession creates the detached conductor session if it does not exist.
+//
+// It exists for backends that need a window without attaching a client — the
+// T3 backend hosts the agent elsewhere and only wants somewhere to put the dev
+// server.
+//
+// The tmux server is started in its own systemd scope when possible. A tmux
+// server inherits the cgroup of whoever first started it, so starting it from
+// inside another service's cgroup makes every dev server die when that service
+// restarts. Escaping to a transient scope is what keeps dev servers alive
+// across a T3 Code restart.
+func EnsureSession() error {
+	if err := CheckInstalled(); err != nil {
+		return err
+	}
+	if SessionExists() {
+		return nil
+	}
+
+	args := []string{"new-session", "-d", "-s", SessionName, "-n", TUIWindowName, "conductor", "tui"}
+	if runner, ok := detachedRunner(); ok {
+		full := append(append([]string{}, runner[1:]...), "tmux")
+		full = append(full, args...)
+		if err := exec.Command(runner[0], full...).Run(); err == nil {
+			return nil
+		}
+		// systemd-run can fail (no user manager, permissions); fall through to
+		// a plain start rather than leaving the caller with no session.
+	}
+	if err := exec.Command("tmux", args...).Run(); err != nil {
+		return fmt.Errorf("failed to create tmux session: %w", err)
+	}
+	return nil
+}
+
+// detachedRunner returns a command prefix that launches a process in its own
+// cgroup, or false when none is available (non-Linux, no systemd).
+func detachedRunner() ([]string, bool) {
+	path, err := exec.LookPath("systemd-run")
+	if err != nil {
+		return nil, false
+	}
+	return []string{path, "--user", "--scope", "--quiet", "--collect"}, true
+}
+
+// CreateDevWindow creates a window containing only a dev server pane.
+//
+// This is for backends that host the coding agent somewhere other than tmux —
+// the T3 Code backend runs the agent as a thread, and wants tmux only as a
+// long-lived home for the dev server. One worktree gets one dev window.
+func CreateDevWindow(project, branch, worktreePath string) error {
+	if err := EnsureSession(); err != nil {
+		return err
+	}
+
+	windowName := WindowName(project, branch)
+	windowTarget := fmt.Sprintf("%s:%s", SessionName, windowName)
+
+	if WindowExists(project, branch) {
+		return fmt.Errorf("tmux window %q already exists", windowName)
+	}
+
+	cmd := exec.Command("tmux", "new-window",
+		"-d", // Do not steal focus from whatever the user is looking at.
+		"-t", SessionName+":",
+		"-n", windowName,
+		"-c", worktreePath,
+		"-P", "-F", "#{pane_id}",
+		"bash", "-c", DevCommand)
+	devPaneIDBytes, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to create tmux dev window: %w", err)
+	}
+	devPaneID := strings.TrimSpace(string(devPaneIDBytes))
+
+	_ = exec.Command("tmux", "select-pane", "-t", devPaneID, "-T", "dev").Run()
+	_ = exec.Command("tmux", "set-option", "-t", windowTarget, "automatic-rename", "off").Run()
+	_ = exec.Command("tmux", "set-option", "-t", windowTarget, "allow-rename", "off").Run()
+	return nil
+}
+
 // configureSession sets up session options.
 // When useCC is true, configures for iTerm2 -CC mode (status bar off, native tabs).
 // When useCC is false, keeps the tmux status bar visible.
