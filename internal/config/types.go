@@ -27,8 +27,9 @@ type Defaults struct {
 	// Tmux contains tmux session settings
 	Tmux TmuxDefaults `json:"tmux,omitempty"`
 	// Multiplexer selects the terminal multiplexer conductor drives:
-	// "tmux", "herdr", or "auto" (default). Auto picks herdr when conductor is
-	// running inside a herdr pane or tmux is unavailable, tmux otherwise.
+	// "tmux", "herdr", "t3", or "auto" (default). Auto picks whichever of T3
+	// Code or herdr conductor is already running inside, then herdr when tmux
+	// is unavailable, and tmux otherwise.
 	Multiplexer string `json:"multiplexer,omitempty"`
 }
 
@@ -175,6 +176,36 @@ type Worktree struct {
 	ClickUpTaskURL string `json:"clickupTaskUrl,omitempty"`
 	// MissionID links this worktree to a mission (if created by mission system)
 	MissionID string `json:"missionId,omitempty"`
+
+	// Hibernated reports that the worktree's resources — ports, database,
+	// tunnel, dev server — have been released while the working tree and its
+	// branch were left untouched.
+	//
+	// This is distinct from Archived, which means the tree itself is gone and
+	// the entry survives only as a tombstone. A hibernated worktree is woken by
+	// Provision, which allocates fresh ports and rebuilds its database.
+	Hibernated bool `json:"hibernated,omitempty"`
+	// HibernatedAt records when the resources were released.
+	HibernatedAt time.Time `json:"hibernatedAt,omitempty"`
+
+	// T3Threads holds the ids of every T3 Code thread bound to this worktree,
+	// live and archived alike.
+	//
+	// It exists because T3's thread.deleted event carries only a thread id, and
+	// by the time it arrives the thread is gone from both the live and archived
+	// snapshots — there is nothing left to resolve a worktree from. Conductor
+	// therefore has to know the mapping in advance rather than look it up.
+	T3Threads []string `json:"t3Threads,omitempty"`
+	// T3Adopted reports that this worktree was provisioned by `conductor adopt`
+	// into a directory something else created, rather than by CreateWorktree.
+	T3Adopted bool `json:"t3Adopted,omitempty"`
+}
+
+// IsT3Hosted reports whether T3 Code owns this worktree's lifecycle. The
+// watcher must ignore everything else: worktrees made under tmux or herdr never
+// had a thread, so an empty thread list is not drift, it is a different era.
+func (w *Worktree) IsT3Hosted() bool {
+	return len(w.T3Threads) > 0 || w.T3Adopted
 }
 
 // DatabaseMode represents the database sync mode

@@ -21,6 +21,7 @@ type Kind string
 const (
 	KindTmux  Kind = "tmux"
 	KindHerdr Kind = "herdr"
+	KindT3    Kind = "t3"
 	// KindAuto resolves to herdr when conductor is running inside a herdr pane
 	// or tmux is unavailable, and to tmux otherwise.
 	KindAuto Kind = "auto"
@@ -114,6 +115,8 @@ func Resolve(kind Kind) Multiplexer {
 		return Tmux()
 	case KindHerdr:
 		return Herdr()
+	case KindT3:
+		return T3()
 	default:
 		return auto()
 	}
@@ -126,14 +129,20 @@ func ParseKind(s string) Kind {
 		return KindTmux
 	case KindHerdr:
 		return KindHerdr
+	case KindT3:
+		return KindT3
 	default:
 		return KindAuto
 	}
 }
 
-// auto picks herdr when conductor is already running inside a herdr pane, or
-// when herdr is installed and tmux is not. Otherwise it picks tmux.
+// auto picks the multiplexer conductor is already running inside — T3 Code or
+// herdr — then falls back to herdr when it is installed and tmux is not, and
+// to tmux otherwise.
 func auto() Multiplexer {
+	if os.Getenv("T3CODE_HOME") != "" || os.Getenv("T3_THREAD_ID") != "" {
+		return T3()
+	}
 	if os.Getenv("HERDR_PANE_ID") != "" {
 		return Herdr()
 	}

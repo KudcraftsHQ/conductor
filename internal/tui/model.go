@@ -13,6 +13,7 @@ import (
 	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/session"
 	"github.com/hammashamzah/conductor/internal/store"
+	"github.com/hammashamzah/conductor/internal/t3watch"
 	"github.com/hammashamzah/conductor/internal/tui/keys"
 	"github.com/hammashamzah/conductor/internal/tui/styles"
 	"github.com/hammashamzah/conductor/internal/tunnel"
@@ -148,6 +149,10 @@ type Model struct {
 	gitStatusCache   map[string]*workspace.GitStatusInfo
 	gitStatusLoading bool
 
+	// T3 thread counts, keyed by worktree path. What holds a worktree open is
+	// its threads, so this is the number the lifecycle actually turns on.
+	t3ThreadCounts map[string]t3watch.Counts
+
 	// Tunnel state
 	tunnelManager   *tunnel.Manager
 	tunnelModalOpen bool
@@ -252,6 +257,7 @@ func NewModelWithStore(cfg *config.Config, s *store.Store, version string) *Mode
 		wsManager:         workspace.NewManagerWithStore(cfg, s),
 		spinner:           sp,
 		gitStatusCache:    make(map[string]*workspace.GitStatusInfo),
+		t3ThreadCounts:    make(map[string]t3watch.Counts),
 		tunnelManager:     tunnel.NewManager(cfg),
 		databaseLogs:      make(map[string][]string),
 		mux:               mux.FromConfig(cfg),

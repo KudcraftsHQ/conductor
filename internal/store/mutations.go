@@ -174,6 +174,76 @@ func (s *Store) ArchiveWorktree(projectName, worktreeName string) error {
 	return nil
 }
 
+// HibernateWorktree marks a worktree as hibernated: its resources are gone but
+// its working tree and branch are untouched, so Provision can wake it.
+func (s *Store) HibernateWorktree(projectName, worktreeName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	project, ok := s.config.Projects[projectName]
+	if !ok {
+		return fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	wt, ok := project.Worktrees[worktreeName]
+	if !ok {
+		return fmt.Errorf("worktree '%s' not found", worktreeName)
+	}
+
+	wt.Hibernated = true
+	wt.HibernatedAt = time.Now()
+	wt.Ports = nil
+	s.markDirty()
+	return nil
+}
+
+// WakeWorktree clears the hibernated flag and records the ports and database a
+// woken worktree was rebuilt with, which are not the ones it had before.
+func (s *Store) WakeWorktree(projectName, worktreeName string, ports []int, dbName, dbURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	project, ok := s.config.Projects[projectName]
+	if !ok {
+		return fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	wt, ok := project.Worktrees[worktreeName]
+	if !ok {
+		return fmt.Errorf("worktree '%s' not found", worktreeName)
+	}
+
+	wt.Hibernated = false
+	wt.HibernatedAt = time.Time{}
+	wt.Ports = ports
+	wt.DatabaseName = dbName
+	wt.DatabaseURL = dbURL
+	s.markDirty()
+	return nil
+}
+
+// SetWorktreeThreads records the T3 Code threads bound to a worktree. The
+// watcher refreshes this every tick, because a deleted thread cannot be
+// resolved to a worktree after the fact.
+func (s *Store) SetWorktreeThreads(projectName, worktreeName string, threadIDs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	project, ok := s.config.Projects[projectName]
+	if !ok {
+		return fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	wt, ok := project.Worktrees[worktreeName]
+	if !ok {
+		return fmt.Errorf("worktree '%s' not found", worktreeName)
+	}
+
+	wt.T3Threads = threadIDs
+	s.markDirty()
+	return nil
+}
+
 // SetWorktreePorts sets the ports for a worktree
 func (s *Store) SetWorktreePorts(projectName, worktreeName string, ports []int) error {
 	s.mu.Lock()

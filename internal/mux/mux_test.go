@@ -54,13 +54,25 @@ func TestFromConfigNilFallsBackToAuto(t *testing.T) {
 	assert.NotNil(t, FromConfig(nil))
 }
 
+// clearMuxEnv removes the ambient multiplexer hints so auto() is exercised
+// against a known environment. Without this the tests inherit whatever the
+// developer is running conductor inside — including T3 Code, which exports
+// T3CODE_HOME into every terminal it spawns.
+func clearMuxEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("T3CODE_HOME", "")
+	t.Setenv("T3_THREAD_ID", "")
+	t.Setenv("HERDR_PANE_ID", "")
+}
+
 func TestAutoPrefersHerdrInsideHerdrPane(t *testing.T) {
+	clearMuxEnv(t)
 	t.Setenv("HERDR_PANE_ID", "w123-1")
 	assert.Equal(t, KindHerdr, auto().Kind())
 }
 
 func TestAutoDefaultsToTmux(t *testing.T) {
-	t.Setenv("HERDR_PANE_ID", "")
+	clearMuxEnv(t)
 	// tmux is present in dev/CI images; when it is not, auto may legitimately
 	// pick herdr. Either way the choice must be one of the two known kinds.
 	k := auto().Kind()

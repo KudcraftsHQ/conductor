@@ -14,6 +14,7 @@ import (
 	"github.com/hammashamzah/conductor/internal/github"
 	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/store"
+	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/tunnel"
 	_ "github.com/lib/pq"
 )
@@ -108,14 +109,37 @@ func (m *Manager) CreateWorktree(projectName, branch string, portCount int) (str
 // Returns the worktree name and entry, but does NOT create the git worktree yet
 // Call CreateWorktreeAsync to actually create the git worktree in background
 func (m *Manager) PrepareWorktree(projectName, branch string, portCount int) (string, *config.Worktree, error) {
-	project, ok := m.config.GetProject(projectName)
-	if !ok {
-		return "", nil, fmt.Errorf("project '%s' not found", projectName)
+	name, err := m.NextWorktreeName(projectName)
+	if err != nil {
+		return "", nil, err
 	}
 
-	// Get existing worktree names across ALL projects. Remote dev databases
-	// (dev_<city>) are created on a shared server, so a city already used by
-	// any project must be excluded or the remote DB clone collides.
+	// Conductor-created worktrees live in ~/.conductor/<project>/<worktree>.
+	// Adopted ones do not, which is why the path is a parameter below.
+	worktreePath, err := config.WorktreePath(projectName, name)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to get worktree path: %w", err)
+	}
+
+	worktree, err := m.RegisterWorktree(projectName, name, branch, worktreePath, portCount)
+	if err != nil {
+		return "", nil, err
+	}
+	return name, worktree, nil
+}
+
+// NextWorktreeName picks a city name that no project is using.
+//
+// Remote dev databases are named dev_<city> on a shared server, so a city
+// already taken by any project — not just this one — would collide on the
+// clone. The name therefore stays globally unique even when the directory on
+// disk is named after a branch instead.
+func (m *Manager) NextWorktreeName(projectName string) (string, error) {
+	project, ok := m.config.GetProject(projectName)
+	if !ok {
+		return "", fmt.Errorf("project '%s' not found", projectName)
+	}
+
 	existingNames := make([]string, 0)
 	for _, p := range m.config.Projects {
 		if p == nil {
@@ -126,12 +150,24 @@ func (m *Manager) PrepareWorktree(projectName, branch string, portCount int) (st
 		}
 	}
 
-	// Generate unique city name
 	name := RandomCityExcluding(existingNames)
-
-	// Check if name already exists
 	if _, exists := project.Worktrees[name]; exists {
-		return "", nil, fmt.Errorf("worktree '%s' already exists", name)
+		return "", fmt.Errorf("worktree '%s' already exists", name)
+	}
+	return name, nil
+}
+
+// RegisterWorktree allocates ports and records a worktree entry for a directory
+// at worktreePath. It does not create the directory, so it serves both
+// PrepareWorktree (which is about to make one) and adopt (where T3 Code already
+// did). Provision is what fills the directory in afterwards.
+func (m *Manager) RegisterWorktree(projectName, name, branch, worktreePath string, portCount int) (*config.Worktree, error) {
+	project, ok := m.config.GetProject(projectName)
+	if !ok {
+		return nil, fmt.Errorf("project '%s' not found", projectName)
+	}
+	if _, exists := project.Worktrees[name]; exists {
+		return nil, fmt.Errorf("worktree '%s' already exists", name)
 	}
 
 	// Use project default if port count not specified
@@ -139,27 +175,9 @@ func (m *Manager) PrepareWorktree(projectName, branch string, portCount int) (st
 		portCount = project.DefaultPortsPerWorktree
 	}
 
-	// Allocate ports (use store if available for persistence)
-	var ports []int
-	var err error
-	if m.store != nil {
-		ports, err = m.store.AllocatePorts(projectName, name, portCount)
-	} else {
-		ports, err = m.config.AllocatePorts(projectName, name, portCount)
-	}
+	ports, err := m.allocatePorts(projectName, name, portCount)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to allocate ports: %w", err)
-	}
-
-	// Get worktree path in ~/.conductor/<project>/<worktree>
-	worktreePath, err := config.WorktreePath(projectName, name)
-	if err != nil {
-		if m.store != nil {
-			m.store.FreePorts(ports)
-		} else {
-			m.config.FreePorts(ports)
-		}
-		return "", nil, fmt.Errorf("failed to get worktree path: %w", err)
+		return nil, fmt.Errorf("failed to allocate ports: %w", err)
 	}
 
 	// Determine branch name - use worktree name if not specified
@@ -170,28 +188,46 @@ func (m *Manager) PrepareWorktree(projectName, branch string, portCount int) (st
 	// Create worktree entry with "creating" status
 	worktree := config.NewWorktree(worktreePath, branch, false, ports)
 	worktree.SetupStatus = config.SetupStatusCreating
-
-	// Generate database name if database is configured for project
-	if project.Database != nil && m.config.Defaults.LocalPostgresURL != "" && len(ports) > 0 {
-		pattern := project.Database.DBNamePattern
-		if pattern == "" {
-			pattern = "{project}-{port}"
-		}
-		worktree.DatabaseName = generateDBName(projectName, ports[0], pattern)
-		worktree.DatabaseURL = buildWorktreeDBURL(m.config.Defaults.LocalPostgresURL, worktree.DatabaseName)
-	}
+	m.assignDatabase(projectName, project, worktree)
 
 	// Add worktree (use store if available for persistence)
 	if m.store != nil {
 		if err := m.store.AddWorktree(projectName, name, worktree); err != nil {
 			m.store.FreePorts(ports)
-			return "", nil, fmt.Errorf("failed to add worktree: %w", err)
+			return nil, fmt.Errorf("failed to add worktree: %w", err)
 		}
 	} else {
 		project.Worktrees[name] = worktree
 	}
 
-	return name, worktree, nil
+	return worktree, nil
+}
+
+// allocatePorts reserves ports through the store when there is one, so the
+// allocation is persisted, and falls back to the in-memory config otherwise.
+func (m *Manager) allocatePorts(projectName, name string, portCount int) ([]int, error) {
+	if m.store != nil {
+		return m.store.AllocatePorts(projectName, name, portCount)
+	}
+	return m.config.AllocatePorts(projectName, name, portCount)
+}
+
+// assignDatabase names the worktree's local database from its first port.
+//
+// Remote databases are named later, by the clone in runSetupSync, because their
+// name comes from the worktree name rather than a port. That is also why a
+// woken worktree keeps its remote database name but gets a new local one: the
+// ports it is named after have changed.
+func (m *Manager) assignDatabase(projectName string, project *config.Project, worktree *config.Worktree) {
+	if project.Database == nil || m.config.Defaults.LocalPostgresURL == "" || len(worktree.Ports) == 0 {
+		return
+	}
+	pattern := project.Database.DBNamePattern
+	if pattern == "" {
+		pattern = "{project}-{port}"
+	}
+	worktree.DatabaseName = generateDBName(projectName, worktree.Ports[0], pattern)
+	worktree.DatabaseURL = buildWorktreeDBURL(m.config.Defaults.LocalPostgresURL, worktree.DatabaseName)
 }
 
 // CreateWorktreeAsync creates the git worktree in background
@@ -287,10 +323,24 @@ func (m *Manager) RunSetupAsync(projectName, worktreeName string, onComplete fun
 	return nil
 }
 
-// ArchiveWorktree marks a worktree as archived, removes git worktree and frees ports
-// Runs archive script first (if exists), then removes worktree regardless of script result
-// The worktree entry remains in config so logs can still be viewed
+// ArchiveWorktree releases a worktree's resources and removes its tree.
+//
+// This is the destructive end of the lifecycle and it deletes the branch, which
+// is why the T3-driven paths call ReleaseResources and RemoveTree separately
+// instead: there, a thread being deleted must not be able to destroy commits.
+// The worktree entry remains in config so logs can still be viewed.
 func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
+	if err := m.ReleaseResources(projectName, worktreeName); err != nil {
+		return err
+	}
+	return m.RemoveTree(projectName, worktreeName, true)
+}
+
+// ReleaseResources frees everything a worktree consumes — its archive script
+// runs, its database is dropped, its tunnel and dev window are stopped and its
+// ports are returned — and leaves the working tree and branch exactly as they
+// are. This is hibernation: the worktree is woken again by Provision.
+func (m *Manager) ReleaseResources(projectName, worktreeName string) error {
 	project, ok := m.config.GetProject(projectName)
 	if !ok {
 		return fmt.Errorf("project '%s' not found", projectName)
@@ -341,16 +391,56 @@ func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 	// Kill tmux window if it exists
 	_ = mux.Current().KillWindow(projectName, worktree.Branch)
 
-	// Remove git worktree
+	// Free the ports. The entry stays, marked hibernated, so the tree on disk
+	// is still recognised as this worktree when it is woken.
+	if m.store != nil {
+		m.store.FreeWorktreePorts(projectName, worktreeName)
+		_ = m.store.HibernateWorktree(projectName, worktreeName)
+	} else {
+		m.config.FreeWorktreePorts(projectName, worktreeName)
+		worktree.Hibernated = true
+		worktree.HibernatedAt = time.Now()
+		worktree.Ports = nil // Clear ports since they're freed
+	}
+
+	return nil
+}
+
+// RemoveTree removes the working tree from disk and marks the entry archived,
+// so it survives as a tombstone whose logs can still be read.
+//
+// deleteBranch must be false on anything driven by T3 Code. Deleting a thread
+// there is a routine act, and T3's own worktree removal leaves the branch
+// alone; matching that means a stray deletion costs a tree that can be
+// recreated rather than commits that cannot.
+func (m *Manager) RemoveTree(projectName, worktreeName string, deleteBranch bool) error {
+	project, ok := m.config.GetProject(projectName)
+	if !ok {
+		return fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	worktree, exists := project.Worktrees[worktreeName]
+	if !exists {
+		return fmt.Errorf("worktree '%s' not found", worktreeName)
+	}
+
+	if worktree.IsRoot {
+		return fmt.Errorf("cannot remove root worktree")
+	}
+
+	// Remove git worktree. A tree that is already gone — T3 removes its own
+	// after deleting the last thread bound to it, racing us — is success, not
+	// failure.
 	if err := GitWorktreeRemove(project.Path, worktree.Path); err != nil {
 		// Try to remove directory manually
 		_ = os.RemoveAll(worktree.Path)
 	}
 
-	// Delete the branch (ignore error - branch may not exist)
-	_ = GitBranchDelete(project.Path, worktree.Branch)
+	if deleteBranch {
+		// Delete the branch (ignore error - branch may not exist)
+		_ = GitBranchDelete(project.Path, worktree.Branch)
+	}
 
-	// Free ports and mark as archived
 	if m.store != nil {
 		m.store.FreeWorktreePorts(projectName, worktreeName)
 		_ = m.store.ArchiveWorktree(projectName, worktreeName)
@@ -358,10 +448,83 @@ func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 		m.config.FreeWorktreePorts(projectName, worktreeName)
 		worktree.Archived = true
 		worktree.ArchivedAt = time.Now()
+		worktree.Hibernated = false
 		worktree.Ports = nil // Clear ports since they're freed
 	}
 
 	return nil
+}
+
+// Provision fills in a worktree whose directory already exists: it allocates
+// ports if it has none, rebuilds its database, runs the project's setup script
+// and starts its dev server.
+//
+// It is the wake half of hibernation and the second half of adopt, and it is
+// idempotent — a setup hook that fires twice, or an adopt re-run by hand, must
+// not produce a second port allocation or a second database.
+func (m *Manager) Provision(projectName, worktreeName string) error {
+	project, ok := m.config.GetProject(projectName)
+	if !ok {
+		return fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	worktree, exists := project.Worktrees[worktreeName]
+	if !exists {
+		return fmt.Errorf("worktree '%s' not found", worktreeName)
+	}
+
+	if _, err := os.Stat(worktree.Path); err != nil {
+		return fmt.Errorf("worktree directory %s is missing: %w", worktree.Path, err)
+	}
+
+	// A woken worktree has no ports: they were returned when it hibernated, and
+	// it gets new ones now. The local database is named after the first port,
+	// so it is renamed to match; a remote dev_<city> database keeps its name.
+	if len(worktree.Ports) == 0 {
+		portCount := project.DefaultPortsPerWorktree
+		ports, err := m.allocatePorts(projectName, worktreeName, portCount)
+		if err != nil {
+			return fmt.Errorf("failed to allocate ports: %w", err)
+		}
+		worktree.Ports = ports
+		if !strings.HasPrefix(worktree.DatabaseName, "dev_") {
+			m.assignDatabase(projectName, project, worktree)
+		}
+	}
+
+	if m.store != nil {
+		_ = m.store.SetWorktreeStatus(projectName, worktreeName, config.SetupStatusRunning)
+	}
+	worktree.SetupStatus = config.SetupStatusRunning
+
+	// Clones the database and runs the project's setup script, which is what
+	// regenerates any .env holding the ports that just changed.
+	setupErr := runSetupSync(project, projectName, worktreeName, worktree)
+
+	status := config.SetupStatusDone
+	if setupErr != nil {
+		status = config.SetupStatusFailed
+	}
+	if m.store != nil {
+		_ = m.store.SetWorktreeStatus(projectName, worktreeName, status)
+		_ = m.store.WakeWorktree(projectName, worktreeName, worktree.Ports, worktree.DatabaseName, worktree.DatabaseURL)
+	} else {
+		worktree.SetupStatus = status
+		worktree.Hibernated = false
+		worktree.HibernatedAt = time.Time{}
+	}
+
+	// The dev server goes in a tmux window rather than a T3 terminal: a T3
+	// terminal belongs to one thread and dies with the T3 server, while a tmux
+	// window is long-lived and shared by every thread bound to this worktree.
+	// Under tmux and herdr the normal create path already opened one.
+	if mux.Current().Kind() == mux.KindT3 && !tmux.WindowExists(projectName, worktree.Branch) {
+		if err := tmux.CreateDevWindow(projectName, worktree.Branch, worktree.Path); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not start the dev server: %v\n", err)
+		}
+	}
+
+	return setupErr
 }
 
 // DeleteWorktree permanently removes a worktree from config

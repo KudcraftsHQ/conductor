@@ -36,6 +36,7 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(projectCmd)
 	rootCmd.AddCommand(worktreeCmd)
+	rootCmd.AddCommand(adoptCmd)
 	rootCmd.AddCommand(portsCmd)
 	rootCmd.AddCommand(setupCmd)
 	rootCmd.AddCommand(runCmd)
@@ -47,6 +48,7 @@ func init() {
 	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(migrateCmd)
 	rootCmd.AddCommand(agentCmd)
+	rootCmd.AddCommand(t3Cmd)
 }
 
 var versionCmd = &cobra.Command{

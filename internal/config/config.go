@@ -45,6 +45,25 @@ func WorktreePath(projectName, worktreeName string) (string, error) {
 	return filepath.Join(base, worktreeName), nil
 }
 
+// ResolveWorktreePath returns where a worktree actually is.
+//
+// WorktreePath only says where conductor *would* put one. That stopped being
+// the same answer once T3 Code began creating worktrees itself: it places them
+// under its own root, and the location is not derivable from the project and
+// worktree names. The registered entry is the authority; the derived path is
+// the fallback for a worktree that has no entry yet.
+func ResolveWorktreePath(projectName, worktreeName string) (string, error) {
+	cfg, err := Load()
+	if err == nil && cfg != nil {
+		if project, ok := cfg.GetProject(projectName); ok {
+			if worktree, ok := project.Worktrees[worktreeName]; ok && worktree != nil && worktree.Path != "" {
+				return worktree.Path, nil
+			}
+		}
+	}
+	return WorktreePath(projectName, worktreeName)
+}
+
 // ConfigPath returns the full path to the config file
 func ConfigPath() (string, error) {
 	dir, err := ConductorDir()

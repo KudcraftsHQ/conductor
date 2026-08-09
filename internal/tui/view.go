@@ -343,9 +343,10 @@ func (m *Model) renderWorktreesTable() string {
 	nameW := 15
 	portW := 12
 	statusW := 28 // Widened to accommodate git status tags
+	threadsW := 9 // T3 threads, e.g. "2L·1A"
 	createdW := 14
 	prW := 12
-	branchW := m.width - nameW - portW - statusW - createdW - prW - 14 // Remaining space for branch
+	branchW := m.width - nameW - portW - statusW - threadsW - createdW - prW - 16 // Remaining space for branch
 	if branchW < 15 {
 		branchW = 15
 	}
@@ -353,11 +354,12 @@ func (m *Model) renderWorktreesTable() string {
 	var rows []string
 
 	// Header
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
 		nameW, "NAME",
 		branchW, "BRANCH",
 		portW, "PORTS",
 		statusW, "STATUS",
+		threadsW, "THREADS",
 		createdW, "CREATED",
 		prW, "PR")
 	rows = append(rows, m.styles.TableHeader.Render(header))
@@ -396,6 +398,13 @@ func (m *Model) renderWorktreesTable() string {
 			status = m.spinner.View() + " archiving"
 		} else if wt.Archived {
 			status = "archived"
+		} else if config.IsProvisioning(wt.Path) {
+			// A T3 setup hook is still building this worktree's environment.
+			status = m.spinner.View() + " provisioning"
+		} else if wt.Hibernated {
+			// Resources released, working tree intact. Unarchiving any of its
+			// threads in T3 — or `conductor adopt` — brings it back.
+			status = "hibernated"
 		} else {
 			switch wt.SetupStatus {
 			case config.SetupStatusCreating:
@@ -469,11 +478,12 @@ func (m *Model) renderWorktreesTable() string {
 			statusWithTags += strings.Repeat(" ", statusPadding)
 		}
 
-		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %s  %-*s  %-*s",
+		rowContent := fmt.Sprintf("%-*s  %-*s  %-*s  %s  %-*s  %-*s  %-*s",
 			nameW, truncate(displayName, nameW),
 			branchW, truncate(wt.Branch, branchW),
 			portW, portRange,
 			statusWithTags,
+			threadsW, m.threadSummary(name, wt),
 			createdW, dateStr,
 			prW, truncate(prStr, prW))
 
@@ -569,7 +579,7 @@ func (m *Model) getContextKeys() []CommandKey {
 	case ViewProjects:
 		return []CommandKey{{"enter", "select"}, {"d", "delete"}, {"p", "ports"}, {"3", "databases"}, {"?", "help"}, {"q", "quit"}}
 	case ViewWorktrees:
-		return []CommandKey{{"c", "create"}, {"a", "archive"}, {"enter/o", "open"}, {"C", "cursor"}, {"T", "tunnel"}, {"m", "PRs"}, {"?", "help"}}
+		return []CommandKey{{"c", "create"}, {"a", "archive"}, {"H", "hibernate"}, {"W", "wake"}, {"enter/o", "open"}, {"C", "cursor"}, {"T", "tunnel"}, {"m", "PRs"}, {"?", "help"}}
 	case ViewPorts:
 		return []CommandKey{{"1", "projects"}, {"3", "databases"}, {"?", "help"}, {"esc", "back"}}
 	case ViewDatabases:

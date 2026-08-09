@@ -1,0 +1,16 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "scripts": [
+    {
+      "name": "conductor provision",
+      "command": "conductor adopt --path \"$T3CODE_WORKTREE_PATH\" --repo \"$T3CODE_PROJECT_ROOT\"",
+      "icon": "play",
+      "runOnWorktreeCreate": true
+    },
+    {
+      "name": "dev logs",
+      "command": "conductor t3 logs -f",
+      "icon": "terminal"
+    }
+  ]
+}
