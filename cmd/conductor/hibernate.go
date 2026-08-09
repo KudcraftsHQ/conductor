@@ -100,4 +100,38 @@ func currentProject() (string, *store.Store, error) {
 func init() {
 	worktreeCmd.AddCommand(worktreeHibernateCmd)
 	worktreeCmd.AddCommand(worktreeWakeCmd)
+	worktreeCmd.AddCommand(worktreeDeleteCmd)
+}
+
+// worktreeDeleteCmd drops an archived worktree's entry for good.
+//
+// Archiving already removed the tree and freed the ports; what survives is a
+// tombstone that keeps the setup and archive logs readable. This is how you
+// discard that too. It refuses anything not yet archived, so there is no path
+// from here to losing a working tree.
+var worktreeDeleteCmd = &cobra.Command{
+	Use:   "delete <name>",
+	Short: "Permanently remove an archived worktree's entry",
+	Long: `Removes an archived worktree from conductor's state, discarding its setup and
+archive logs along with it.
+
+Only archived worktrees can be deleted — archive it first. The git branch is not
+touched by this: archiving already dealt with the tree, and by this point there
+is nothing left on disk to remove.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		projectName, s, err := currentProject()
+		if err != nil {
+			return err
+		}
+		defer func() { _, _ = s.Close() }()
+
+		name := args[0]
+		manager := workspace.NewManagerWithStore(s.GetConfigSnapshot(), s)
+		if err := manager.DeleteWorktree(projectName, name); err != nil {
+			return err
+		}
+		fmt.Printf("Deleted %s/%s\n", projectName, name)
+		return nil
+	},
 }
