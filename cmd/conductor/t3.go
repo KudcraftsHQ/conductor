@@ -123,7 +123,7 @@ external tools can drive a thread without a browser.`,
 			return fmt.Errorf("a message is required (--message)")
 		}
 
-		worktreePath, err := config.WorktreePath(args[0], args[1])
+		worktreePath, err := config.ResolveWorktreePath(args[0], args[1])
 		if err != nil {
 			return err
 		}
@@ -156,16 +156,24 @@ var (
 )
 
 var t3LogsCmd = &cobra.Command{
-	Use:   "logs <project> <worktree>",
+	Use:   "logs [project] [branch]",
 	Short: "Read the dev server logs for a worktree",
 	Long: `Read the dev server logs for a worktree.
 
 The dev server runs in a tmux window rather than in the T3 thread, so that it
-survives T3 Code restarts. This reads that window, which is how an agent
-working in the thread — or hermes — gets at the output.`,
-	Args: cobra.ExactArgs(2),
+survives T3 Code restarts, and so that every thread bound to the worktree reads
+the same server rather than each starting its own. This reads that window,
+which is how an agent working in a thread — or hermes — gets at the output.
+
+With no arguments it reads the dev server for the worktree you are standing in,
+which is what lets a project's t3.json name the command without knowing which
+worktree it will run in.`,
+	Args: cobra.RangeArgs(0, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		project, worktree := args[0], args[1]
+		project, worktree, err := resolveLogTarget(args)
+		if err != nil {
+			return err
+		}
 		if !tmux.WindowExists(project, worktree) {
 			return fmt.Errorf("no dev server window for %s/%s (is the worktree open?)", project, worktree)
 		}
@@ -289,6 +297,34 @@ and frees the ports.`,
 	},
 }
 
+// resolveLogTarget works out which dev server window to read.
+//
+// The window is keyed by project and *branch*, not by worktree name — that is
+// how CreateDevWindow names it — so the inferred form has to resolve the branch
+// rather than the city the worktree is registered under.
+func resolveLogTarget(args []string) (project, branch string, err error) {
+	if len(args) == 2 {
+		return args[0], args[1], nil
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get current directory: %w", err)
+	}
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return "", "", fmt.Errorf("could not load conductor config")
+	}
+	projectName, _, worktree, err := cfg.DetectProject(cwd)
+	if err != nil || worktree == nil {
+		return "", "", fmt.Errorf("not inside a registered worktree — pass the project and branch explicitly")
+	}
+	if len(args) == 1 {
+		return projectName, args[0], nil
+	}
+	return projectName, worktree.Branch, nil
+}
+
 // liveWorktrees returns every non-archived, non-root worktree conductor knows
 // about, as reconcile candidates.
 func liveWorktrees(s *store.Store) ([]t3.Drift, error) {
@@ -300,17 +336,13 @@ func liveWorktrees(s *store.Store) ([]t3.Drift, error) {
 	var out []t3.Drift
 	for projectName, project := range cfg.Projects {
 		for worktreeName, worktree := range project.Worktrees {
-			if worktree.Archived || worktree.IsRoot {
-				continue
-			}
-			path, err := config.WorktreePath(projectName, worktreeName)
-			if err != nil {
+			if worktree.Archived || worktree.IsRoot || worktree.Path == "" {
 				continue
 			}
 			out = append(out, t3.Drift{
 				Project:      projectName,
 				Worktree:     worktreeName,
-				WorktreePath: path,
+				WorktreePath: worktree.Path,
 			})
 		}
 	}
@@ -338,4 +370,5 @@ func init() {
 	t3Cmd.AddCommand(t3TokenCmd)
 	t3Cmd.AddCommand(t3SendCmd)
 	t3Cmd.AddCommand(t3ReconcileCmd)
+	t3Cmd.AddCommand(t3WatchCmd)
 }

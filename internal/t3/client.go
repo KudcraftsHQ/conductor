@@ -257,6 +257,21 @@ func (c *Client) Shell(ctx context.Context) (*ShellSnapshot, error) {
 	return &snapshot, nil
 }
 
+// Snapshot returns the full orchestration snapshot: every thread T3 still
+// holds, archived ones included.
+//
+// The lighter Shell snapshot drops archived threads, which makes a thread that
+// vanished from it ambiguous — archived or deleted, and those mean opposite
+// things to a worktree. This one answers both at once: present and unarchived
+// is live, present and archived holds the worktree open, absent is deleted.
+func (c *Client) Snapshot(ctx context.Context) (*ShellSnapshot, error) {
+	var snapshot ShellSnapshot
+	if err := c.do(ctx, http.MethodGet, "/api/orchestration/snapshot", nil, &snapshot); err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
 // Dispatch submits one orchestration command to the command bus.
 func (c *Client) Dispatch(ctx context.Context, command any) error {
 	return c.do(ctx, http.MethodPost, "/api/orchestration/dispatch", command, nil)

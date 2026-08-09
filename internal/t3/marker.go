@@ -17,23 +17,41 @@ import (
 // thread id so conductor can resolve the thread without a snapshot scan.
 const MarkerFileName = ".conductor-t3-thread"
 
-// WriteMarker records the thread hosting a worktree.
-func WriteMarker(worktreePath, threadID string) error {
-	return os.WriteFile(markerPath(worktreePath), []byte(threadID+"\n"), 0644)
+// WriteMarker records the threads hosting a worktree, one id per line.
+//
+// A worktree can carry several threads at once — T3 reuses an existing worktree
+// when a new thread picks a branch that already has one — so this is a set
+// rather than a single id.
+func WriteMarker(worktreePath string, threadIDs []string) error {
+	var buf strings.Builder
+	for _, id := range threadIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		buf.WriteString(id)
+		buf.WriteString("\n")
+	}
+	return os.WriteFile(markerPath(worktreePath), []byte(buf.String()), 0644)
 }
 
-// ReadMarker returns the thread id recorded for a worktree. The second result
+// ReadMarker returns the thread ids recorded for a worktree. The second result
 // is false when the worktree is not hosted by T3.
-func ReadMarker(worktreePath string) (string, bool) {
+func ReadMarker(worktreePath string) ([]string, bool) {
 	data, err := os.ReadFile(markerPath(worktreePath))
 	if err != nil {
-		return "", false
+		return nil, false
 	}
-	threadID := strings.TrimSpace(string(data))
-	if threadID == "" {
-		return "", false
+	var ids []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if id := strings.TrimSpace(line); id != "" {
+			ids = append(ids, id)
+		}
 	}
-	return threadID, true
+	if len(ids) == 0 {
+		return nil, false
+	}
+	return ids, true
 }
 
 // RemoveMarker clears the marker, so a worktree whose thread conductor closed

@@ -37,25 +37,40 @@ func TestT3WindowName(t *testing.T) {
 	assert.Equal(t, "proj/branch", T3().WindowName("proj", "branch"))
 }
 
+// windowNameConfig registers one worktree at an arbitrary location, which is
+// the whole point: T3 puts the worktrees it creates under its own root, so the
+// name can no longer be recovered from the path's shape.
+func windowNameConfig() *config.Config {
+	return &config.Config{
+		Projects: map[string]*config.Project{
+			"kudtrading": {
+				Path: "/home/u/Projects/kudtrading",
+				Worktrees: map[string]*config.Worktree{
+					"root":   {Path: "/home/u/Projects/kudtrading", Branch: "main", IsRoot: true},
+					"sydney": {Path: "/home/u/.t3/worktrees/kudtrading/feat-x", Branch: "feat-x"},
+				},
+			},
+		},
+	}
+}
+
 func TestWindowNameFromWorktree(t *testing.T) {
-	name, ok := windowNameFromWorktree("/home/u/.conductor", "/home/u/.conductor/kudtrading/sydney")
+	name, ok := windowNameFromWorktree(windowNameConfig(), "/home/u/.t3/worktrees/kudtrading/feat-x")
 	require.True(t, ok)
-	assert.Equal(t, "kudtrading/sydney", name)
+	assert.Equal(t, "kudtrading/feat-x", name)
 }
 
-// Threads bound to worktrees conductor did not create must not appear as
+// Threads bound to worktrees conductor does not know about must not appear as
 // conductor windows, or KillWindow would archive somebody else's work.
-func TestWindowNameFromWorktreeRejectsOutsidePaths(t *testing.T) {
-	_, ok := windowNameFromWorktree("/home/u/.conductor", "/home/u/Projects/elsewhere")
+func TestWindowNameFromWorktreeRejectsUnregisteredPaths(t *testing.T) {
+	_, ok := windowNameFromWorktree(windowNameConfig(), "/home/u/Projects/elsewhere")
 	assert.False(t, ok)
 }
 
-// A path directly under the conductor dir is a project, not a worktree.
-func TestWindowNameFromWorktreeRejectsWrongDepth(t *testing.T) {
-	_, ok := windowNameFromWorktree("/home/u/.conductor", "/home/u/.conductor/kudtrading")
-	assert.False(t, ok)
-
-	_, ok = windowNameFromWorktree("/home/u/.conductor", "/home/u/.conductor/a/b/c")
+// The main checkout is a registered worktree too, but it is not a window: a
+// thread working in the repo root has no conductor worktree to archive.
+func TestWindowNameFromWorktreeRejectsRoot(t *testing.T) {
+	_, ok := windowNameFromWorktree(windowNameConfig(), "/home/u/Projects/kudtrading")
 	assert.False(t, ok)
 }
 

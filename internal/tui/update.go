@@ -189,6 +189,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						statuses, err := m.wsManager.FetchGitStatusForProject(projectName)
 						return GitStatusFetchedMsg{ProjectName: projectName, Statuses: statuses, Err: err}
 					},
+					fetchT3Threads(),
 				)
 			}
 		}
@@ -245,6 +246,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setStatus("PRs refreshed", false)
 		}
+		return m, nil
+
+	case WorktreeHibernatedMsg:
+		if msg.Err != nil {
+			m.setStatus("Hibernate failed: "+msg.Err.Error(), true)
+		} else {
+			m.setStatus(msg.WorktreeName+" hibernated — tree kept, resources released", false)
+		}
+		m.refreshWorktreeList()
+		return m, nil
+
+	case WorktreeWokenMsg:
+		if msg.Err != nil {
+			m.setStatus("Wake failed: "+msg.Err.Error(), true)
+		} else {
+			m.setStatus(msg.WorktreeName+" woken with fresh ports and a rebuilt database", false)
+		}
+		m.refreshWorktreeList()
+		return m, nil
+
+	case T3ThreadsFetchedMsg:
+		// A worktree conductor knows about but T3 does not is simply absent
+		// from the map, and renders as having no threads.
+		m.t3ThreadCounts = msg.Counts
 		return m, nil
 
 	case GitStatusFetchedMsg:
@@ -862,6 +887,52 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.deleteTargetType = "worktree"
 					m.prevView = ViewWorktrees
 					m.currentView = ViewConfirmDelete
+				}
+			}
+		}
+
+	case msg.String() == "H":
+		// Hibernate: release ports, database and tunnel, keep the tree. The
+		// watcher does this on its own once a worktree's threads are all
+		// archived; this is for reclaiming resources without waiting.
+		if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
+			wtName := m.worktreeNames[m.cursor]
+			projectName := m.selectedProject
+			project := m.config.Projects[projectName]
+			if wt := project.Worktrees[wtName]; wt != nil {
+				switch {
+				case wt.IsRoot:
+					m.setStatus("Cannot hibernate the root worktree", true)
+				case wt.Archived:
+					m.setStatus("Worktree is archived — there is nothing left to release", true)
+				case wt.Hibernated:
+					m.setStatus(wtName+" is already hibernated", true)
+				default:
+					m.setStatus("Hibernating "+wtName+"...", false)
+					return m, func() tea.Msg {
+						err := m.wsManager.ReleaseResources(projectName, wtName)
+						return WorktreeHibernatedMsg{ProjectName: projectName, WorktreeName: wtName, Err: err}
+					}
+				}
+			}
+		}
+
+	case msg.String() == "W":
+		// Wake: re-provision a hibernated worktree. New ports and a rebuilt
+		// database — the working tree itself was never touched.
+		if m.cursor >= 0 && m.cursor < len(m.worktreeNames) {
+			wtName := m.worktreeNames[m.cursor]
+			projectName := m.selectedProject
+			project := m.config.Projects[projectName]
+			if wt := project.Worktrees[wtName]; wt != nil {
+				if !wt.Hibernated {
+					m.setStatus(wtName+" is not hibernated", true)
+				} else {
+					m.setStatus("Waking "+wtName+"...", false)
+					return m, func() tea.Msg {
+						err := m.wsManager.Provision(projectName, wtName)
+						return WorktreeWokenMsg{ProjectName: projectName, WorktreeName: wtName, Err: err}
+					}
 				}
 			}
 		}

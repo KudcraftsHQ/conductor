@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/codingagent"
@@ -115,33 +113,41 @@ func (m t3Mux) ListWindowNames() []string {
 		return nil
 	}
 
-	base, err := config.ConductorDir()
-	if err != nil {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
 		return nil
 	}
 
 	var names []string
+	seen := make(map[string]bool)
 	for _, thread := range snapshot.LiveThreadsWithWorktrees() {
-		if name, ok := windowNameFromWorktree(base, thread.Worktree()); ok {
-			names = append(names, name)
+		name, ok := windowNameFromWorktree(cfg, thread.Worktree())
+		if !ok || seen[name] {
+			// Several threads sharing one worktree are one window, not several.
+			continue
 		}
+		seen[name] = true
+		names = append(names, name)
 	}
 	return names
 }
 
-// windowNameFromWorktree turns ~/.conductor/<project>/<branch> back into
-// "project/branch". Worktrees outside the conductor directory are ignored:
-// they belong to threads conductor did not create.
-func windowNameFromWorktree(conductorDir, worktreePath string) (string, bool) {
-	rel, err := filepath.Rel(conductorDir, worktreePath)
-	if err != nil || strings.HasPrefix(rel, "..") {
+// windowNameFromWorktree turns a worktree path back into "project/branch".
+//
+// It used to require the path to sit under ~/.conductor, which was true while
+// conductor created every worktree itself. T3 Code places the ones it creates
+// under its own root, so the registered entry — which records where a worktree
+// actually is — is the only reliable way back. A path conductor does not know
+// about belongs to somebody else's thread and is skipped.
+func windowNameFromWorktree(cfg *config.Config, worktreePath string) (string, bool) {
+	if worktreePath == "" {
 		return "", false
 	}
-	parts := strings.Split(filepath.ToSlash(rel), "/")
-	if len(parts) != 2 {
+	projectName, project, worktree, err := cfg.DetectProject(worktreePath)
+	if err != nil || project == nil || worktree == nil || worktree.IsRoot {
 		return "", false
 	}
-	return parts[0] + "/" + parts[1], true
+	return projectName + "/" + worktree.Branch, true
 }
 
 func (m t3Mux) CreateCodingWindow(project, branch, worktreePath string, agent codingagent.Agent) error {
@@ -175,7 +181,7 @@ func (m t3Mux) createWindow(project, branch, worktreePath string, agent codingag
 	// command line, so they only write a file for agents that need one. T3 runs
 	// the agent through its own provider registry — there is no argv to append
 	// to — so a file is the only channel conductor has, whichever agent it is.
-	if err := codingagent.WriteContextFile(worktreePath, t3AgentPrompt(project, branch)); err != nil {
+	if err := codingagent.WriteContextFile(worktreePath, T3AgentPrompt(project, branch)); err != nil {
 		return fmt.Errorf("failed to write agent context file: %w", err)
 	}
 	_ = agent // The agent only selects wording; T3 decides what actually runs.
@@ -201,7 +207,7 @@ func (m t3Mux) createWindow(project, branch, worktreePath string, agent codingag
 
 	// Mark the worktree as T3-hosted so reconciliation can tell it apart from
 	// worktrees created under tmux or herdr.
-	if err := t3.WriteMarker(worktreePath, threadID); err != nil {
+	if err := t3.WriteMarker(worktreePath, []string{threadID}); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not mark %s as T3-hosted: %v\n", worktreePath, err)
 	}
 
@@ -227,7 +233,7 @@ func (m t3Mux) createWindow(project, branch, worktreePath string, agent codingag
 // archived worktree would hold its ports and keep writing to a tree that is
 // about to be removed.
 func (m t3Mux) KillWindow(project, branch string) error {
-	worktreePath, err := config.WorktreePath(project, branch)
+	worktreePath, err := config.ResolveWorktreePath(project, branch)
 	if err != nil {
 		return err
 	}
@@ -303,7 +309,7 @@ func (t3Mux) TracksAgentStatus() bool { return true }
 
 // findThread resolves a worktree window to its live T3 thread.
 func (m t3Mux) findThread(project, branch string) (*t3.Client, string, error) {
-	worktreePath, err := config.WorktreePath(project, branch)
+	worktreePath, err := config.ResolveWorktreePath(project, branch)
 	if err != nil {
 		return nil, "", err
 	}
@@ -326,33 +332,55 @@ func (m t3Mux) findThread(project, branch string) (*t3.Client, string, error) {
 	return client, thread.ID, nil
 }
 
-// t3AgentPrompt is the system prompt handed to coding agents that read a
-// context file, so they know where the dev server lives.
-func t3AgentPrompt(project, branch string) string {
+// T3AgentPrompt is the system prompt handed to coding agents that read a
+// context file.
+//
+// It is the only channel conductor has to an agent T3 is running: there is no
+// argv to append to, and thread.activity.append is internal to T3 and rejected
+// from outside. Everything an agent could get wrong about this environment —
+// starting a second dev server, hardcoding a port that changes on every wake,
+// working against a database that is still being cloned — has to be said here.
+func T3AgentPrompt(project, branch string) string {
 	window := fmt.Sprintf("%s:%s/%s", tmux.SessionName, project, branch)
 	return fmt.Sprintf(`## Conductor T3 Code Integration
 
-This worktree is managed by conductor:
-- You are the agent session in a T3 Code thread.
-- The dev server runs in a tmux window, not in this thread. It lives in
-  tmux window %q, and survives T3 Code restarts because tmux owns it.
+This worktree is managed by conductor. T3 Code owns its lifecycle; conductor
+owns its ports, database, tunnel and dev server.
 
-### Reading the dev server logs
-The dev server is already running. Do not start a second one.
+### Wait for provisioning before doing anything
+While %s exists in the worktree root, the environment is still
+being built — the dev database is a full clone and takes minutes. T3 starts
+your first turn immediately, without waiting for it, so check before you run
+migrations, seeds or tests:
 
-  conductor t3 logs %s %s              # last 200 lines
-  conductor t3 logs %s %s -n 1000      # more history
-  conductor t3 logs %s %s -f           # follow
+  while [ -f %s ]; do sleep 5; done
+
+### Do not start a dev server
+One is already running, in tmux window %q, shared by every thread bound to this
+worktree. It survives T3 Code restarts because tmux owns it. Starting a second
+one collides on the port.
+
+  conductor t3 logs -f                 # follow it (inferred from the cwd)
+  conductor t3 logs -n 1000            # more history
+  conductor t3 logs %s %s              # explicit
 
 Those wrap tmux, which you can also drive directly:
 
   tmux capture-pane -p -S -200 -t %s   # read output
   tmux send-keys -t %s C-c             # stop the dev server; it reruns itself
 
-Ports are allocated by conductor; run 'conductor status' to see them.`,
+### Never hardcode ports or database names
+Read them from the environment — CONDUCTOR_PORT, CONDUCTOR_PORTS,
+CONDUCTOR_PORT_<LABEL> — or from the .env the setup script writes. Archiving
+every thread on this worktree releases its ports and drops its database;
+unarchiving one rebuilds both, and the new ports are not the old ones. The
+working tree and branch are never touched by that, so your uncommitted work
+survives it.
+
+Run 'conductor status' to see the current allocation.`,
+		config.ProvisioningSentinel,
+		config.ProvisioningSentinel,
 		window,
-		project, branch,
-		project, branch,
 		project, branch,
 		window, window)
 }

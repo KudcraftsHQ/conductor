@@ -36,6 +36,7 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(projectCmd)
 	rootCmd.AddCommand(worktreeCmd)
+	rootCmd.AddCommand(adoptCmd)
 	rootCmd.AddCommand(portsCmd)
 	rootCmd.AddCommand(setupCmd)
 	rootCmd.AddCommand(runCmd)

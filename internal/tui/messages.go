@@ -5,6 +5,7 @@ import (
 
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/session"
+	"github.com/hammashamzah/conductor/internal/t3watch"
 	"github.com/hammashamzah/conductor/internal/workspace"
 )
 
@@ -313,4 +314,26 @@ type SessionRestoredMsg struct {
 // SessionsUpdateMsg is sent by the session tracker when agent sessions change
 type SessionsUpdateMsg struct {
 	Sessions []*session.Session
+}
+
+// T3ThreadsFetchedMsg carries the live and archived thread counts per worktree
+// path, as reported by T3 Code.
+type T3ThreadsFetchedMsg struct {
+	Counts map[string]t3watch.Counts
+}
+
+// WorktreeHibernatedMsg reports the outcome of releasing a worktree's
+// resources while keeping its working tree.
+type WorktreeHibernatedMsg struct {
+	ProjectName  string
+	WorktreeName string
+	Err          error
+}
+
+// WorktreeWokenMsg reports the outcome of re-provisioning a hibernated
+// worktree.
+type WorktreeWokenMsg struct {
+	ProjectName  string
+	WorktreeName string
+	Err          error
 }

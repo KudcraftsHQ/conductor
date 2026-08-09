@@ -54,6 +54,41 @@ func (s *ShellSnapshot) FindThreadByWorktree(worktreePath string) (*Thread, bool
 	return nil, false
 }
 
+// FindThreadsByWorktree returns every live thread bound to worktreePath.
+//
+// One worktree can carry several threads: T3 reuses an existing worktree when a
+// new thread picks a branch that already has one, and its own delete flow only
+// offers to remove a directory once the last thread on it goes. Conductor has
+// to count them the same way or it will tear a worktree down while other
+// threads are still working in it.
+func (s *ShellSnapshot) FindThreadsByWorktree(worktreePath string) []Thread {
+	var out []Thread
+	for i := range s.Threads {
+		t := s.Threads[i]
+		if t.Archived() {
+			continue
+		}
+		if t.Worktree() != "" && pathsEqual(t.Worktree(), worktreePath) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// ThreadIDsByWorktree returns the ids of every thread in the snapshot bound to
+// worktreePath, whatever its state. Callers use it to record the binding, so an
+// archived thread counts: it still holds the worktree open.
+func (s *ShellSnapshot) ThreadIDsByWorktree(worktreePath string) []string {
+	var ids []string
+	for i := range s.Threads {
+		t := s.Threads[i]
+		if t.Worktree() != "" && pathsEqual(t.Worktree(), worktreePath) {
+			ids = append(ids, t.ID)
+		}
+	}
+	return ids
+}
+
 // LiveThreadsWithWorktrees returns every non-archived thread bound to a
 // worktree. The port reconciler uses this to find worktrees whose thread has
 // gone away.
@@ -212,20 +247,24 @@ func (c *Client) CloseWorktree(ctx context.Context, worktreePath string) error {
 		return err
 	}
 
-	thread, ok := snapshot.FindThreadByWorktree(worktreePath)
-	if !ok {
+	threads := snapshot.FindThreadsByWorktree(worktreePath)
+	if len(threads) == 0 {
 		RemoveMarker(worktreePath)
 		return nil // Already closed.
 	}
-	if err := c.ArchiveThread(ctx, thread.ID); err != nil {
-		return err
+	// Every thread on the worktree is archived, not just the first. Leaving one
+	// live would point an agent at a tree that is about to be removed.
+	for _, thread := range threads {
+		if err := c.ArchiveThread(ctx, thread.ID); err != nil {
+			return err
+		}
 	}
 	RemoveMarker(worktreePath)
 
 	// Only remove a project conductor made *for* this worktree. A project
 	// rooted at the main repository belongs to the user and must survive.
 	project, ok := snapshot.FindProjectByRoot(worktreePath)
-	if !ok || project.ID != thread.ProjectID {
+	if !ok || project.ID != threads[0].ProjectID {
 		return nil
 	}
 	if err := c.Dispatch(ctx, ProjectDeleteCommand{

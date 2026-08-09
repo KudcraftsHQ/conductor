@@ -9,10 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func hostedWorktree(t *testing.T, threadID string) string {
+func hostedWorktree(t *testing.T, threadIDs ...string) string {
 	t.Helper()
 	dir := t.TempDir()
-	require.NoError(t, WriteMarker(dir, threadID))
+	require.NoError(t, WriteMarker(dir, threadIDs))
 	return dir
 }
 
@@ -21,11 +21,21 @@ func TestMarkerRoundTrip(t *testing.T) {
 
 	got, ok := ReadMarker(dir)
 	require.True(t, ok)
-	assert.Equal(t, "thread-1", got)
+	assert.Equal(t, []string{"thread-1"}, got)
 	assert.True(t, HasMarker(dir))
 
 	RemoveMarker(dir)
 	assert.False(t, HasMarker(dir))
+}
+
+// A worktree carrying several threads is the normal case once T3 starts reusing
+// worktrees, so the marker has to survive the round trip as a set.
+func TestMarkerHoldsSeveralThreads(t *testing.T) {
+	dir := hostedWorktree(t, "thread-1", "thread-2", "thread-3")
+
+	got, ok := ReadMarker(dir)
+	require.True(t, ok)
+	assert.Equal(t, []string{"thread-1", "thread-2", "thread-3"}, got)
 }
 
 func TestMarkerAbsent(t *testing.T) {
