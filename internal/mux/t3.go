@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/codingagent"
@@ -184,7 +185,7 @@ func (m t3Mux) createWindow(project, branch, worktreePath string, agent codingag
 	// command line, so they only write a file for agents that need one. T3 runs
 	// the agent through its own provider registry — there is no argv to append
 	// to — so a file is the only channel conductor has, whichever agent it is.
-	if err := codingagent.WriteContextFile(worktreePath, T3AgentPrompt(project, branch)); err != nil {
+	if err := codingagent.WriteContextFile(worktreePath, T3AgentPrompt(project, branch, worktreePorts(worktreePath))); err != nil {
 		return fmt.Errorf("failed to write agent context file: %w", err)
 	}
 	_ = agent // The agent only selects wording; T3 decides what actually runs.
@@ -443,6 +444,24 @@ func (m t3Mux) findThread(project, branch string) (*t3.Client, string, error) {
 	return client, thread.ID, nil
 }
 
+// worktreePorts looks up the ports allocated to a worktree, so the context file
+// can name the address rather than describe how to find it.
+//
+// Empty is a fine answer: the prompt says so and points at
+// `conductor t3 dev status`. Guessing a default would be worse than admitting
+// there is nothing allocated yet.
+func worktreePorts(worktreePath string) []int {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return nil
+	}
+	_, _, worktree, err := cfg.DetectProject(worktreePath)
+	if err != nil || worktree == nil {
+		return nil
+	}
+	return worktree.Ports
+}
+
 // readyGate returns the function CreateThread calls before submitting a
 // thread's first turn.
 //
@@ -501,8 +520,17 @@ const readyGateTimeout = 20 * time.Minute
 // this is for. Everything an agent could get wrong about this environment —
 // starting a second dev server, hardcoding a port that changes on every wake,
 // working against a database that is still being cloned — has to be said here.
-func T3AgentPrompt(project, branch string) string {
-	window := fmt.Sprintf("%s:%s/%s", tmux.SessionName, project, branch)
+func T3AgentPrompt(project, branch string, ports []int) string {
+	window := tmux.WindowTarget(project, branch)
+
+	// The address is written in rather than left to be looked up. An agent that
+	// has to run a command to find out where the app is will guess 3000 instead,
+	// and be wrong in a way that looks like the app is broken.
+	address := "run 'conductor t3 dev status' — this worktree had no ports when this file was written"
+	if len(ports) > 0 {
+		address = fmt.Sprintf("http://localhost:%d", ports[0])
+	}
+
 	return fmt.Sprintf(`## Conductor T3 Code Integration
 
 This worktree is managed by conductor. T3 Code owns its lifecycle; conductor
@@ -520,19 +548,75 @@ exits 0. Exit 1 means setup failed and prints the tail of its log; 2 means it
 gave up waiting. Add --for all if you also need the dev server listening.
 Do not poll for a file — readiness is state, not a marker.
 
-### Do not start a dev server
-One is already running, in tmux window %q, shared by every thread bound to this
-worktree. It survives T3 Code restarts because tmux owns it. Starting a second
-one collides on the port.
+### The app is at %s
+That is this worktree's own port, not a shared one. Use it for every request,
+every browser navigation and every E2E base URL.
 
-  conductor t3 logs -f                 # follow it (inferred from the cwd)
-  conductor t3 logs -n 1000            # more history
-  conductor t3 logs %s %s              # explicit
+  conductor t3 dev status              # address, window, and whether it is up
 
-Those wrap tmux, which you can also drive directly:
+If this worktree was hibernated and woken since this file was written, the port
+changed — 'conductor t3 dev status' is always current, this line is not.
 
-  tmux capture-pane -p -S -200 -t %s   # read output
-  tmux send-keys -t %s C-c             # stop the dev server; it reruns itself
+### Do not start a dev server — one is already running
+It lives in tmux, not in your terminal, so that it survives T3 Code restarts and
+is shared by every thread bound to this worktree:
+
+  %s
+
+Starting a second one collides on the port the first is still holding. When
+something goes wrong, restart it rather than working around it:
+
+  conductor t3 dev restart             # interrupt and bring it back; recreates
+                                       # the window if it went missing
+  conductor t3 dev stop                # leave it stopped
+  conductor t3 dev status              # is it running, is the port listening
+
+'restart' is the answer to a wedged server, a stale build, a changed .env, or a
+window that is gone. Do not run 'conductor run' yourself: in your terminal it
+would occupy the turn and hold the port outside tmux, where nothing else can
+reach or restart it.
+
+### Reading the dev server logs
+The server writes to its tmux window; this is how you read it.
+
+  conductor t3 logs -n 200             # recent output (inferred from the cwd)
+  conductor t3 logs -f                 # follow live
+  conductor t3 logs %s %s   # explicit
+
+Read the logs before concluding a request failed — a 500 in the browser and the
+stack trace that caused it are in two different places, and only one of them is
+here.
+
+### E2E runs go through the queue, never straight to Playwright
+This machine runs one browser job at a time, enforced by an OS-level lock. Do
+not run 'npx playwright test' directly, do not launch your own Chromium or
+Puppeteer, do not use --workers > 1 or shards. Submit the job instead:
+
+  e2e-queue worker status              # a worker must be RUNNING for jobs to run
+  e2e-queue enqueue test --label %s \
+    --cwd "$PWD" --env BASE_URL=%s \
+    -- npx playwright test --workers=1
+  e2e-queue jobs --limit 5             # find your job id
+  e2e-queue job <id>                   # its output, exit code and timing
+
+Everything after '--' is an argv array run without a shell, so quote nothing
+for the shell's benefit and expand nothing yourself.
+
+### Capturing what the app looked like
+Screenshots are the proof; a passing exit code is not. Take them inside the
+queued job, where the browser is:
+
+  await page.screenshot({ path: 'e2e-artifacts/<step>.png', fullPage: true })
+
+Write them under e2e-artifacts/ in this worktree so they stay with the branch,
+and report the paths when you are done. If a browser pool is running, the job is
+handed a warm tab instead of launching one — attach to it rather than calling
+chromium.launch():
+
+  e2e-queue browser start --base-url %s
+  chromium.connectOverCDP(process.env.E2E_QUEUE_BROWSER_CDP)
+
+The tab's cookies, storage and page are reset after every job.
 
 ### Never hardcode ports or database names
 Read them from the environment — CONDUCTOR_PORT, CONDUCTOR_PORTS,
@@ -543,7 +627,11 @@ working tree and branch are never touched by that, so your uncommitted work
 survives it.
 
 Run 'conductor status' to see the current allocation.`,
+		address,
 		window,
 		project, branch,
-		window, window)
+		// A label is a display string, but slashes in it read as a path and
+		// invite somebody to treat it as one.
+		strings.ReplaceAll(project+"-"+branch, "/", "-"), address,
+		address)
 }

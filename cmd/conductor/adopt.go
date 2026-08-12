@@ -116,7 +116,7 @@ hibernated worktree is woken by hand.`,
 		// hardcode a port that changes on every wake, and to wait for the
 		// database before running anything against it.
 		if wt, err := manager.GetWorktree(projectName, name); err == nil && wt != nil {
-			if err := codingagent.WriteContextFile(worktreePath, mux.T3AgentPrompt(projectName, wt.Branch)); err != nil {
+			if err := codingagent.WriteContextFile(worktreePath, mux.T3AgentPrompt(projectName, wt.Branch, wt.Ports)); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: could not write the agent context file: %v\n", err)
 			}
 		}

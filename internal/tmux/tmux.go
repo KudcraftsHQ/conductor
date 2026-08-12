@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hammashamzah/conductor/internal/codingagent"
 	"github.com/hammashamzah/conductor/internal/config"
@@ -344,6 +345,75 @@ func WindowExists(project, branch string) bool {
 		}
 	}
 	return false
+}
+
+// WindowTarget is the tmux address of a worktree's window.
+func WindowTarget(project, branch string) string {
+	return fmt.Sprintf("%s:%s", SessionName, WindowName(project, branch))
+}
+
+// CapturePane returns the last n lines of a window's output.
+func CapturePane(target string, lines int) (string, error) {
+	out, err := exec.Command("tmux", "capture-pane", "-p",
+		"-S", fmt.Sprintf("-%d", lines), "-t", target).Output()
+	return string(out), err
+}
+
+// restartPrompt is what DevCommand prints once the dev server has exited and it
+// is waiting on `read` before looping. Restarting means answering that prompt,
+// so it has to be recognised rather than guessed at with a sleep.
+const restartPrompt = "Press Enter to restart"
+
+// StopDevServer interrupts the dev server, leaving its window waiting at the
+// restart prompt. The window itself is not killed: it is shared by every thread
+// bound to the worktree and killing it would take the others' logs with it.
+func StopDevServer(project, branch string) error {
+	if !WindowExists(project, branch) {
+		return fmt.Errorf("no dev server window for %s/%s", project, branch)
+	}
+	return exec.Command("tmux", "send-keys", "-t", WindowTarget(project, branch), "C-c").Run()
+}
+
+// RestartDevServer brings a worktree's dev server back, whatever state it is
+// in, and reports what it had to do.
+//
+// The three cases are genuinely different. A missing window — killed, or lost
+// with the tmux server — needs recreating. A window sitting at the restart
+// prompt only needs Enter. A running server needs interrupting first, and then
+// Enter once the loop has actually reached the prompt: sending it early feeds
+// the keystroke to the dev server instead, which does nothing and leaves the
+// caller believing it restarted.
+func RestartDevServer(project, branch, worktreePath string) (string, error) {
+	if !WindowExists(project, branch) {
+		if err := CreateDevWindow(project, branch, worktreePath); err != nil {
+			return "", err
+		}
+		return "started (the window was missing)", nil
+	}
+
+	target := WindowTarget(project, branch)
+	if out, err := CapturePane(target, 5); err == nil && strings.Contains(out, restartPrompt) {
+		if err := exec.Command("tmux", "send-keys", "-t", target, "Enter").Run(); err != nil {
+			return "", err
+		}
+		return "restarted (it had exited)", nil
+	}
+
+	if err := exec.Command("tmux", "send-keys", "-t", target, "C-c").Run(); err != nil {
+		return "", err
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if out, err := CapturePane(target, 5); err == nil && strings.Contains(out, restartPrompt) {
+			if err := exec.Command("tmux", "send-keys", "-t", target, "Enter").Run(); err != nil {
+				return "", err
+			}
+			return "restarted", nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return "", fmt.Errorf(
+		"interrupted the dev server but it never reached the restart prompt; read it with 'conductor t3 logs'")
 }
 
 // KillWindow kills a tmux window in the conductor session.

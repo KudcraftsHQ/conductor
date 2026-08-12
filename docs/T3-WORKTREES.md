@@ -100,12 +100,24 @@ and survives T3 restarts and updates besides.
 What each thread gets instead is a read-only view: conductor opens a terminal
 running `conductor t3 logs -f` on every thread bound to the worktree.
 
-**So: do not start your own dev server.** One is already running. Read it with:
+**So: do not start your own dev server.** One is already running. Read it, and
+control it, with:
 
 ```bash
 conductor t3 logs -f          # follow, inferred from the working directory
 conductor t3 logs -n 1000     # more history
+
+conductor t3 dev status       # address, window, whether the port is listening
+conductor t3 dev restart      # interrupt and bring it back — recreates the
+                              # window if it is gone
+conductor t3 dev stop         # leave it at the restart prompt
 ```
+
+`restart` is the answer to a wedged server, a stale build or a missing window.
+It knows the three cases apart: no window is recreated, a window already sitting
+at the restart prompt only needs Enter, and a running server is interrupted
+first and then answered once the loop has actually reached the prompt — sending
+Enter early feeds the keystroke to the dev server instead.
 
 The port is discovered by T3's own port scanner (`lsof`), so the preview panel
 finds it without configuration. It appears in the generic "Local" list rather
@@ -209,6 +221,8 @@ repositories with a `main` branch collide on one database.
 | `conductor adopt --bind-only` | Record the thread binding without re-provisioning |
 | `conductor wait` | Block until setup has finished and the database answers |
 | `conductor wait --for all` | …and the dev server is listening |
+| `conductor t3 dev status` | The dev server's address, window and port state |
+| `conductor t3 dev restart` | Restart it, recreating its window if needed |
 | `conductor t3 watch` | Run the reconciler |
 | `conductor t3 watch once --dry-run` | One pass, reporting only |
 | `conductor t3 logs -f` | Follow the shared dev server |

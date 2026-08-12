@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -437,6 +438,143 @@ submitted as the thread's first turn.`,
 	},
 }
 
+// t3DevCmd is the dev server's control surface for an agent working in a
+// thread.
+//
+// The dev server lives in tmux rather than in the thread, so an agent has no
+// process to Ctrl-C and no obvious way back if it stops. Left without one it
+// does the wrong thing — starts a second server, which collides on the port
+// that the first one is still holding. This is the right thing, named.
+var t3DevCmd = &cobra.Command{
+	Use:   "dev",
+	Short: "Control the shared dev server for a worktree",
+	Long: `Control the dev server that conductor runs for a worktree.
+
+The dev server lives in a tmux window rather than in a T3 terminal, so that it
+survives T3 Code restarts and is shared by every thread bound to the worktree.
+That means you never start it yourself — you ask for it here.
+
+  conductor t3 dev status     # is it up, and on what address
+  conductor t3 dev restart    # interrupt and bring it back, or recreate its window
+  conductor t3 dev stop       # leave it at the restart prompt`,
+}
+
+var t3DevStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Report the dev server's window, address and whether it is listening",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		project, worktree, wt, err := currentWorktree()
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Worktree: %s/%s\n", project, worktree)
+		fmt.Printf("Window:   %s\n", tmux.WindowTarget(project, wt.Branch))
+		if url := worktreeURL(wt); url != "" {
+			fmt.Printf("Address:  %s\n", url)
+		}
+
+		if !tmux.WindowExists(project, wt.Branch) {
+			fmt.Println("State:    no window — run 'conductor t3 dev restart' to create one")
+			return nil
+		}
+		state := "running"
+		if out, err := tmux.CapturePane(tmux.WindowTarget(project, wt.Branch), 5); err == nil &&
+			strings.Contains(out, "Press Enter to restart") {
+			state = "stopped, waiting at the restart prompt"
+		}
+		fmt.Printf("State:    %s\n", state)
+
+		if len(wt.Ports) > 0 {
+			listening := "not listening"
+			if portOpen(wt.Ports[0]) {
+				listening = "listening"
+			}
+			fmt.Printf("Port %d:  %s\n", wt.Ports[0], listening)
+		}
+		return nil
+	},
+}
+
+var t3DevRestartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Restart the dev server, recreating its window if it is gone",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		project, _, wt, err := currentWorktree()
+		if err != nil {
+			return err
+		}
+		what, err := tmux.RestartDevServer(project, wt.Branch, wt.Path)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s — follow it with 'conductor t3 logs -f'\n", what)
+		return nil
+	},
+}
+
+var t3DevStopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the dev server, leaving its window at the restart prompt",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		project, _, wt, err := currentWorktree()
+		if err != nil {
+			return err
+		}
+		if err := tmux.StopDevServer(project, wt.Branch); err != nil {
+			return err
+		}
+		fmt.Println("stopped — 'conductor t3 dev restart' brings it back")
+		return nil
+	},
+}
+
+// currentWorktree resolves the worktree the caller is standing in. Every dev
+// command infers rather than taking arguments: an agent runs them from inside
+// the tree it is working in, and asking it to name the worktree is asking it to
+// get the name wrong.
+func currentWorktree() (project, worktree string, wt *config.Worktree, err error) {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return "", "", nil, fmt.Errorf("conductor is not initialised")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", "", nil, err
+	}
+	projectName, proj, found, err := cfg.DetectProject(cwd)
+	if err != nil || found == nil {
+		return "", "", nil, fmt.Errorf("not inside a registered worktree")
+	}
+	for name, candidate := range proj.Worktrees {
+		if candidate == found {
+			return projectName, name, found, nil
+		}
+	}
+	return projectName, "", found, nil
+}
+
+// worktreeURL is where the dev server answers. The port is the worktree's
+// first, which is the one the setup script writes into the project's .env.
+func worktreeURL(wt *config.Worktree) string {
+	if len(wt.Ports) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("http://localhost:%d", wt.Ports[0])
+}
+
+func portOpen(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 var t3ProvidersCmd = &cobra.Command{
 	Use:   "providers",
 	Short: "List the provider instances this T3 build has, and what conductor would pick",
@@ -520,6 +658,10 @@ func init() {
 	t3Cmd.AddCommand(t3TokenCmd)
 	t3Cmd.AddCommand(t3SendCmd)
 	t3Cmd.AddCommand(t3CreateCmd)
+	t3DevCmd.AddCommand(t3DevStatusCmd)
+	t3DevCmd.AddCommand(t3DevRestartCmd)
+	t3DevCmd.AddCommand(t3DevStopCmd)
+	t3Cmd.AddCommand(t3DevCmd)
 	t3Cmd.AddCommand(t3ProvidersCmd)
 	t3Cmd.AddCommand(t3ReconcileCmd)
 	t3Cmd.AddCommand(t3WatchCmd)
