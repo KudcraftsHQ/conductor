@@ -10,7 +10,7 @@
     {
       "name": "dev logs",
       "command": "conductor t3 logs -f",
-      "icon": "terminal"
+      "icon": "debug"
     }
   ]
 }

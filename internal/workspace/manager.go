@@ -83,7 +83,7 @@ func (m *Manager) CreateWorktree(projectName, branch string, portCount int) (str
 	if m.store != nil {
 		_ = m.store.SetWorktreeStatus(projectName, name, config.SetupStatusRunning)
 	} else {
-		worktree.SetupStatus = config.SetupStatusRunning
+		worktree.MarkSetup(config.SetupStatusRunning)
 	}
 
 	setupErr := runSetupSync(project, projectName, name, worktree)
@@ -91,7 +91,7 @@ func (m *Manager) CreateWorktree(projectName, branch string, portCount int) (str
 		if m.store != nil {
 			_ = m.store.SetWorktreeStatus(projectName, name, config.SetupStatusFailed)
 		} else {
-			worktree.SetupStatus = config.SetupStatusFailed
+			worktree.MarkSetup(config.SetupStatusFailed)
 		}
 		// Don't cleanup - worktree was created, just setup failed
 		return name, worktree, fmt.Errorf("setup script failed: %w", setupErr)
@@ -100,7 +100,7 @@ func (m *Manager) CreateWorktree(projectName, branch string, portCount int) (str
 	if m.store != nil {
 		_ = m.store.SetWorktreeStatus(projectName, name, config.SetupStatusDone)
 	} else {
-		worktree.SetupStatus = config.SetupStatusDone
+		worktree.MarkSetup(config.SetupStatusDone)
 	}
 	return name, worktree, nil
 }
@@ -187,7 +187,7 @@ func (m *Manager) RegisterWorktree(projectName, name, branch, worktreePath strin
 
 	// Create worktree entry with "creating" status
 	worktree := config.NewWorktree(worktreePath, branch, false, ports)
-	worktree.SetupStatus = config.SetupStatusCreating
+	worktree.MarkSetup(config.SetupStatusCreating)
 	m.assignDatabase(projectName, project, worktree)
 
 	// Add worktree (use store if available for persistence)
@@ -495,7 +495,7 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 	if m.store != nil {
 		_ = m.store.SetWorktreeStatus(projectName, worktreeName, config.SetupStatusRunning)
 	}
-	worktree.SetupStatus = config.SetupStatusRunning
+	worktree.MarkSetup(config.SetupStatusRunning)
 
 	// Clones the database and runs the project's setup script, which is what
 	// regenerates any .env holding the ports that just changed.
@@ -509,7 +509,7 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 		_ = m.store.SetWorktreeStatus(projectName, worktreeName, status)
 		_ = m.store.WakeWorktree(projectName, worktreeName, worktree.Ports, worktree.DatabaseName, worktree.DatabaseURL)
 	} else {
-		worktree.SetupStatus = status
+		worktree.MarkSetup(status)
 		worktree.Hibernated = false
 		worktree.HibernatedAt = time.Time{}
 	}
@@ -944,14 +944,14 @@ func (m *Manager) RecoverInterruptedStates() int {
 				// Worktree was being created when TUI closed
 				if !WorktreeExists(worktree.Path) {
 					// Directory doesn't exist - creation was interrupted
-					worktree.SetupStatus = config.SetupStatusFailed
+					worktree.MarkSetup(config.SetupStatusFailed)
 					recovered++
 				} else {
 					// Directory exists - check if it's a valid git worktree
 					gitWorktrees, err := GitWorktreeList(project.Path)
 					if err != nil {
 						// Can't verify, mark as failed to be safe
-						worktree.SetupStatus = config.SetupStatusFailed
+						worktree.MarkSetup(config.SetupStatusFailed)
 						recovered++
 						continue
 					}
@@ -967,11 +967,11 @@ func (m *Manager) RecoverInterruptedStates() int {
 
 					if isValidWorktree {
 						// Git worktree exists, but setup never ran - mark as failed so user can retry
-						worktree.SetupStatus = config.SetupStatusFailed
+						worktree.MarkSetup(config.SetupStatusFailed)
 						recovered++
 					} else {
 						// Directory exists but not a valid git worktree - mark as failed
-						worktree.SetupStatus = config.SetupStatusFailed
+						worktree.MarkSetup(config.SetupStatusFailed)
 						recovered++
 					}
 				}
@@ -979,7 +979,7 @@ func (m *Manager) RecoverInterruptedStates() int {
 			case config.SetupStatusRunning:
 				// Setup was running when TUI closed - mark as failed so user can retry
 				// The worktree exists but setup may be incomplete
-				worktree.SetupStatus = config.SetupStatusFailed
+				worktree.MarkSetup(config.SetupStatusFailed)
 				recovered++
 			}
 		}

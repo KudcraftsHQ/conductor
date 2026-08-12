@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -12,6 +13,13 @@ var version = "1.2.0.0"
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
+		// A command that carries its own exit code has already said whatever it
+		// needed to; `conductor wait` distinguishes "failed" from "timed out"
+		// this way, and printing the error again would double the message.
+		var coded exitCoded
+		if errors.As(err, &coded) {
+			os.Exit(coded.code)
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

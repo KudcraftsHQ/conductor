@@ -1,6 +1,9 @@
 package t3
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,13 +29,50 @@ type Project struct {
 
 // Thread is one agent conversation, optionally bound to a worktree.
 type Thread struct {
-	ID           string  `json:"id"`
-	ProjectID    string  `json:"projectId"`
-	Title        string  `json:"title"`
-	Branch       *string `json:"branch"`
-	WorktreePath *string `json:"worktreePath"`
-	ArchivedAt   *string `json:"archivedAt"`
-	DeletedAt    *string `json:"deletedAt"`
+	ID             string          `json:"id"`
+	ProjectID      string          `json:"projectId"`
+	Title          string          `json:"title"`
+	Branch         *string         `json:"branch"`
+	WorktreePath   *string         `json:"worktreePath"`
+	ArchivedAt     *string         `json:"archivedAt"`
+	DeletedAt      *string         `json:"deletedAt"`
+	ModelSelection ModelSelection  `json:"modelSelection"`
+	Session        *ThreadSession  `json:"session"`
+	LatestTurn     json.RawMessage `json:"latestTurn"`
+}
+
+// ThreadSession is the provider session bound to a thread.
+//
+// Status and LastError are the only place a rejected turn shows up. T3 accepts
+// thread.turn.start on the command bus and starts the provider afterwards, so a
+// turn that the provider refuses leaves a thread that looks created and simply
+// never runs. Conductor has to read this to tell the two apart.
+type ThreadSession struct {
+	ThreadID           string  `json:"threadId"`
+	Status             string  `json:"status"`
+	ProviderName       *string `json:"providerName"`
+	ProviderInstanceID string  `json:"providerInstanceId"`
+	ActiveTurnID       *string `json:"activeTurnId"`
+	LastError          *string `json:"lastError"`
+}
+
+// Failed reports whether the session errored, along with the server's reason.
+func (t Thread) Failed() (string, bool) {
+	if t.Session == nil || t.Session.Status != "error" {
+		return "", false
+	}
+	if t.Session.LastError != nil && *t.Session.LastError != "" {
+		return *t.Session.LastError, true
+	}
+	return "the provider session failed without reporting a reason", true
+}
+
+// Started reports whether a turn has actually begun on the thread.
+func (t Thread) Started() bool {
+	if len(t.LatestTurn) > 0 && string(t.LatestTurn) != "null" {
+		return true
+	}
+	return t.Session != nil && t.Session.ActiveTurnID != nil
 }
 
 // Archived reports whether the thread is archived or deleted, which is how a
@@ -50,9 +90,56 @@ func (t Thread) Worktree() string {
 }
 
 // ModelSelection identifies a model on a configured provider instance.
+//
+// Options are the provider's per-model knobs — reasoning effort, context
+// window, fast mode — and they matter as much as the model slug does. Dropping
+// them is not neutral: T3 falls back to the model descriptor's own default,
+// which for every current Claude model is effort "high". A thread conductor
+// created therefore used to think harder (and cost more) than the same model
+// picked by hand in the UI, with nothing in the payload to show why.
 type ModelSelection struct {
-	InstanceID string `json:"instanceId"`
-	Model      string `json:"model"`
+	InstanceID string        `json:"instanceId"`
+	Model      string        `json:"model"`
+	Options    []ModelOption `json:"options,omitempty"`
+}
+
+// ModelOption is one provider option selection. Value is a string for select
+// options ("medium", "1m") and a bool for toggles (fastMode), which is why it
+// is not typed narrower.
+type ModelOption struct {
+	ID    string `json:"id"`
+	Value any    `json:"value"`
+}
+
+// OptionsKey renders the options as a stable string, for comparison and
+// display. Order is preserved rather than sorted: T3 emits them in descriptor
+// order and round-tripping that unchanged keeps payloads diff-clean.
+func (m ModelSelection) OptionsKey() string {
+	if len(m.Options) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(m.Options))
+	for _, option := range m.Options {
+		parts = append(parts, fmt.Sprintf("%s=%v", option.ID, option.Value))
+	}
+	return strings.Join(parts, ",")
+}
+
+// String renders a selection the way CONDUCTOR_T3_MODEL accepts it, so what
+// conductor prints can be pasted straight back in.
+func (m ModelSelection) String() string {
+	base := m.InstanceID + "/" + m.Model
+	if options := m.OptionsKey(); options != "" {
+		return base + "?" + strings.ReplaceAll(options, ",", "&")
+	}
+	return base
+}
+
+// WithoutOptions returns the selection stripped of its options. Options are
+// scoped to a model — "effort=xhigh" on one model is not a value another
+// necessarily offers — so they must not survive a model substitution.
+func (m ModelSelection) WithoutOptions() ModelSelection {
+	return ModelSelection{InstanceID: m.InstanceID, Model: m.Model}
 }
 
 // Runtime modes govern how much the agent may do without asking.

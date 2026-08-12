@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/ready"
 	"github.com/hammashamzah/conductor/internal/tui/styles"
 )
 
@@ -398,9 +399,11 @@ func (m *Model) renderWorktreesTable() string {
 			status = m.spinner.View() + " archiving"
 		} else if wt.Archived {
 			status = "archived"
-		} else if config.IsProvisioning(wt.Path) {
-			// A T3 setup hook is still building this worktree's environment.
-			status = m.spinner.View() + " provisioning"
+		} else if wt.SetupStalled(ready.StaleAfter) {
+			// Setup that claims to be running with nothing running it. Shown
+			// rather than spun on, because a spinner here is a lie that lasts
+			// until somebody re-runs `conductor adopt`.
+			status = "✗ stalled"
 		} else if wt.Hibernated {
 			// Resources released, working tree intact. Unarchiving any of its
 			// threads in T3 — or `conductor adopt` — brings it back.

@@ -115,17 +115,60 @@ carry a per-worktree port — do not set it.
 
 ## Wait for provisioning before you work
 
-`conductor adopt` writes `.conductor-provisioning` into the worktree while it
-sets up, and removes it when finished.
-
-This matters because **T3 starts the thread's first turn immediately after
-launching the setup script, without waiting for it.** A dev database is a full
-clone and takes minutes. An agent that does not check will run migrations
-against a database that does not exist yet.
+**T3 starts the thread's first turn immediately after launching the setup
+script, without waiting for it.** A dev database is a full clone and takes
+minutes. Anything that queries, migrates, seeds or tests has to wait first, or
+it works against a database that does not exist yet.
 
 ```bash
-while [ -f .conductor-provisioning ]; do sleep 5; done
+conductor wait                # setup finished and the database answers
+conductor wait --for all      # and the dev server is listening
+conductor wait --json --timeout 5m
 ```
+
+| Exit | Meaning |
+|---|---|
+| 0 | ready |
+| 1 | setup failed, or was abandoned by a process that died — prints the tail of the setup log |
+| 2 | timed out |
+| 3 | not a conductor worktree |
+
+The dev server is deliberately **not** part of the default: a task whose job is
+to fix a server that will not boot must not deadlock waiting for it to boot.
+
+### How readiness is decided
+
+Not by a marker file. `.conductor-provisioning` used to serve this purpose and
+was removed, because absence meant two different things — "ready" and "nobody
+ever set this up" were the same state, so the check failed open on every path
+that did not happen to write it.
+
+Readiness is derived from the worktree's `setupStatus` in `conductor.json`,
+which every provisioning path writes, together with the pid that owns it
+(`internal/ready`):
+
+| State | Means |
+|---|---|
+| `imminent` | a git worktree of a registered project with no conductor entry yet — T3 has just created it and the hook has not registered it. **Not ready**; this is the window the old file check got wrong |
+| `provisioning` | setup running, with a live process behind it |
+| `stalled` | setup claims to be running but its process is gone, or no process was ever recorded. Terminal — re-run `conductor adopt` |
+| `pending` | setup done, but the database is not answering or the port is not listening |
+| `ready` / `unmanaged` | safe to work |
+
+Because the state is in `conductor.json` rather than in the worktree, it
+survives the provisioner being killed, and a crashed setup is reported as
+stalled instead of hanging forever.
+
+### Conductor holds the first turn
+
+On every path conductor controls — the TUI, `conductor build`, the ClickUp
+dispatcher, `conductor t3 create --prompt` — the thread's first turn is not
+submitted until the worktree is ready. An agent cannot get ahead of work that
+was never dispatched.
+
+The exception is a thread started in **T3's own composer**: T3 launches the hook
+and opens the first turn itself, and conductor never sees it. That path still
+depends on the agent reading its context file and running `conductor wait`.
 
 Ports and database URLs reach your process through the environment
 (`CONDUCTOR_PORT`, `CONDUCTOR_PORTS`, `CONDUCTOR_PORT_<LABEL>`, the project's own
@@ -164,6 +207,8 @@ repositories with a `main` branch collide on one database.
 |---|---|
 | `conductor adopt` | Register and provision an existing worktree directory |
 | `conductor adopt --bind-only` | Record the thread binding without re-provisioning |
+| `conductor wait` | Block until setup has finished and the database answers |
+| `conductor wait --for all` | …and the dev server is listening |
 | `conductor t3 watch` | Run the reconciler |
 | `conductor t3 watch once --dry-run` | One pass, reporting only |
 | `conductor t3 logs -f` | Follow the shared dev server |

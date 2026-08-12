@@ -11,7 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/hammashamzah/conductor/internal/codingagent"
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/t3"
 	"github.com/hammashamzah/conductor/internal/tmux"
@@ -131,7 +133,9 @@ external tools can drive a thread without a browser.`,
 		if err != nil {
 			return err
 		}
-		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+		// Long enough to cover starting a provider session, which the wait below
+		// blocks on; the 30s this used to allow was shorter than a cold start.
+		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 		defer cancel()
 
 		snapshot, err := client.Shell(ctx)
@@ -143,6 +147,12 @@ external tools can drive a thread without a browser.`,
 			return fmt.Errorf("no live T3 thread is bound to %s", worktreePath)
 		}
 		if err := client.StartTurn(ctx, thread.ID, t3SendMessage, ""); err != nil {
+			return err
+		}
+		// Dispatching is not running: the provider session starts afterwards and
+		// reports refusals only on the thread. Reporting "Sent" without checking
+		// is how a thread that never ran looked like a success.
+		if err := client.WaitForTurn(ctx, thread.ID, 45*time.Second); err != nil {
 			return err
 		}
 		fmt.Printf("Sent to %s/thread/%s\n", client.Origin, thread.ID)
@@ -357,6 +367,143 @@ func truncateTitle(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
+var t3CreatePrompt string
+
+var t3CreateCmd = &cobra.Command{
+	Use:   "create <project> <worktree>",
+	Short: "Create the T3 thread for an existing worktree",
+	Long: `Create the T3 Code thread bound to a worktree that already exists.
+
+Provisioning a worktree and opening its thread are two separate steps.
+"conductor worktree create" does the first — git worktree, ports, database —
+and the thread is opened later, when a coding window is created. The TUI,
+"conductor build" and the agent dispatcher all do that, but nothing exposed it
+to a plain shell, so a worktree made with "conductor worktree create" had no
+thread and "conductor t3 send" failed with "no live T3 thread is bound".
+
+This opens that thread through the same code path the coding window uses, so
+both routes produce an identical thread. With --prompt, the prompt is
+submitted as the thread's first turn.`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		projectName, worktreeName := args[0], args[1]
+
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		if cfg == nil {
+			return fmt.Errorf("conductor is not initialised; run 'conductor init'")
+		}
+		project, ok := cfg.GetProject(projectName)
+		if !ok {
+			return fmt.Errorf("unknown project %q", projectName)
+		}
+		worktree, ok := project.Worktrees[worktreeName]
+		if !ok || worktree == nil {
+			return fmt.Errorf("unknown worktree %q in project %q", worktreeName, projectName)
+		}
+		if worktree.Archived {
+			return fmt.Errorf("worktree %q is archived; wake it before opening a thread", worktreeName)
+		}
+		worktreePath, err := config.ResolveWorktreePath(projectName, worktreeName)
+		if err != nil {
+			return err
+		}
+
+		// Always the T3 backend: the command is "conductor t3 create", not a
+		// request for whichever multiplexer the config happens to name.
+		m := mux.T3()
+		if err := m.CreateCodingWindowWithTask(
+			projectName, worktree.Branch, worktreePath, t3CreatePrompt, codingagent.ClaudeCode,
+		); err != nil {
+			return err
+		}
+
+		// Report the thread from the marker the backend just wrote, not from a
+		// fresh snapshot: T3 applies the create asynchronously, so reading the
+		// snapshot here races it and reports "no thread" for one that exists.
+		client, err := t3.New()
+		if err != nil {
+			return err
+		}
+		ids, ok := t3.ReadMarker(worktreePath)
+		if !ok || len(ids) == 0 {
+			return fmt.Errorf("thread created for %s/%s but no marker was written to %s",
+				projectName, worktree.Branch, worktreePath)
+		}
+		fmt.Printf("%s/thread/%s\n", client.Origin, ids[len(ids)-1])
+		return nil
+	},
+}
+
+var t3ProvidersCmd = &cobra.Command{
+	Use:   "providers",
+	Short: "List the provider instances this T3 build has, and what conductor would pick",
+	Long: `List T3's configured provider instances and the model selection conductor
+would use for a new thread.
+
+A thread's model selection names a provider instance, and T3 accepts an instance
+id that its build does not have: the thread is created, looks healthy, and only
+fails when the first turn tries to start — in thread.session.lastError, where
+nothing is looking. From outside it is indistinguishable from a thread that
+ignores programmatic turns.
+
+This is the check for that. An instance marked unusable cannot run a turn, and
+conductor will not create a thread against one.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := t3.New()
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+		defer cancel()
+
+		instances, err := client.ProviderInstances(ctx)
+		if err != nil {
+			return err
+		}
+
+		writer := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
+		fmt.Fprintln(writer, "INSTANCE\tDRIVER\tUSABLE\tSTATUS\tAUTH\tMODELS")
+		for _, instance := range instances {
+			usable := "no"
+			if instance.Usable() {
+				usable = "yes"
+			}
+			models := make([]string, 0, len(instance.Models))
+			for _, model := range instance.Models {
+				models = append(models, model.Slug)
+			}
+			listed := strings.Join(models, ", ")
+			if listed == "" {
+				listed = "-"
+			}
+			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				instance.InstanceID, instance.Driver, usable,
+				instance.Status, instance.Auth.Status, listed)
+		}
+		if err := writer.Flush(); err != nil {
+			return err
+		}
+
+		selection, err := client.ResolveModelSelection(ctx)
+		if err != nil {
+			return fmt.Errorf("\nconductor cannot pick a model: %w", err)
+		}
+		fmt.Printf("\nconductor would create threads on %s\n", selection)
+		if selection.OptionsKey() == "" {
+			fmt.Println("(no provider options set, so T3 applies the model's own defaults — " +
+				"'high' reasoning on every current Claude model)")
+		}
+		if override, ok := t3.ModelSelectionFromEnv(); ok {
+			fmt.Printf("(CONDUCTOR_T3_MODEL requests %s)\n", override)
+		}
+		return nil
+	},
+}
+
 func init() {
 	t3SendCmd.Flags().StringVarP(&t3SendMessage, "message", "m", "", "Message to send to the thread")
 	t3ReconcileCmd.Flags().BoolVar(&t3ReconcileArchive, "archive", false,
@@ -365,10 +512,15 @@ func init() {
 	t3LogsCmd.Flags().IntVarP(&t3LogLines, "lines", "n", 200, "Number of lines of history to read")
 	t3LogsCmd.Flags().BoolVarP(&t3LogFollow, "follow", "f", false, "Follow the output")
 
+	t3CreateCmd.Flags().StringVarP(&t3CreatePrompt, "prompt", "p", "",
+		"Prompt to submit as the thread's first turn")
+
 	t3Cmd.AddCommand(t3StatusCmd)
 	t3Cmd.AddCommand(t3LogsCmd)
 	t3Cmd.AddCommand(t3TokenCmd)
 	t3Cmd.AddCommand(t3SendCmd)
+	t3Cmd.AddCommand(t3CreateCmd)
+	t3Cmd.AddCommand(t3ProvidersCmd)
 	t3Cmd.AddCommand(t3ReconcileCmd)
 	t3Cmd.AddCommand(t3WatchCmd)
 }

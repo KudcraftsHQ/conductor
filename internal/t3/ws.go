@@ -26,6 +26,11 @@ const (
 	MethodTerminalRestart   = "terminal.restart"
 	MethodVcsCreateWorktree = "vcs.createWorktree"
 	MethodVcsRemoveWorktree = "vcs.removeWorktree"
+	// MethodSubscribeServerConfig is a streaming subscription whose first chunk
+	// carries the server config, including the provider instance registry. That
+	// registry has no HTTP equivalent, so this is the only way for conductor to
+	// learn which provider instances a build actually has.
+	MethodSubscribeServerConfig = "subscribeServerConfig"
 )
 
 // wsRequest is Effect's RequestEncoded envelope.
@@ -141,6 +146,80 @@ func (c *Conn) Call(ctx context.Context, method string, payload, out any) error 
 			}
 			if err := json.Unmarshal(msg.Exit.Value, out); err != nil {
 				return fmt.Errorf("failed to decode %s result: %w", method, err)
+			}
+			return nil
+		}
+	}
+}
+
+// CallStream issues a streaming RPC and decodes the first chunk value into out.
+//
+// Call is wrong for a subscription: a subscription's reply is a series of Chunk
+// frames and the Exit frame only arrives when the stream ends, which for a live
+// subscription is never — Call would block until the context expired. This
+// returns as soon as the first value lands, which for T3's subscriptions is the
+// initial snapshot, and leaves the connection to be closed by the caller.
+func (c *Conn) CallStream(ctx context.Context, method string, payload, out any) error {
+	id := c.nextID
+	c.nextID++
+
+	frame := []wsRequest{{
+		Tag:     "Request",
+		ID:      id,
+		Method:  method,
+		Payload: payload,
+		Headers: [][2]string{},
+	}}
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		return fmt.Errorf("failed to encode %s request: %w", method, err)
+	}
+	if err := c.ws.Write(ctx, websocket.MessageText, encoded); err != nil {
+		return fmt.Errorf("failed to send %s: %w", method, err)
+	}
+
+	for {
+		_, data, err := c.ws.Read(ctx)
+		if err != nil {
+			return fmt.Errorf("T3 websocket closed while awaiting %s: %w", method, err)
+		}
+
+		messages, err := decodeFrame(data)
+		if err != nil {
+			return err
+		}
+
+		for _, msg := range messages {
+			if msg.Tag == "Ping" {
+				_ = c.writeRaw(ctx, []byte(`[{"_tag":"Pong"}]`))
+				continue
+			}
+			if !matchesID(msg.RequestID, id) {
+				continue
+			}
+			// An Exit before any chunk means the subscription was refused.
+			if msg.Tag == "Exit" && msg.Exit != nil {
+				if msg.Exit.Tag != "Success" {
+					return fmt.Errorf("T3 %s failed: %s", method, truncate(string(msg.Exit.Cause), 400))
+				}
+				return fmt.Errorf("T3 %s ended without emitting a value", method)
+			}
+			if msg.Tag != "Chunk" || len(msg.Values) == 0 {
+				continue
+			}
+			// Chunk values are an array even when the stream emits one item.
+			var values []json.RawMessage
+			if err := json.Unmarshal(msg.Values, &values); err != nil {
+				return fmt.Errorf("failed to decode %s chunk: %w", method, err)
+			}
+			if len(values) == 0 {
+				continue
+			}
+			if out == nil {
+				return nil
+			}
+			if err := json.Unmarshal(values[0], out); err != nil {
+				return fmt.Errorf("failed to decode %s value: %w", method, err)
 			}
 			return nil
 		}

@@ -7,20 +7,19 @@ import (
 	"time"
 )
 
-// ProvisioningSentinel is written into a worktree while conductor is setting it
-// up and removed when it finishes.
+// ProvisioningSentinel is the file conductor used to write into a worktree
+// while it set it up. Nothing writes it any more — it is kept only so that
+// `conductor adopt` can delete one left by an older build, and so that git can
+// be told to ignore it.
 //
-// T3 Code launches the setup script and starts the thread's first turn straight
-// afterwards, without waiting. A dev database is a full clone and takes
-// minutes, so an agent that does not check this will run migrations against a
-// database that does not exist yet.
+// It was replaced because a marker cannot answer the question it was asked.
+// Only one of the six paths that provision a worktree ever wrote it, it was
+// removed whether setup succeeded or failed, a killed provisioner left it
+// behind forever, and it was created after conductor's own startup — so an
+// agent whose first turn began immediately, which is exactly what T3 does,
+// could check before it existed. Readiness now comes from the worktree's setup
+// status in conductor.json; see internal/ready.
 const ProvisioningSentinel = ".conductor-provisioning"
-
-// IsProvisioning reports whether a worktree is still being set up.
-func IsProvisioning(worktreePath string) bool {
-	_, err := os.Stat(filepath.Join(worktreePath, ProvisioningSentinel))
-	return err == nil
-}
 
 // AcquireLock takes a cross-process lock and returns the function that releases
 // it.

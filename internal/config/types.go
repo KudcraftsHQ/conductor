@@ -1,6 +1,10 @@
 package config
 
-import "time"
+import (
+	"os"
+	"syscall"
+	"time"
+)
 
 // Config represents the global conductor configuration
 type Config struct {
@@ -98,6 +102,65 @@ const (
 	SetupStatusFailed   SetupStatus = "failed"
 )
 
+// InProgress reports whether the status means setup is still happening.
+func (s SetupStatus) InProgress() bool {
+	return s == SetupStatusCreating || s == SetupStatusRunning
+}
+
+// MarkSetup records a setup status together with the identity of the process
+// responsible for it.
+//
+// Every path that provisions a worktree goes through here rather than assigning
+// SetupStatus directly, because a status without an owner cannot be aged out:
+// "running" written by a process that has since been killed is indistinguishable
+// from "running" written a second ago.
+func (w *Worktree) MarkSetup(status SetupStatus) {
+	w.SetupStatus = status
+	if status.InProgress() {
+		w.SetupPID = os.Getpid()
+		w.SetupStartedAt = time.Now()
+		return
+	}
+	w.SetupPID = 0
+	w.SetupStartedAt = time.Time{}
+}
+
+// SetupStalled reports that the worktree claims to be provisioning but nothing
+// is actually provisioning it.
+//
+// Three ways to be sure of that, in descending order of confidence: the
+// recorded process is gone; the recorded start is older than any real setup;
+// or no ownership was recorded at all, which can only mean the status was
+// written by a conductor that predates MarkSetup and has therefore been sitting
+// there since before this binary was installed.
+//
+// The last case is the one worth arguing about. Believing it — waiting on a
+// "running" that nobody owns — is how conductor.json accumulates worktrees that
+// block forever, which is exactly the failure the provisioning sentinel had.
+// Calling it stalled costs a re-run of `conductor adopt`, and says so.
+func (w *Worktree) SetupStalled(maxAge time.Duration) bool {
+	if !w.SetupStatus.InProgress() {
+		return false
+	}
+	if w.SetupPID > 0 {
+		return !processAlive(w.SetupPID)
+	}
+	if !w.SetupStartedAt.IsZero() {
+		return time.Since(w.SetupStartedAt) > maxAge
+	}
+	return true
+}
+
+// processAlive reports whether a pid is a live process. On Unix, FindProcess
+// always succeeds, so the liveness question is only answered by signal 0.
+func processAlive(pid int) bool {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return process.Signal(syscall.Signal(0)) == nil
+}
+
 // ArchiveStatus represents the state of worktree archiving
 type ArchiveStatus string
 
@@ -166,6 +229,15 @@ type Worktree struct {
 	SetupStatus   SetupStatus   `json:"setupStatus,omitempty"`
 	ArchiveStatus ArchiveStatus `json:"archiveStatus,omitempty"`
 	Tunnel        *TunnelState  `json:"tunnel,omitempty"`
+	// SetupPID and SetupStartedAt identify the process that set SetupStatus to
+	// an in-progress value, so a status left behind by a provisioner that was
+	// killed can be told apart from one that is genuinely still working.
+	//
+	// Without them "running" is indefinite: nothing rewrites the status when the
+	// process holding it dies, and anything waiting on readiness would wait
+	// forever. AcquireLock has the same problem and solves it the same way.
+	SetupPID       int       `json:"setupPid,omitempty"`
+	SetupStartedAt time.Time `json:"setupStartedAt,omitempty"`
 	// DatabaseName is the name of the worktree's database (e.g., "myapp-3100")
 	DatabaseName string `json:"databaseName,omitempty"`
 	// DatabaseURL is the full connection string for the worktree's database

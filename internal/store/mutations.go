@@ -127,7 +127,7 @@ func (s *Store) SetWorktreeStatus(projectName, worktreeName string, status confi
 		return fmt.Errorf("worktree '%s' not found", worktreeName)
 	}
 
-	wt.SetupStatus = status
+	wt.MarkSetup(status)
 	s.markDirty()
 	return nil
 }
@@ -446,7 +446,7 @@ func (s *Store) RecoverInterruptedWorktrees() int {
 
 			switch wt.SetupStatus {
 			case config.SetupStatusCreating, config.SetupStatusRunning:
-				wt.SetupStatus = config.SetupStatusFailed
+				wt.MarkSetup(config.SetupStatusFailed)
 				recovered++
 			}
 

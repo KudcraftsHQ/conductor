@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -69,15 +70,14 @@ hibernated worktree is woken by hand.`,
 			return fmt.Errorf("%s is not a conductor project — register it with 'conductor project add' first", repoPath)
 		}
 
-		// The sentinel tells the agent its environment is not ready. T3 starts
-		// the thread's first turn as soon as it launches this script, and a dev
-		// database is a full clone, so without it the agent works against a
-		// database that is still being built.
-		sentinel := filepath.Join(worktreePath, config.ProvisioningSentinel)
-		if err := os.WriteFile(sentinel, []byte(time.Now().Format(time.RFC3339)+"\n"), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not write the provisioning sentinel: %v\n", err)
-		}
-		defer func() { _ = os.Remove(sentinel) }()
+		// Readiness is not signalled by a file any more — it is derived from the
+		// worktree's setup status in conductor.json, which every provisioning
+		// path writes and which survives this process being killed. See
+		// internal/ready. Any sentinel left by an older conductor is cleared so
+		// that a `while [ -f ... ]` loop in an old agent context file does not
+		// spin forever against a marker nothing will ever remove.
+		_ = os.Remove(filepath.Join(worktreePath, config.ProvisioningSentinel))
+		excludeConductorFiles(worktreePath)
 
 		name, registered, err := ensureRegistered(s, projectName, worktreePath, adoptName, adoptPorts)
 		if err != nil {
@@ -209,12 +209,63 @@ func ensureRegistered(s *store.Store, projectName, worktreePath, name string, po
 		// Marks this as a tree conductor provisioned but did not create, which
 		// is what makes it visible to the T3 watcher.
 		worktree.T3Adopted = true
+		// Registered and "creating" have to land in the same write. Readiness is
+		// derived from this status, and a worktree that exists in conductor.json
+		// with no status at all reads as one that predates status tracking —
+		// which is to say, as ready. That gap is a handful of milliseconds wide
+		// and it is exactly the moment T3 opens the first turn in.
+		worktree.MarkSetup(config.SetupStatusCreating)
 		return nil
 	})
 	if err != nil {
 		return "", false, err
 	}
 	return name, true, nil
+}
+
+// excludeConductorFiles hides conductor's own droppings from git.
+//
+// .conductor-t3-thread lives in the worktree root and belongs to conductor, not
+// to the repository, so it has no business in `git status` — and an agent
+// tidying up before a commit will otherwise commit it. This goes in
+// .git/info/exclude rather than .gitignore because the worktree's .gitignore is
+// a tracked file of somebody else's project.
+//
+// Failure is not reported: an unwritable exclude file is untidy, not broken.
+func excludeConductorFiles(worktreePath string) {
+	gitDir, err := exec.Command("git", "-C", worktreePath, "rev-parse", "--git-dir").Output()
+	if err != nil {
+		return
+	}
+	dir := strings.TrimSpace(string(gitDir))
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(worktreePath, dir)
+	}
+	path := filepath.Join(dir, "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return
+	}
+
+	existing, _ := os.ReadFile(path)
+	var missing []string
+	for _, entry := range []string{t3.MarkerFileName, config.ProvisioningSentinel} {
+		if !strings.Contains(string(existing), entry) {
+			missing = append(missing, entry)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer func() { _ = file.Close() }()
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		_, _ = file.WriteString("\n")
+	}
+	_, _ = file.WriteString("\n# conductor\n" + strings.Join(missing, "\n") + "\n")
 }
 
 // findWorktreeByPath looks a worktree up by where it is rather than what it is
