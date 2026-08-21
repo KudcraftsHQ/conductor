@@ -53,12 +53,18 @@ endif
 install: build
 	@echo "Installing $(BINARY_NAME) to ~/.local/bin..."
 	@mkdir -p ~/.local/bin
-	@cp $(BUILD_DIR)/$(BINARY_NAME) ~/.local/bin/$(BINARY_NAME)
-	@chmod +x ~/.local/bin/$(BINARY_NAME)
+	@# Copy alongside and rename, rather than writing over the target. Conductor
+	@# is long-running — a TUI, the agent daemon, a dev window per worktree — and
+	@# copying onto a binary that some process still has mapped fails outright
+	@# with ETXTBSY. Renaming swaps the directory entry instead: new invocations
+	@# get the new build, and the processes holding the old inode keep running.
+	@cp $(BUILD_DIR)/$(BINARY_NAME) ~/.local/bin/.$(BINARY_NAME).new
+	@chmod +x ~/.local/bin/.$(BINARY_NAME).new
 ifeq ($(shell uname),Darwin)
 	@echo "Ad-hoc signing installed binary..."
-	@codesign --force --sign - ~/.local/bin/$(BINARY_NAME)
+	@codesign --force --sign - ~/.local/bin/.$(BINARY_NAME).new
 endif
+	@mv -f ~/.local/bin/.$(BINARY_NAME).new ~/.local/bin/$(BINARY_NAME)
 	@echo "✓ Installed to ~/.local/bin/$(BINARY_NAME)"
 	@echo ""
 	@echo "Make sure ~/.local/bin is in your PATH:"
