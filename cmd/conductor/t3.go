@@ -14,8 +14,10 @@ import (
 
 	"github.com/hammashamzah/conductor/internal/codingagent"
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/github"
 	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/store"
+	"github.com/hammashamzah/conductor/internal/stray"
 	"github.com/hammashamzah/conductor/internal/t3"
 	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/workspace"
@@ -233,20 +235,44 @@ func followPane(ctx context.Context, target string, lines int) error {
 	}
 }
 
-var t3ReconcileArchive bool
+var (
+	t3ReconcileArchive     bool
+	t3ReconcileDev         bool
+	t3ReconcileStopSettled bool
+	t3ReconcileStartActive bool
+	t3ReconcileKillStray   bool
+)
 
 var t3ReconcileCmd = &cobra.Command{
 	Use:   "reconcile",
-	Short: "Find worktrees whose T3 thread has gone away",
-	Long: `Find live worktrees that no longer have a thread in T3 Code.
+	Short: "Bring dev servers and worktrees back in line with T3's threads",
+	Long: `Compare conductor's live worktrees against the threads in T3 Code.
 
-A thread disappears when it is archived or deleted in T3's UI. The worktree, its
-ports, its database and its tunnel all survive that, because they belong to
-conductor rather than to T3.
+T3's threads are the record of what is actually being worked on, and conductor's
+dev servers and worktrees should follow them. Three cases fall out:
 
-By default this only reports. Pass --archive to actually archive the drifted
-worktrees, which runs the archive script, drops the database, stops the tunnel
-and frees the ports.`,
+  active    at least one thread is still unsettled — the dev server should run
+  settled   every thread on the worktree is settled — the dev server should stop
+  drifted   no thread references the worktree at all — it can be archived
+
+Settled is the case that matters in practice. Archiving a thread is rare; the
+usual way to finish a piece of work is to mark it settled and move on, which
+until now left its dev server — api, worker and file watcher — running forever.
+
+By default this only reports.
+
+  --dev            stop the dev servers of settled worktrees, and start any an
+                   active worktree is missing. Reversible: nothing but a server
+                   is touched, and 'conductor t3 dev restart' brings one back.
+  --stop-settled   only the stopping half. This frees memory.
+  --start-active   only the starting half. This spends it — worth separating on
+                   a machine that is already tight, which is why --dev always
+                   stops before it starts.
+  --kill-stray     kill dev servers holding a worktree's port from outside its
+                   tmux window. These are started by agents inside a thread and
+                   are invisible to every other command here.
+  --archive        archive the drifted worktrees. Destructive: runs the archive
+                   script, drops the database, stops the tunnel, frees ports.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := store.Load()
 		if err != nil {
@@ -271,40 +297,183 @@ and frees the ports.`,
 		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 		defer cancel()
 
-		drifted, err := client.Reconcile(ctx, candidates)
+		assessments, err := client.Classify(ctx, candidates)
 		if err != nil {
 			return err
 		}
-		if len(drifted) == 0 {
-			fmt.Printf("In sync: all %d T3-hosted worktree(s) have a live thread.\n", hosted)
+
+		active := t3.InState(assessments, t3.StateActive)
+		settled := t3.InState(assessments, t3.StateSettled)
+		drifted := t3.InState(assessments, t3.StateDrifted)
+
+		// Report only what there is something to do about. Most worktrees are
+		// already in the state their threads imply, and listing every one buries
+		// the few lines the user needs to read — and would keep reporting the
+		// same settled worktrees after their servers had already been stopped,
+		// so the command would never converge on "nothing to do".
+		var stalled []t3.Assessment
+		for _, a := range active {
+			if !tmux.WindowExists(a.Project, a.Branch) || tmux.DevServerStopped(a.Project, a.Branch) {
+				stalled = append(stalled, a)
+			}
+		}
+		var serving []t3.Assessment
+		for _, a := range settled {
+			if tmux.WindowExists(a.Project, a.Branch) && !tmux.DevServerStopped(a.Project, a.Branch) {
+				serving = append(serving, a)
+			}
+		}
+
+		// A worktree whose port answers while its window is stopped has a dev
+		// server conductor did not start and cannot stop. Those are invisible to
+		// every count above, so they have to be found by asking the port.
+		type strayServer struct {
+			t3.Assessment
+			Port int
+			PIDs []int
+		}
+		var strays []strayServer
+		cfg := s.GetConfigSnapshot()
+		for _, a := range assessments {
+			port := worktreePort(cfg, a.Project, a.Worktree)
+			if port == 0 || !portOpen(port) {
+				continue
+			}
+			if tmux.WindowExists(a.Project, a.Branch) && !tmux.DevServerStopped(a.Project, a.Branch) {
+				continue // Its own supervised server is up; the port is meant to answer.
+			}
+			if pids := stray.Listeners(port); len(pids) > 0 {
+				strays = append(strays, strayServer{Assessment: a, Port: port, PIDs: pids})
+			}
+		}
+
+		fmt.Printf("%d T3-hosted worktree(s): %d active, %d settled, %d drifted.\n",
+			hosted, len(active), len(settled), len(drifted))
+
+		if len(serving) > 0 {
+			fmt.Printf("\nSettled but still serving — dev server should stop:\n")
+			for _, a := range serving {
+				fmt.Printf("  %s/%s (%d thread(s))\n    %s\n", a.Project, a.Worktree, a.Threads, a.WorktreePath)
+			}
+		}
+		if len(stalled) > 0 {
+			fmt.Printf("\nActive but not serving — dev server should start:\n")
+			for _, a := range stalled {
+				fmt.Printf("  %s/%s (%d of %d thread(s) settled)\n    %s\n",
+					a.Project, a.Worktree, a.Settled, a.Threads, a.WorktreePath)
+			}
+		}
+		if len(strays) > 0 {
+			fmt.Printf("\nUnsupervised — a server is on the port but not in the window:\n")
+			for _, sv := range strays {
+				fmt.Printf("  %s/%s (%s, port %d, pid %v)\n    %s\n",
+					sv.Project, sv.Worktree, sv.State, sv.Port, sv.PIDs, sv.WorktreePath)
+			}
+		}
+		if len(drifted) > 0 {
+			fmt.Printf("\nDrifted — no thread left, worktree can be archived:\n")
+			for _, a := range drifted {
+				fmt.Printf("  %s/%s\n    %s\n", a.Project, a.Worktree, a.WorktreePath)
+			}
+		}
+
+		if len(serving) == 0 && len(stalled) == 0 && len(drifted) == 0 && len(strays) == 0 {
+			fmt.Println("\nIn sync: nothing to do.")
 			return nil
 		}
 
-		fmt.Printf("%d of %d T3-hosted worktree(s) have no thread:\n\n", len(drifted), hosted)
-		for _, d := range drifted {
-			fmt.Printf("  %s/%s\n    %s\n", d.Project, d.Worktree, d.WorktreePath)
+		if t3ReconcileKillStray {
+			fmt.Println()
+			for _, sv := range strays {
+				n := stray.Kill(sv.PIDs)
+				fmt.Printf("  killed %d process(es) on port %d for %s/%s\n",
+					n, sv.Port, sv.Project, sv.Worktree)
+			}
 		}
 
-		if !t3ReconcileArchive {
-			fmt.Println("\nNothing changed. Re-run with --archive to archive these worktrees.")
-			fmt.Println("Archiving drops each worktree's database and removes it from disk.")
-			return nil
-		}
+		// The two halves are separable because they pull in opposite directions
+		// on a constrained machine: stopping settled servers frees memory,
+		// starting missing ones spends it. Stopping runs first for the same
+		// reason, so a combined pass never peaks above where it started.
+		stopSettled := t3ReconcileDev || t3ReconcileStopSettled
+		startActive := t3ReconcileDev || t3ReconcileStartActive
 
-		fmt.Println()
-		// Archiving mutates config, so it runs inside the store's mutation
-		// wrapper the same way `conductor worktree archive` does.
-		return s.BatchMutate(func(cfg *config.Config) error {
-			manager := workspace.NewManager(cfg)
-			for _, d := range drifted {
-				if err := manager.ArchiveWorktree(d.Project, d.Worktree); err != nil {
-					fmt.Printf("  failed to archive %s/%s: %v\n", d.Project, d.Worktree, err)
+		if stopSettled && len(serving) > 0 {
+			fmt.Println()
+			for _, a := range serving {
+				if !tmux.WindowExists(a.Project, a.Branch) {
 					continue
 				}
-				fmt.Printf("  archived %s/%s\n", d.Project, d.Worktree)
+				if tmux.DevServerStopped(a.Project, a.Branch) {
+					continue
+				}
+				if err := tmux.StopDevServer(a.Project, a.Branch); err != nil {
+					fmt.Printf("  failed to stop %s/%s: %v\n", a.Project, a.Worktree, err)
+					continue
+				}
+				fmt.Printf("  stopped dev server for %s/%s\n", a.Project, a.Worktree)
 			}
-			return nil
-		})
+		}
+
+		if startActive && len(stalled) > 0 {
+			fmt.Println()
+			for _, a := range stalled {
+				what, err := tmux.EnsureDevServer(a.Project, a.Branch, a.WorktreePath)
+				if err != nil {
+					fmt.Printf("  failed to start %s/%s: %v\n", a.Project, a.Worktree, err)
+					continue
+				}
+				fmt.Printf("  %s dev server for %s/%s\n", what, a.Project, a.Worktree)
+			}
+		}
+
+		if len(drifted) > 0 && t3ReconcileArchive {
+			fmt.Println()
+			// Archiving mutates config, so it runs inside the store's mutation
+			// wrapper the same way `conductor worktree archive` does.
+			if err := s.BatchMutate(func(cfg *config.Config) error {
+				manager := workspace.NewManager(cfg)
+				for _, a := range drifted {
+					if err := manager.ArchiveWorktree(a.Project, a.Worktree); err != nil {
+						fmt.Printf("  failed to archive %s/%s: %v\n", a.Project, a.Worktree, err)
+						continue
+					}
+					fmt.Printf("  archived %s/%s\n", a.Project, a.Worktree)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+
+		// Tell the user about exactly the work they have not authorised yet.
+		var todo []string
+		if !stopSettled && len(serving) > 0 {
+			todo = append(todo, "--stop-settled to stop the dev servers of settled worktrees")
+		}
+		if !startActive && len(stalled) > 0 {
+			todo = append(todo, "--start-active to start the dev servers active worktrees are missing")
+		}
+		if !t3ReconcileKillStray && len(strays) > 0 {
+			todo = append(todo, "--kill-stray to stop the unsupervised servers listed above")
+		}
+		if !t3ReconcileArchive && len(drifted) > 0 {
+			todo = append(todo, "--archive to archive the drifted worktrees (drops their databases)")
+		}
+		if len(todo) > 0 {
+			// "Nothing changed" is only true when nothing did. Saying it after a
+			// partial pass — --stop-settled having just stopped ten servers —
+			// tells the user the opposite of what happened.
+			if stopSettled || startActive || t3ReconcileArchive {
+				fmt.Println("\nStill outstanding. Re-run with:")
+			} else {
+				fmt.Println("\nNothing changed. Re-run with:")
+			}
+			for _, line := range todo {
+				fmt.Printf("  %s\n", line)
+			}
+		}
+		return nil
 	},
 }
 
@@ -338,23 +507,34 @@ func resolveLogTarget(args []string) (project, branch string, err error) {
 
 // liveWorktrees returns every non-archived, non-root worktree conductor knows
 // about, as reconcile candidates.
-func liveWorktrees(s *store.Store) ([]t3.Drift, error) {
+func liveWorktrees(s *store.Store) ([]t3.Candidate, error) {
 	cfg := s.GetConfigSnapshot()
 	if cfg == nil {
 		return nil, fmt.Errorf("could not load conductor config")
 	}
 
-	var out []t3.Drift
+	// One gh call per repository, memoised, resolves the PR state that decides
+	// whether a thread has auto-settled on merge. Worktrees with no marker are
+	// skipped first: they are not T3-hosted, so their PR state is never read and
+	// asking for it would be a round trip per legacy worktree.
+	prs := github.NewCache()
+
+	var out []t3.Candidate
 	for projectName, project := range cfg.Projects {
 		for worktreeName, worktree := range project.Worktrees {
 			if worktree.Archived || worktree.IsRoot || worktree.Path == "" {
 				continue
 			}
-			out = append(out, t3.Drift{
+			candidate := t3.Candidate{
 				Project:      projectName,
 				Worktree:     worktreeName,
+				Branch:       worktree.Branch,
 				WorktreePath: worktree.Path,
-			})
+			}
+			if t3.HasMarker(worktree.Path) {
+				candidate.ChangeRequest = prs.StateFor(worktree.Path, worktree.Branch)
+			}
+			out = append(out, candidate)
 		}
 	}
 	return out, nil
@@ -566,6 +746,22 @@ func worktreeURL(wt *config.Worktree) string {
 	return fmt.Sprintf("http://localhost:%d", wt.Ports[0])
 }
 
+// worktreePort returns the first port conductor allocated to a worktree, or 0.
+func worktreePort(cfg *config.Config, project, worktree string) int {
+	if cfg == nil {
+		return 0
+	}
+	p, ok := cfg.Projects[project]
+	if !ok {
+		return 0
+	}
+	wt, ok := p.Worktrees[worktree]
+	if !ok || len(wt.Ports) == 0 {
+		return 0
+	}
+	return wt.Ports[0]
+}
+
 func portOpen(port int) bool {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
 	if err != nil {
@@ -644,6 +840,14 @@ conductor will not create a thread against one.`,
 
 func init() {
 	t3SendCmd.Flags().StringVarP(&t3SendMessage, "message", "m", "", "Message to send to the thread")
+	t3ReconcileCmd.Flags().BoolVar(&t3ReconcileDev, "dev", false,
+		"Stop the dev servers of settled worktrees and start those an active worktree is missing")
+	t3ReconcileCmd.Flags().BoolVar(&t3ReconcileStopSettled, "stop-settled", false,
+		"Stop the dev servers of settled worktrees, and nothing else")
+	t3ReconcileCmd.Flags().BoolVar(&t3ReconcileStartActive, "start-active", false,
+		"Start the dev servers that active worktrees are missing, and nothing else")
+	t3ReconcileCmd.Flags().BoolVar(&t3ReconcileKillStray, "kill-stray", false,
+		"Kill dev servers holding a worktree's port from outside its tmux window")
 	t3ReconcileCmd.Flags().BoolVar(&t3ReconcileArchive, "archive", false,
 		"Archive the drifted worktrees (destructive: drops databases, removes worktrees)")
 
