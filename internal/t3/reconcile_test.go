@@ -54,16 +54,16 @@ func TestMarkerEmptyFileIsAbsent(t *testing.T) {
 // marker, so they must never be reported as drift. Without this filter every
 // legacy worktree looks archived and `--archive` would destroy all of them.
 func TestReconcileIgnoresUnmarkedWorktrees(t *testing.T) {
-	legacy := Drift{Project: "old", Worktree: "one", WorktreePath: t.TempDir()}
+	legacy := Candidate{Project: "old", Worktree: "one", WorktreePath: t.TempDir()}
 
 	client := &Client{}
-	drifted, err := client.Reconcile(t.Context(), []Drift{legacy})
+	drifted, err := client.Reconcile(t.Context(), []Candidate{legacy})
 	require.NoError(t, err)
 	assert.Empty(t, drifted, "an unmarked worktree is not T3-hosted and cannot have drifted")
 }
 
 func TestCountHosted(t *testing.T) {
-	worktrees := []Drift{
+	worktrees := []Candidate{
 		{WorktreePath: hostedWorktree(t, "a")},
 		{WorktreePath: t.TempDir()},
 		{WorktreePath: hostedWorktree(t, "b")},
@@ -71,7 +71,221 @@ func TestCountHosted(t *testing.T) {
 	assert.Equal(t, 2, CountHosted(worktrees))
 }
 
+func str(s string) *string { return &s }
+
+// settled builds a thread the way the server actually projects one: a
+// `thread.settle` writes settledOverride AND settledAt together, and every one
+// of the 46 settled threads in the live snapshot carried both. A fixture with a
+// bare settledAt does not occur, and asserting on it would test a state T3
+// cannot produce.
+func settledThread(id, path string) Thread {
+	return Thread{
+		ID:              id,
+		WorktreePath:    &path,
+		SettledAt:       str("2026-08-20T02:00:00Z"),
+		SettledOverride: str(SettledOverrideSettled),
+	}
+}
+
+// The bug this whole change exists to fix: T3 records a finished thread by
+// setting settledAt, not by archiving it. Reading only archivedAt reported every
+// settled worktree as active and left its dev server running forever.
+func TestThreadSettled(t *testing.T) {
+	assert.False(t, Thread{}.Settled(), "a fresh thread is not settled")
+	assert.True(t, Thread{SettledAt: str("2026-08-20T02:00:00Z")}.Settled())
+
+	// An override is authoritative in both directions, so a thread the user has
+	// deliberately reopened stays active despite its stale settledAt.
+	reopened := Thread{
+		SettledAt:       str("2026-08-20T02:00:00Z"),
+		SettledOverride: str(SettledOverrideActive),
+	}
+	assert.False(t, reopened.Settled(), "an explicit active override reopens the thread")
+
+	forced := Thread{SettledOverride: str(SettledOverrideSettled)}
+	assert.True(t, forced.Settled(), "an explicit settled override needs no timestamp")
+
+	// Settled and archived are different things and must stay so: a settled
+	// worktree keeps its database, an archived one does not.
+	settled := settledThread("done", "/tmp/x")
+	assert.False(t, settled.Archived(), "settling is not archiving")
+	assert.True(t, settled.Done(SettleOptions{}))
+}
+
+// classifyWith runs the decision against a snapshot of the given threads.
+func classifyWith(t *testing.T, threads []Thread, worktrees []Candidate) []Assessment {
+	t.Helper()
+	return ClassifySnapshot(&ShellSnapshot{Threads: threads}, worktrees)
+}
+
+func TestClassifySortsWorktreesByThreadState(t *testing.T) {
+	activePath := hostedWorktree(t, "live")
+	settledPath := hostedWorktree(t, "done")
+	driftedPath := hostedWorktree(t, "gone")
+
+	threads := []Thread{
+		{ID: "live", WorktreePath: &activePath},
+		settledThread("done", settledPath),
+		{ID: "gone", WorktreePath: &driftedPath, ArchivedAt: str("2026-08-20T02:00:00Z")},
+	}
+	got := classifyWith(t, threads, []Candidate{
+		{Worktree: "active", WorktreePath: activePath},
+		{Worktree: "settled", WorktreePath: settledPath},
+		{Worktree: "drifted", WorktreePath: driftedPath},
+	})
+
+	require.Len(t, got, 3)
+	assert.Equal(t, StateActive, got[0].State)
+	assert.Equal(t, StateSettled, got[1].State)
+	assert.Equal(t, StateDrifted, got[2].State,
+		"an archived thread releases its worktree, which is what makes it drifted")
+}
+
+// The case that would cause real damage: T3 reuses a worktree for a new thread
+// on the same branch, so one finished piece of work says nothing about the
+// others. Stopping the shared dev server here breaks the threads still running.
+func TestClassifyKeepsWorktreeActiveWhileAnyThreadIsUnsettled(t *testing.T) {
+	path := hostedWorktree(t, "one", "two")
+	threads := []Thread{
+		settledThread("one", path),
+		{ID: "two", WorktreePath: &path},
+	}
+
+	got := classifyWith(t, threads, []Candidate{{Worktree: "shared", WorktreePath: path}})
+
+	require.Len(t, got, 1)
+	assert.Equal(t, StateActive, got[0].State)
+	assert.Equal(t, 2, got[0].Threads)
+	assert.Equal(t, 1, got[0].Settled, "the counts explain the verdict to the user")
+}
+
+func TestClassifySettlesOnlyWhenEveryThreadIs(t *testing.T) {
+	path := hostedWorktree(t, "one", "two")
+	threads := []Thread{
+		settledThread("one", path),
+		{ID: "two", WorktreePath: &path, SettledOverride: str(SettledOverrideSettled)},
+	}
+
+	got := classifyWith(t, threads, []Candidate{{Worktree: "shared", WorktreePath: path}})
+
+	require.Len(t, got, 1)
+	assert.Equal(t, StateSettled, got[0].State)
+	assert.Equal(t, 2, got[0].Settled)
+}
+
+// A settled worktree must never be offered for archiving: the user finished the
+// work but kept the tree, and its database is still theirs.
+func TestReconcileDoesNotReportSettledWorktreesAsDrift(t *testing.T) {
+	path := hostedWorktree(t, "done")
+	threads := []Thread{settledThread("done", path)}
+
+	got := ClassifySnapshot(&ShellSnapshot{Threads: threads},
+		[]Candidate{{Worktree: "settled", WorktreePath: path}})
+
+	require.Len(t, got, 1)
+	assert.NotEqual(t, StateDrifted, got[0].State,
+		"settling stops the dev server; it does not drop the database")
+	assert.Empty(t, InState(got, StateDrifted))
+}
+
+func TestInState(t *testing.T) {
+	assessments := []Assessment{
+		{Candidate: Candidate{Worktree: "a"}, State: StateActive},
+		{Candidate: Candidate{Worktree: "b"}, State: StateSettled},
+		{Candidate: Candidate{Worktree: "c"}, State: StateSettled},
+	}
+	assert.Len(t, InState(assessments, StateSettled), 2)
+	assert.Len(t, InState(assessments, StateDrifted), 0)
+}
+
 func TestNormalizePath(t *testing.T) {
 	assert.Equal(t, normalizePath("/a/b/"), normalizePath("/a/b"))
 	assert.Equal(t, normalizePath("/a/./b"), normalizePath("/a/b"))
+}
+
+// merged is the settle options T3's sidebar defaults to.
+func merged(state string) SettleOptions {
+	return SettleOptions{ChangeRequest: state, AutoSettleOnMerge: true}
+}
+
+// The bug behind the bug: T3 stamps settledAt only on an explicit settle, but
+// its sidebar *derives* settled-ness and auto-settles a thread whose PR merged.
+// Reading settledAt alone reported eleven finished worktrees as active and left
+// four dev servers running, while the UI showed every one of them settled.
+func TestEffectiveSettledAutoSettlesOnMergedPR(t *testing.T) {
+	thread := Thread{} // settledAt nil, no override — what the API actually returns
+	assert.False(t, thread.Settled(), "the raw field says active, which is what misled conductor")
+	assert.True(t, thread.EffectiveSettled(merged(PRStateMerged)),
+		"a merged PR settles the thread, exactly as the sidebar shows it")
+}
+
+func TestEffectiveSettledHonoursAutoSettleOnMergeOff(t *testing.T) {
+	off := SettleOptions{ChangeRequest: PRStateMerged, AutoSettleOnMerge: false}
+	assert.False(t, Thread{}.EffectiveSettled(off))
+}
+
+// An open PR is unfinished business no matter how quiet the thread is, and a
+// closed one is as final as a merge.
+func TestEffectiveSettledPRStates(t *testing.T) {
+	assert.False(t, Thread{}.EffectiveSettled(merged(PRStateOpen)))
+	assert.False(t, Thread{}.EffectiveSettled(merged(PRStateDraft)))
+	assert.True(t, Thread{}.EffectiveSettled(merged(PRStateClosed)))
+	assert.False(t, Thread{}.EffectiveSettled(merged("")), "no PR, no auto-settle")
+}
+
+// Blockers outrank everything, including an explicit settle: work waiting on a
+// human must keep its dev server, or answering the prompt lands on a dead port.
+func TestEffectiveSettledBlockersBeatEverything(t *testing.T) {
+	for _, blocked := range []Thread{
+		{HasPendingApprovals: true, SettledOverride: str(SettledOverrideSettled)},
+		{HasPendingUserInput: true, SettledOverride: str(SettledOverrideSettled)},
+		{Session: &ThreadSession{Status: "running"}, SettledOverride: str(SettledOverrideSettled)},
+		{Session: &ThreadSession{Status: "starting"}},
+	} {
+		assert.False(t, blocked.EffectiveSettled(merged(PRStateMerged)),
+			"a blocked thread stays active however final its PR is")
+	}
+}
+
+// The explicit ruling outranks the PR in both directions.
+func TestEffectiveSettledOverrideBeatsPR(t *testing.T) {
+	pinned := Thread{SettledOverride: str(SettledOverrideActive)}
+	assert.False(t, pinned.EffectiveSettled(merged(PRStateMerged)),
+		"the keep-active pin survives a merge")
+
+	done := Thread{SettledOverride: str(SettledOverrideSettled)}
+	assert.True(t, done.EffectiveSettled(merged(PRStateOpen)),
+		"an explicit settle wins over an open PR")
+}
+
+// A stopped session is not a blocker — that is the ordinary state of a finished
+// thread, and treating it as active would settle nothing.
+func TestEffectiveSettledStoppedSessionIsNotABlocker(t *testing.T) {
+	thread := Thread{Session: &ThreadSession{Status: "stopped"}}
+	assert.True(t, thread.EffectiveSettled(merged(PRStateMerged)))
+}
+
+// Classification runs through the merge rule, so a worktree whose branch merged
+// is settled even with settledAt null on every thread.
+func TestClassifySettlesMergedWorktree(t *testing.T) {
+	path := hostedWorktree(t, "one")
+	threads := []Thread{{ID: "one", WorktreePath: &path}}
+
+	got := ClassifySnapshot(&ShellSnapshot{Threads: threads},
+		[]Candidate{{Worktree: "merged", WorktreePath: path, ChangeRequest: PRStateMerged}})
+
+	require.Len(t, got, 1)
+	assert.Equal(t, StateSettled, got[0].State)
+}
+
+// ...and the same worktree with an open PR stays active.
+func TestClassifyKeepsOpenPRActive(t *testing.T) {
+	path := hostedWorktree(t, "one")
+	threads := []Thread{{ID: "one", WorktreePath: &path}}
+
+	got := ClassifySnapshot(&ShellSnapshot{Threads: threads},
+		[]Candidate{{Worktree: "reviewing", WorktreePath: path, ChangeRequest: PRStateOpen}})
+
+	require.Len(t, got, 1)
+	assert.Equal(t, StateActive, got[0].State)
 }
