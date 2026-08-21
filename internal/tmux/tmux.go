@@ -69,7 +69,17 @@ func SessionExists() bool {
 
 // DevCommand keeps a dev server pane alive: it reruns `conductor run` when the
 // server exits, and offers a shell prompt in between.
-const DevCommand = `trap '' INT; while true; do conductor run; ec=$?; echo ''; if [ $ec -eq 130 ]; then echo 'Dev server stopped. Press Enter to restart or type command...'; else echo 'Dev server exited. Press Enter to restart or type command...'; fi; read -r cmd; [ -n "$cmd" ] && eval "$cmd" || continue; done`
+//
+// It ignores TERM as well as INT, and that is load-bearing rather than
+// belt-and-braces. A dev script commonly cleans up after itself with a process
+// group kill — kudtrading's is `trap 'kill 0' EXIT INT TERM` — and `kill 0`
+// signals *the whole group*, which includes this supervising shell, because
+// `conductor run` does not put its child in a group of its own. Trapping only
+// INT left the supervisor dying of the resulting SIGTERM every time the server
+// stopped, taking the window, its scrollback and the restart prompt with it. The
+// window then had to be recreated rather than resumed, which is exactly what the
+// prompt exists to avoid.
+const DevCommand = `trap '' INT TERM; while true; do conductor run; ec=$?; echo ''; if [ $ec -eq 130 ]; then echo 'Dev server stopped. Press Enter to restart or type command...'; else echo 'Dev server exited. Press Enter to restart or type command...'; fi; read -r cmd; [ -n "$cmd" ] && eval "$cmd" || continue; done`
 
 // EnsureSession creates the detached conductor session if it does not exist.
 //
@@ -414,6 +424,37 @@ func RestartDevServer(project, branch, worktreePath string) (string, error) {
 	}
 	return "", fmt.Errorf(
 		"interrupted the dev server but it never reached the restart prompt; read it with 'conductor t3 logs'")
+}
+
+// DevServerStopped reports whether a worktree's dev window is sitting at the
+// restart prompt rather than running a server.
+func DevServerStopped(project, branch string) bool {
+	out, err := CapturePane(WindowTarget(project, branch), 5)
+	return err == nil && strings.Contains(out, restartPrompt)
+}
+
+// EnsureDevServer brings a worktree's dev server up if it is not already, and
+// reports what it had to do.
+//
+// This is deliberately not RestartDevServer. Restarting a healthy server is not
+// a harmless way to guarantee one is running: it drops every connection, throws
+// away the accumulated log the user may be reading, and costs a full rebuild.
+// Reconciling many worktrees at once turns that from a nuisance into an outage,
+// so the running case has to be a no-op.
+func EnsureDevServer(project, branch, worktreePath string) (string, error) {
+	if !WindowExists(project, branch) {
+		if err := CreateDevWindow(project, branch, worktreePath); err != nil {
+			return "", err
+		}
+		return "started (the window was missing)", nil
+	}
+	if !DevServerStopped(project, branch) {
+		return "already running", nil
+	}
+	if err := exec.Command("tmux", "send-keys", "-t", WindowTarget(project, branch), "Enter").Run(); err != nil {
+		return "", err
+	}
+	return "started", nil
 }
 
 // KillWindow kills a tmux window in the conductor session.
