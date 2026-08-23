@@ -9,39 +9,72 @@ import (
 func TestGenerateRemoteDBName(t *testing.T) {
 	tests := []struct {
 		name         string
+		projectName  string
 		worktreeName string
 		expected     string
 	}{
 		{
 			name:         "simple lowercase",
+			projectName:  "facemap",
 			worktreeName: "tokyo",
 			expected:     "dev_tokyo",
 		},
 		{
 			name:         "with hyphen",
+			projectName:  "facemap",
 			worktreeName: "new-york",
 			expected:     "dev_new_york",
 		},
 		{
 			name:         "uppercase converted",
+			projectName:  "facemap",
 			worktreeName: "Paris",
 			expected:     "dev_paris",
 		},
 		{
 			name:         "with underscore",
+			projectName:  "facemap",
 			worktreeName: "san_francisco",
 			expected:     "dev_san_francisco",
 		},
 		{
 			name:         "special chars removed",
+			projectName:  "facemap",
 			worktreeName: "city@123!",
 			expected:     "dev_city123",
+		},
+		{
+			// Every project's root worktree is called "root", and they all
+			// share one dev server, so the name has to carry the project.
+			name:         "root is qualified by project",
+			projectName:  "facemap",
+			worktreeName: "root",
+			expected:     "dev_facemap_root",
+		},
+		{
+			name:         "root project name is sanitized too",
+			projectName:  "abat-payment-backend",
+			worktreeName: "root",
+			expected:     "dev_abat_payment_backend_root",
+		},
+		{
+			name:         "root without a project name falls back",
+			projectName:  "",
+			worktreeName: "root",
+			expected:     "dev_root",
+		},
+		{
+			// A city called "rooted" is not a root worktree.
+			name:         "only an exact root match is qualified",
+			projectName:  "facemap",
+			worktreeName: "rooted",
+			expected:     "dev_rooted",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := GenerateRemoteDBName(tt.worktreeName)
+			result := GenerateRemoteDBName(tt.projectName, tt.worktreeName)
 			assert.Equal(t, tt.expected, result)
 		})
 	}

@@ -173,7 +173,7 @@ func (m *Manager) IsRemoteMode(cfg *DatabaseConfig) bool {
 }
 
 // RemoteCloneForWorktree creates a database on the remote server for a worktree via SSH
-func (m *Manager) RemoteCloneForWorktree(ctx context.Context, cfg *DatabaseConfig, worktreeName string, progress ProgressFunc) (string, error) {
+func (m *Manager) RemoteCloneForWorktree(ctx context.Context, cfg *DatabaseConfig, projectName, worktreeName string, progress ProgressFunc) (string, error) {
 	if cfg.SSHHost == "" {
 		return "", fmt.Errorf("remote mode requires sshHost to be configured")
 	}
@@ -181,7 +181,7 @@ func (m *Manager) RemoteCloneForWorktree(ctx context.Context, cfg *DatabaseConfi
 		return "", fmt.Errorf("remote mode requires cloneUrl and devUrl to be configured")
 	}
 
-	dbName := GenerateRemoteDBName(worktreeName)
+	dbName := GenerateRemoteDBName(projectName, worktreeName)
 
 	err := RemoteCloneForWorktree(ctx, cfg.SSHHost, cfg.CloneURL, cfg.DevURL, dbName, cfg.ExcludeTables, progress)
 	if err != nil {
@@ -192,7 +192,7 @@ func (m *Manager) RemoteCloneForWorktree(ctx context.Context, cfg *DatabaseConfi
 }
 
 // RemoteCleanupWorktree drops a remote worktree database via SSH
-func (m *Manager) RemoteCleanupWorktree(ctx context.Context, cfg *DatabaseConfig, worktreeName string) error {
+func (m *Manager) RemoteCleanupWorktree(ctx context.Context, cfg *DatabaseConfig, projectName, worktreeName string) error {
 	if cfg.SSHHost == "" {
 		return fmt.Errorf("remote mode requires sshHost to be configured")
 	}
@@ -200,12 +200,12 @@ func (m *Manager) RemoteCleanupWorktree(ctx context.Context, cfg *DatabaseConfig
 		return fmt.Errorf("remote mode requires devUrl to be configured")
 	}
 
-	dbName := GenerateRemoteDBName(worktreeName)
+	dbName := GenerateRemoteDBName(projectName, worktreeName)
 	return RemoteDropDatabase(ctx, cfg.SSHHost, cfg.DevURL, dbName)
 }
 
 // RemoteDBExists checks if a remote worktree database exists via SSH
-func (m *Manager) RemoteDBExists(ctx context.Context, cfg *DatabaseConfig, worktreeName string) (bool, error) {
+func (m *Manager) RemoteDBExists(ctx context.Context, cfg *DatabaseConfig, projectName, worktreeName string) (bool, error) {
 	if cfg.SSHHost == "" {
 		return false, fmt.Errorf("remote mode requires sshHost to be configured")
 	}
@@ -213,12 +213,12 @@ func (m *Manager) RemoteDBExists(ctx context.Context, cfg *DatabaseConfig, workt
 		return false, fmt.Errorf("remote mode requires devUrl to be configured")
 	}
 
-	dbName := GenerateRemoteDBName(worktreeName)
+	dbName := GenerateRemoteDBName(projectName, worktreeName)
 	return RemoteDBExists(ctx, cfg.SSHHost, cfg.DevURL, dbName)
 }
 
 // BuildRemoteWorktreeURL builds the connection URL for a remote worktree database
-func (m *Manager) BuildRemoteWorktreeURL(cfg *DatabaseConfig, worktreeName string) string {
-	dbName := GenerateRemoteDBName(worktreeName)
+func (m *Manager) BuildRemoteWorktreeURL(cfg *DatabaseConfig, projectName, worktreeName string) string {
+	dbName := GenerateRemoteDBName(projectName, worktreeName)
 	return BuildRemoteWorktreeURL(cfg.DevURLExternal, cfg.DevURL, dbName)
 }

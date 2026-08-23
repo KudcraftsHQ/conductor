@@ -369,10 +369,31 @@ func isValidIdentifier(s string) bool {
 	return true
 }
 
-// GenerateRemoteDBName generates a database name for remote mode
-// Format: dev_{worktree}
-func GenerateRemoteDBName(worktreeName string) string {
-	// Sanitize worktree name for use in database name
+// GenerateRemoteDBName generates a database name for remote mode.
+// Format: dev_{worktree}, or dev_{project}_root for a root worktree.
+//
+// Every project's remote dev databases share one server, so these names have to
+// be unique across all of them. City names already are — the allocator never
+// hands the same city to two projects — but every project's root worktree is
+// called "root", so an unqualified dev_root would be a name several projects
+// each believe they own. Cloning drops the target first, so the second project
+// to provision its root would destroy the first's database. Qualify roots by
+// project; leave city names alone so existing databases keep their names.
+func GenerateRemoteDBName(projectName, worktreeName string) string {
+	safe := sanitizeDBNamePart(worktreeName)
+
+	if safe == "root" {
+		if project := sanitizeDBNamePart(projectName); project != "" {
+			return "dev_" + project + "_root"
+		}
+	}
+
+	return "dev_" + safe
+}
+
+// sanitizeDBNamePart reduces a name to the lowercase characters that are safe
+// unquoted in a database name, mapping hyphens to underscores.
+func sanitizeDBNamePart(name string) string {
 	safe := strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
 			return r
@@ -381,9 +402,9 @@ func GenerateRemoteDBName(worktreeName string) string {
 			return '_'
 		}
 		return -1
-	}, worktreeName)
+	}, name)
 
-	return "dev_" + strings.ToLower(safe)
+	return strings.ToLower(safe)
 }
 
 // BuildRemoteWorktreeURL builds the full connection URL for a remote worktree database

@@ -187,7 +187,7 @@ func (sm *SetupManager) RunSetupAsync(
 					}
 				}
 
-				dbName, dbURL, err := cloneWorktreeDBRemote(context.Background(), project.Database, worktreeName, progress)
+				dbName, dbURL, err := cloneWorktreeDBRemote(context.Background(), project.Database, projectName, worktreeName, progress)
 				if err != nil {
 					errMsg := fmt.Sprintf("Warning: remote database clone failed: %v\n", err)
 					sm.mu.Lock()
@@ -488,7 +488,7 @@ func runSetupSync(project *config.Project, projectName, worktreeName string, wor
 				}
 			}
 
-			dbName, dbURL, err := cloneWorktreeDBRemote(context.Background(), project.Database, worktreeName, progress)
+			dbName, dbURL, err := cloneWorktreeDBRemote(context.Background(), project.Database, projectName, worktreeName, progress)
 			if err != nil {
 				warnMsg := fmt.Sprintf("Warning: remote database clone failed: %v\n", err)
 				fmt.Print(warnMsg)
@@ -599,7 +599,7 @@ func cloneWorktreeDB(localURL, dbName, projectName, conductorDir string) error {
 }
 
 // cloneWorktreeDBRemote clones the source database to a worktree database on the remote server via SSH
-func cloneWorktreeDBRemote(ctx context.Context, cfg *config.DatabaseConfig, worktreeName string, progress func(string)) (string, string, error) {
+func cloneWorktreeDBRemote(ctx context.Context, cfg *config.DatabaseConfig, projectName, worktreeName string, progress func(string)) (string, string, error) {
 	if cfg.SSHHost == "" {
 		return "", "", fmt.Errorf("remote mode requires sshHost to be configured")
 	}
@@ -607,7 +607,7 @@ func cloneWorktreeDBRemote(ctx context.Context, cfg *config.DatabaseConfig, work
 		return "", "", fmt.Errorf("remote mode requires cloneUrl and devUrl to be configured")
 	}
 
-	dbName := database.GenerateRemoteDBName(worktreeName)
+	dbName := database.GenerateRemoteDBName(projectName, worktreeName)
 
 	err := database.RemoteCloneForWorktree(ctx, cfg.SSHHost, cfg.CloneURL, cfg.DevURL, dbName, cfg.ExcludeTables, progress)
 	if err != nil {
