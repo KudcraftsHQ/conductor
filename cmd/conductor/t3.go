@@ -650,8 +650,7 @@ var t3DevStatusCmd = &cobra.Command{
 			return nil
 		}
 		state := "running"
-		if out, err := tmux.CapturePane(tmux.WindowTarget(project, wt.Branch), 5); err == nil &&
-			strings.Contains(out, "Press Enter to restart") {
+		if tmux.DevServerStopped(project, wt.Branch) {
 			state = "stopped, waiting at the restart prompt"
 		}
 		fmt.Printf("State:    %s\n", state)
