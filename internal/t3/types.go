@@ -60,14 +60,6 @@ const (
 	SettledOverrideActive  = "active"
 )
 
-// Change request states, as conductor's github package normalises them.
-const (
-	PRStateOpen   = "open"
-	PRStateMerged = "merged"
-	PRStateClosed = "closed"
-	PRStateDraft  = "draft"
-)
-
 // ThreadSession is the provider session bound to a thread.
 //
 // Status and LastError are the only place a rejected turn shows up. T3 accepts
@@ -108,21 +100,35 @@ func (t Thread) Archived() bool {
 	return t.ArchivedAt != nil || t.DeletedAt != nil
 }
 
-// SettleOptions are the inputs T3's sidebar resolves settled-ness against.
-type SettleOptions struct {
-	// ChangeRequest is the state of the pull request for the thread's branch —
-	// "open", "merged", "closed" or "draft" — or "" when there is none.
-	ChangeRequest string
-	// AutoSettleOnMerge mirrors T3's sidebarAutoSettleOnMerge, default true.
-	AutoSettleOnMerge bool
-}
-
-// Settled reports whether a thread carries an explicit settled ruling.
+// Settled reports whether T3 considers this thread finished.
 //
-// This is only the override arm of the real rule. It exists because the server
-// stamps settledAt *only* on an explicit `thread.settle`, so it answers a much
-// narrower question than the sidebar does. Prefer EffectiveSettled.
+// The answer is the server's, not ours. Until T3 0.0.38 settling was derived in
+// the client — packages/client-runtime/src/state/threadSettled.ts exported
+// effectiveSettled(), and conductor carried a hand port of it plus a gh-backed
+// PR lookup so it could reach the same verdict about a merged branch.
+//
+// Upstream f32f9a2f4 ("fix(server): settle threads server-side") moved that
+// policy into ThreadSettlementReactor and deleted effectiveSettled() outright.
+// The server now stamps settledAt and settledOverride itself, including the
+// auto-settle-on-merge and inactivity arms conductor could only approximate. So
+// the port is gone: reading the projected fields is both simpler and correct by
+// construction, and it costs no gh round-trips.
+//
+// The one thing kept on this side is the activity guard below. It is not a
+// duplicate of T3's policy — the server already refuses to *auto*-settle a
+// thread that is running or blocked on a human — but an explicit settle can
+// still land on a thread that is mid-turn, and conductor acts on this verdict by
+// stopping a dev server. Pulling the server out from under a running session, or
+// from under someone about to answer an approval prompt, is worse than leaving
+// it up a while longer.
 func (t Thread) Settled() bool {
+	if t.HasPendingApprovals || t.HasPendingUserInput {
+		return false
+	}
+	if t.Session != nil && (t.Session.Status == "starting" || t.Session.Status == "running") {
+		return false
+	}
+
 	if t.SettledOverride != nil {
 		switch *t.SettledOverride {
 		case SettledOverrideSettled:
@@ -134,61 +140,10 @@ func (t Thread) Settled() bool {
 	return t.SettledAt != nil
 }
 
-// EffectiveSettled reports whether T3's sidebar would show this thread as
-// settled. It is a port of effectiveSettled() in
-// packages/client-runtime/src/state/threadSettled.ts, and the order of the
-// clauses is load-bearing.
-//
-// Reading settledAt alone — which conductor did first — answers the wrong
-// question. T3 stamps that field only on an explicit settle, while the sidebar
-// *derives* settled-ness: a merged PR settles a thread, and so does inactivity.
-// That is why 11 worktrees showed as settled in the UI while the API reported
-// settledAt: null for every one of them, and their dev servers ran on.
-//
-// The inactivity arm is deliberately not implemented. T3's autoSettleAfterDays
-// (default 3) lives in browser localStorage where conductor cannot read it, and
-// tearing a worktree down for being quiet is a stronger claim than tearing one
-// down for being merged. Conductor settles on merge only; a thread that is
-// merely idle stays active here even though the sidebar may have settled it.
-func (t Thread) EffectiveSettled(o SettleOptions) bool {
-	// Blocked work stays active even when explicitly settled: something is
-	// waiting on a human, and its dev server has to be there when they answer.
-	if t.HasPendingApprovals || t.HasPendingUserInput {
-		return false
-	}
-	if t.Session != nil && (t.Session.Status == "starting" || t.Session.Status == "running") {
-		return false
-	}
-
-	// Past the blockers the explicit ruling wins, in both directions.
-	if t.SettledOverride != nil {
-		switch *t.SettledOverride {
-		case SettledOverrideSettled:
-			return true
-		case SettledOverrideActive:
-			return false
-		}
-	}
-
-	switch o.ChangeRequest {
-	case PRStateMerged:
-		return o.AutoSettleOnMerge
-	case PRStateClosed:
-		// A closed PR settles regardless of the merge setting: the work was
-		// abandoned, which is at least as final as merging it.
-		return true
-	case PRStateOpen, PRStateDraft:
-		// An open PR is unfinished business however quiet the thread has been.
-		// Review takes days, and the reviewer may well need the server up.
-		return false
-	}
-	return false
-}
-
 // Done reports whether a thread has stopped holding its worktree open, either
 // because it is finished or because it is gone.
-func (t Thread) Done(o SettleOptions) bool {
-	return t.Archived() || t.EffectiveSettled(o)
+func (t Thread) Done() bool {
+	return t.Archived() || t.Settled()
 }
 
 // Worktree returns the thread's worktree path, or "" when it has none.

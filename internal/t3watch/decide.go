@@ -14,6 +14,12 @@
 // Archiving is therefore reversible and deleting is not, which matches what T3
 // itself does: its server only stops sessions and closes terminals on archive,
 // and touches no files.
+//
+// Inside the active state there is a second, cheaper axis: settling. Marking a
+// thread settled is how work is usually finished — far more often than
+// archiving — so an active worktree whose every live thread is settled has its
+// dev server stopped, and unsettling any of them starts it again. Only the
+// server is touched; ports and database stay allocated.
 package t3watch
 
 import (
@@ -38,6 +44,19 @@ const (
 	ActionTeardown Action = "teardown"
 )
 
+// DevWant is what a worktree's dev server should be doing.
+type DevWant string
+
+const (
+	// DevKeep means the decider has no opinion: the worktree is hibernated,
+	// being woken or torn down, or settling has not outlasted its debounce.
+	DevKeep DevWant = ""
+	// DevRun means at least one live thread is unsettled.
+	DevRun DevWant = "run"
+	// DevStop means every live thread has been settled for the debounce.
+	DevStop DevWant = "stop"
+)
+
 // Worktree is the watcher's view of one registered worktree.
 type Worktree struct {
 	Project string
@@ -51,6 +70,9 @@ type Worktree struct {
 	Archived     bool
 	IsRoot       bool
 	KnownThreads []string
+	// Ports are the worktree's allocated ports. Nothing but its own supervised
+	// server should listen on them, which is how a stray is recognised.
+	Ports []int
 }
 
 // Key identifies a worktree across ticks.
@@ -67,6 +89,8 @@ type Decision struct {
 	Threads []string
 	Live    int
 	Archive int
+	// Dev is what the dev server should be doing, independent of Action.
+	Dev DevWant
 }
 
 // Clock lets tests drive the debounce without sleeping.
@@ -86,19 +110,26 @@ type Decider struct {
 	// worktree of that repository arriving as a deletion at once. Past this
 	// count the watcher does nothing and says so, and the operator decides.
 	MaxTeardowns int
+	// SettleDebounce is how long every live thread must stay settled before
+	// the dev server stops. Settling and unsettling in quick succession should
+	// not cost a rebuild.
+	SettleDebounce time.Duration
 	// Now defaults to time.Now.
 	Now Clock
 
 	zeroLiveSince map[string]time.Time
+	settledSince  map[string]time.Time
 }
 
 // NewDecider returns a Decider with the given debounce and teardown cap.
 func NewDecider(debounce time.Duration, maxTeardowns int) *Decider {
 	return &Decider{
-		Debounce:      debounce,
-		MaxTeardowns:  maxTeardowns,
-		Now:           time.Now,
-		zeroLiveSince: make(map[string]time.Time),
+		Debounce:       debounce,
+		MaxTeardowns:   maxTeardowns,
+		SettleDebounce: DefaultSettleDebounce,
+		Now:            time.Now,
+		zeroLiveSince:  make(map[string]time.Time),
+		settledSince:   make(map[string]time.Time),
 	}
 }
 
@@ -118,8 +149,12 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 	if d.zeroLiveSince == nil {
 		d.zeroLiveSince = make(map[string]time.Time)
 	}
+	if d.settledSince == nil {
+		d.settledSince = make(map[string]time.Time)
+	}
 	now := d.now()
 	live, archived := indexThreads(snapshot)
+	unsettled := countUnsettled(snapshot)
 
 	decisions := make([]Decision, 0, len(worktrees))
 	teardowns := 0
@@ -149,16 +184,22 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 			// Every thread that ever held this worktree is gone from T3
 			// altogether, which only happens by deletion.
 			delete(d.zeroLiveSince, key)
+			delete(d.settledSince, key)
 			decision.Action = ActionTeardown
 			teardowns++
 
 		case len(liveIDs) > 0:
 			delete(d.zeroLiveSince, key)
 			if worktree.Hibernated {
+				// Waking provisions the dev server itself.
+				delete(d.settledSince, key)
 				decision.Action = ActionWake
+				break
 			}
+			decision.Dev = d.devWant(key, unsettled[key], now)
 
 		default: // Only archived threads remain.
+			delete(d.settledSince, key)
 			if worktree.Hibernated {
 				break // Already asleep.
 			}
@@ -186,6 +227,40 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 	}
 
 	return decisions
+}
+
+// devWant decides a live worktree's dev server. Starting is immediate — someone
+// is about to use it — while stopping waits out SettleDebounce.
+func (d *Decider) devWant(key string, unsettled int, now time.Time) DevWant {
+	if unsettled > 0 {
+		delete(d.settledSince, key)
+		return DevRun
+	}
+	since, seen := d.settledSince[key]
+	if !seen {
+		d.settledSince[key] = now
+		since = now
+	}
+	if now.Sub(since) >= d.SettleDebounce {
+		return DevStop
+	}
+	return DevKeep
+}
+
+// countUnsettled counts, per worktree path, the live threads still in progress.
+func countUnsettled(snapshot *t3.ShellSnapshot) map[string]int {
+	out := make(map[string]int)
+	if snapshot == nil {
+		return out
+	}
+	for _, thread := range snapshot.Threads {
+		path := thread.Worktree()
+		if path == "" || thread.Archived() || thread.Settled() {
+			continue
+		}
+		out[normalize(path)]++
+	}
+	return out
 }
 
 // Counts is how many threads a worktree currently carries.

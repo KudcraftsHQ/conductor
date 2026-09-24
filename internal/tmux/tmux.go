@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -374,6 +375,93 @@ func CapturePane(target string, lines int) (string, error) {
 // so it has to be recognised rather than guessed at with a sleep.
 const restartPrompt = "Press Enter to restart"
 
+// devServerIdle reports whether a window is sitting at its restart prompt with
+// nothing running under it.
+//
+// Reading the prompt off the end of the pane is the direct evidence, but it is
+// not durable. The dev script's own children outlive the process conductor
+// waits on — kudtrading prints one "Shutting down workers" line per worker as it
+// goes — and they keep writing to the same pane after the supervisor has echoed
+// its prompt, pushing the line that matters arbitrarily far up the scrollback.
+// What the prompt *means* is that the supervisor is blocked on `read` with no
+// child of its own, and that survives the noise.
+func devServerIdle(target string) bool {
+	if out, err := CapturePane(target, 5); err == nil && strings.Contains(out, restartPrompt) {
+		return true
+	}
+	pid := devPanePID(target)
+	return pid > 0 && !paneBusy(pid)
+}
+
+// devPanePID returns the pid of the shell supervising a window's dev server.
+//
+// The supervisor does not always have the window to itself: when conductor
+// opens the coding window itself, the agent sits in a second pane on the left.
+// The supervisor titles its pane "dev", so ask for that by name; with a single
+// pane there is nothing to choose between.
+func devPanePID(target string) int {
+	out, err := exec.Command("tmux", "list-panes", "-t", target,
+		"-F", "#{pane_title}\t#{pane_pid}").Output()
+	if err != nil {
+		return 0
+	}
+	return parseDevPane(string(out))
+}
+
+// parseDevPane reads `list-panes -F '#{pane_title}\t#{pane_pid}'` output. The
+// titled pane wins if there is one; a lone pane is the supervisor whatever it
+// is called.
+func parseDevPane(out string) int {
+	only, dev, panes := 0, 0, 0
+	for _, line := range strings.Split(out, "\n") {
+		title, pidText, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(pidText))
+		if err != nil || pid <= 1 {
+			continue
+		}
+		panes++
+		only = pid
+		if title == "dev" {
+			dev = pid
+		}
+	}
+	if panes == 1 {
+		return only
+	}
+	return dev
+}
+
+// paneBusy reports whether anything is running under a pane's shell. A failed
+// probe counts as busy: it is a claim that a server has stopped which makes the
+// callers send Enter into whatever is on the other end.
+func paneBusy(shellPID int) bool {
+	out, err := exec.Command("ps", "-eo", "pid=,ppid=").Output()
+	if err != nil {
+		return true
+	}
+	return hasChild(string(out), shellPID)
+}
+
+// hasChild reads `ps -eo pid=,ppid=`. Only a direct child is asked for, which is
+// enough: the loop spawns `conductor run` itself, so while a server is up there
+// is one, and while the supervisor waits at the prompt there is not.
+func hasChild(out string, pid int) bool {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err == nil && ppid == pid {
+			return true
+		}
+	}
+	return false
+}
+
 // StopDevServer interrupts the dev server, leaving its window waiting at the
 // restart prompt. The window itself is not killed: it is shared by every thread
 // bound to the worktree and killing it would take the others' logs with it.
@@ -402,7 +490,7 @@ func RestartDevServer(project, branch, worktreePath string) (string, error) {
 	}
 
 	target := WindowTarget(project, branch)
-	if out, err := CapturePane(target, 5); err == nil && strings.Contains(out, restartPrompt) {
+	if devServerIdle(target) {
 		if err := exec.Command("tmux", "send-keys", "-t", target, "Enter").Run(); err != nil {
 			return "", err
 		}
@@ -414,7 +502,7 @@ func RestartDevServer(project, branch, worktreePath string) (string, error) {
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		if out, err := CapturePane(target, 5); err == nil && strings.Contains(out, restartPrompt) {
+		if devServerIdle(target) {
 			if err := exec.Command("tmux", "send-keys", "-t", target, "Enter").Run(); err != nil {
 				return "", err
 			}
@@ -429,8 +517,7 @@ func RestartDevServer(project, branch, worktreePath string) (string, error) {
 // DevServerStopped reports whether a worktree's dev window is sitting at the
 // restart prompt rather than running a server.
 func DevServerStopped(project, branch string) bool {
-	out, err := CapturePane(WindowTarget(project, branch), 5)
-	return err == nil && strings.Contains(out, restartPrompt)
+	return devServerIdle(WindowTarget(project, branch))
 }
 
 // EnsureDevServer brings a worktree's dev server up if it is not already, and

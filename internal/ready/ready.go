@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -364,8 +365,13 @@ func pingDatabase(url string) error {
 }
 
 // portListening reports whether anything accepts a connection on the port.
+//
+// The host is "localhost" rather than 127.0.0.1 so that both loopback families
+// are tried: Vite 8 binds [::1] only, and probing the IPv4 address alone
+// reported a healthy dev server as down — which made `conductor wait --for all`
+// time out on a worktree whose app was up and serving.
 func portListening(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("localhost", strconv.Itoa(port)), 2*time.Second)
 	if err != nil {
 		return false
 	}

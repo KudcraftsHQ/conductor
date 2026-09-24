@@ -16,6 +16,7 @@ import (
 var (
 	t3WatchInterval     time.Duration
 	t3WatchDebounce     time.Duration
+	t3WatchSettle       time.Duration
 	t3WatchMaxTeardowns int
 	t3WatchDryRun       bool
 )
@@ -35,6 +36,11 @@ var t3WatchCmd = &cobra.Command{
   only archived threads      → hibernated  (resources released, tree kept)
   no threads at all          → gone        (tree removed, entry dropped)
 
+Within active, the dev server follows settling: it runs while any live thread
+is unsettled, and stops once every one has stayed settled for --settle-debounce.
+Unsettling a thread starts it again. The server always lives in the worktree's
+tmux window; one an agent started by hand on the worktree's port is killed.
+
 Archiving a thread is reversible: unarchiving one wakes the worktree with fresh
 ports and a rebuilt database, and the working tree was never touched. Deleting
 every thread on a worktree removes it — but never its branch, so commits
@@ -53,6 +59,7 @@ survive a deletion made by mistake.`,
 		watcher.Interval = t3WatchInterval
 		watcher.DryRun = t3WatchDryRun
 		watcher.SetDebounce(t3WatchDebounce)
+		watcher.SetSettleDebounce(t3WatchSettle)
 		watcher.SetMaxTeardowns(t3WatchMaxTeardowns)
 
 		if err := watcher.Start(); err != nil {
@@ -96,6 +103,7 @@ var t3WatchOnceCmd = &cobra.Command{
 		}
 		watcher.DryRun = t3WatchDryRun
 		watcher.SetDebounce(t3WatchDebounce)
+		watcher.SetSettleDebounce(t3WatchSettle)
 		watcher.SetMaxTeardowns(t3WatchMaxTeardowns)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -111,12 +119,18 @@ func init() {
 		"How long a worktree must have no live thread before it hibernates")
 	t3WatchCmd.Flags().IntVar(&t3WatchMaxTeardowns, "max-teardowns", t3watch.DefaultMaxTeardowns,
 		"Refuse to remove more than this many worktrees in one pass")
+	t3WatchCmd.Flags().DurationVar(&t3WatchSettle, "settle-debounce", t3watch.DefaultSettleDebounce,
+		"How long every thread on a worktree must stay settled before its dev server stops")
 	t3WatchCmd.Flags().BoolVar(&t3WatchDryRun, "dry-run", false, "Report what would change without changing it")
 
 	t3WatchOnceCmd.Flags().DurationVar(&t3WatchDebounce, "debounce", t3watch.DefaultDebounce,
 		"How long a worktree must have no live thread before it hibernates")
 	t3WatchOnceCmd.Flags().IntVar(&t3WatchMaxTeardowns, "max-teardowns", t3watch.DefaultMaxTeardowns,
 		"Refuse to remove more than this many worktrees in one pass")
+	// A single pass has no earlier tick to have started the clock, so it acts
+	// on settled worktrees straight away unless told otherwise.
+	t3WatchOnceCmd.Flags().DurationVar(&t3WatchSettle, "settle-debounce", 0,
+		"How long every thread on a worktree must stay settled before its dev server stops")
 	t3WatchOnceCmd.Flags().BoolVar(&t3WatchDryRun, "dry-run", false, "Report what would change without changing it")
 
 	t3WatchCmd.AddCommand(t3WatchOnceCmd)

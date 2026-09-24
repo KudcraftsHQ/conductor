@@ -16,11 +16,6 @@ type Candidate struct {
 	Worktree     string
 	Branch       string
 	WorktreePath string
-	// ChangeRequest is the state of this branch's pull request — "open",
-	// "merged", "closed", "draft" — or "" when there is none. Supplied by the
-	// caller because fetching it means shelling out to gh, which this package
-	// stays clear of so it remains testable without a network.
-	ChangeRequest string
 }
 
 // State is what T3's threads say should be true of a worktree.
@@ -30,8 +25,9 @@ const (
 	// StateActive: at least one thread is still working here. The dev server
 	// should be running.
 	StateActive State = iota
-	// StateSettled: every thread bound to this worktree is settled, whether by an
-	// explicit ruling or because its PR merged. The work is finished but the
+	// StateSettled: every thread bound to this worktree is settled — T3's own
+	// ruling, which covers an explicit settle as well as its auto-settle on a
+	// merged PR or inactivity. The work is finished but the
 	// worktree is deliberately still around. Stop the dev server; leave the
 	// worktree, its branch and its database alone.
 	StateSettled
@@ -106,13 +102,6 @@ func (c *Client) Classify(ctx context.Context, worktrees []Candidate) ([]Assessm
 // tested against a snapshot without a server. It assumes its callers have
 // already filtered to T3-hosted worktrees.
 func ClassifySnapshot(snapshot *ShellSnapshot, hosted []Candidate) []Assessment {
-	// Index the caller's PR states by worktree path, so the thread loop below
-	// can resolve settled-ness the way T3's sidebar does.
-	crByPath := make(map[string]string, len(hosted))
-	for _, w := range hosted {
-		crByPath[normalizePath(w.WorktreePath)] = w.ChangeRequest
-	}
-
 	// Count live threads per worktree, and how many of them are settled. An
 	// archived thread is not counted at all: it has released the worktree, which
 	// is exactly what makes a worktree drifted once they all have.
@@ -129,10 +118,7 @@ func ClassifySnapshot(snapshot *ShellSnapshot, hosted []Candidate) []Assessment 
 			byPath[path] = t
 		}
 		t.total++
-		if thread.EffectiveSettled(SettleOptions{
-			ChangeRequest:     crByPath[path],
-			AutoSettleOnMerge: true,
-		}) {
+		if thread.Settled() {
 			t.settled++
 		}
 	}

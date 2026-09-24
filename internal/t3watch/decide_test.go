@@ -222,3 +222,84 @@ func TestPathComparisonToleratesTrailingSeparator(t *testing.T) {
 
 	assert.Equal(t, ActionNone, only(t, decider(time.Now()).Decide([]Worktree{hosted("a")}, snapshot)).Action)
 }
+
+func settledThread(id string) t3.Thread {
+	th := thread(id, wtPath, nil, nil)
+	th.SettledAt = at("2026-09-24T00:00:00Z")
+	return th
+}
+
+func TestUnsettledThreadWantsDevServer(t *testing.T) {
+	snapshot := &t3.ShellSnapshot{Threads: []t3.Thread{thread("a", wtPath, nil, nil)}}
+
+	decision := only(t, decider(time.Now()).Decide([]Worktree{hosted("a")}, snapshot))
+
+	assert.Equal(t, ActionNone, decision.Action)
+	assert.Equal(t, DevRun, decision.Dev)
+}
+
+// Stopping waits out the settle debounce; one unsettled thread among settled
+// ones keeps the server up.
+func TestSettledWorktreeStopsDevServerAfterDebounce(t *testing.T) {
+	snapshot := &t3.ShellSnapshot{Threads: []t3.Thread{settledThread("a"), settledThread("b")}}
+	start := time.Now()
+	d := decider(start)
+
+	assert.Equal(t, DevKeep, only(t, d.Decide([]Worktree{hosted("a", "b")}, snapshot)).Dev)
+
+	d.Now = func() time.Time { return start.Add(d.SettleDebounce - time.Second) }
+	assert.Equal(t, DevKeep, only(t, d.Decide([]Worktree{hosted("a", "b")}, snapshot)).Dev)
+
+	d.Now = func() time.Time { return start.Add(d.SettleDebounce) }
+	assert.Equal(t, DevStop, only(t, d.Decide([]Worktree{hosted("a", "b")}, snapshot)).Dev)
+}
+
+func TestOneUnsettledThreadKeepsDevServer(t *testing.T) {
+	snapshot := &t3.ShellSnapshot{Threads: []t3.Thread{settledThread("a"), thread("b", wtPath, nil, nil)}}
+
+	decision := only(t, decider(time.Now()).Decide([]Worktree{hosted("a", "b")}, snapshot))
+
+	assert.Equal(t, DevRun, decision.Dev)
+}
+
+// Unsettling starts the server at once and resets the clock, so settling again
+// has to outlast the full debounce before it stops.
+func TestUnsettlingRestartsAndResetsTheClock(t *testing.T) {
+	settled := &t3.ShellSnapshot{Threads: []t3.Thread{settledThread("a")}}
+	live := &t3.ShellSnapshot{Threads: []t3.Thread{thread("a", wtPath, nil, nil)}}
+	start := time.Now()
+	d := decider(start)
+
+	d.Decide([]Worktree{hosted("a")}, settled)
+	d.Now = func() time.Time { return start.Add(d.SettleDebounce) }
+	assert.Equal(t, DevStop, only(t, d.Decide([]Worktree{hosted("a")}, settled)).Dev)
+
+	d.Now = func() time.Time { return start.Add(d.SettleDebounce + time.Minute) }
+	assert.Equal(t, DevRun, only(t, d.Decide([]Worktree{hosted("a")}, live)).Dev)
+
+	d.Now = func() time.Time { return start.Add(d.SettleDebounce + 2*time.Minute) }
+	assert.Equal(t, DevKeep, only(t, d.Decide([]Worktree{hosted("a")}, settled)).Dev)
+}
+
+// A thread mid-turn is never settled, whatever the server stamped on it.
+func TestRunningSessionIsNotSettled(t *testing.T) {
+	th := settledThread("a")
+	th.Session = &t3.ThreadSession{Status: "running"}
+	snapshot := &t3.ShellSnapshot{Threads: []t3.Thread{th}}
+
+	assert.Equal(t, DevRun, only(t, decider(time.Now()).Decide([]Worktree{hosted("a")}, snapshot)).Dev)
+}
+
+// Hibernated and archived-only worktrees have no dev verdict: waking handles
+// the server itself, and hibernation releases it.
+func TestNoDevVerdictOutsideActive(t *testing.T) {
+	archived := &t3.ShellSnapshot{Threads: []t3.Thread{thread("a", wtPath, at("2026-08-09T00:00:00Z"), nil)}}
+	assert.Equal(t, DevKeep, only(t, decider(time.Now()).Decide([]Worktree{hosted("a")}, archived)).Dev)
+
+	live := &t3.ShellSnapshot{Threads: []t3.Thread{thread("a", wtPath, nil, nil)}}
+	sleeping := hosted("a")
+	sleeping.Hibernated = true
+	decision := only(t, decider(time.Now()).Decide([]Worktree{sleeping}, live))
+	assert.Equal(t, ActionWake, decision.Action)
+	assert.Equal(t, DevKeep, decision.Dev)
+}

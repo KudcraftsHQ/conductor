@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/hammashamzah/conductor/internal/codingagent"
 	"github.com/hammashamzah/conductor/internal/config"
-	"github.com/hammashamzah/conductor/internal/github"
 	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/stray"
@@ -513,28 +513,18 @@ func liveWorktrees(s *store.Store) ([]t3.Candidate, error) {
 		return nil, fmt.Errorf("could not load conductor config")
 	}
 
-	// One gh call per repository, memoised, resolves the PR state that decides
-	// whether a thread has auto-settled on merge. Worktrees with no marker are
-	// skipped first: they are not T3-hosted, so their PR state is never read and
-	// asking for it would be a round trip per legacy worktree.
-	prs := github.NewCache()
-
 	var out []t3.Candidate
 	for projectName, project := range cfg.Projects {
 		for worktreeName, worktree := range project.Worktrees {
 			if worktree.Archived || worktree.IsRoot || worktree.Path == "" {
 				continue
 			}
-			candidate := t3.Candidate{
+			out = append(out, t3.Candidate{
 				Project:      projectName,
 				Worktree:     worktreeName,
 				Branch:       worktree.Branch,
 				WorktreePath: worktree.Path,
-			}
-			if t3.HasMarker(worktree.Path) {
-				candidate.ChangeRequest = prs.StateFor(worktree.Path, worktree.Branch)
-			}
-			out = append(out, candidate)
+			})
 		}
 	}
 	return out, nil
@@ -660,8 +650,7 @@ var t3DevStatusCmd = &cobra.Command{
 			return nil
 		}
 		state := "running"
-		if out, err := tmux.CapturePane(tmux.WindowTarget(project, wt.Branch), 5); err == nil &&
-			strings.Contains(out, "Press Enter to restart") {
+		if tmux.DevServerStopped(project, wt.Branch) {
 			state = "stopped, waiting at the restart prompt"
 		}
 		fmt.Printf("State:    %s\n", state)
@@ -762,8 +751,11 @@ func worktreePort(cfg *config.Config, project, worktree string) int {
 	return wt.Ports[0]
 }
 
+// portOpen reports whether the dev server is accepting connections. "localhost"
+// covers both loopback families: Vite 8 binds [::1] only, so an IPv4-only probe
+// printed "not listening" for a server answering requests fine.
 func portOpen(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("localhost", strconv.Itoa(port)), time.Second)
 	if err != nil {
 		return false
 	}
