@@ -65,3 +65,22 @@ func TestTreeToleratesSelfParent(t *testing.T) {
 	default:
 	}
 }
+
+func TestParseLsofFieldsGroupsByPort(t *testing.T) {
+	out := "p100\nn*:5173\nn[::1]:5174\np200\nn127.0.0.1:3000\np300\nn*:5173\n"
+	ports := ParseLsofFields(out)
+	assert.Equal(t, []int{100, 300}, ports[5173])
+	assert.Equal(t, []int{100}, ports[5174])
+	assert.Equal(t, []int{200}, ports[3000])
+}
+
+func TestParseSSByPort(t *testing.T) {
+	out := `LISTEN 0 511 *:5173 *:* users:(("node",pid=100,fd=20))
+LISTEN 0 511 [::1]:3000 [::]:* users:(("bun",pid=200,fd=4),("bun",pid=201,fd=4))
+LISTEN 0 128 0.0.0.0:22 0.0.0.0:*
+`
+	ports := ParseSSByPort(out)
+	assert.Equal(t, []int{100}, ports[5173])
+	assert.Equal(t, []int{200, 201}, ports[3000])
+	assert.Empty(t, ports[22])
+}
