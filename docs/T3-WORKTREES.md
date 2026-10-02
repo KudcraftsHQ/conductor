@@ -60,6 +60,10 @@ Do not register a *worktree* as a project: a thread in a project rooted at the
 worktree is a plain local checkout to T3, its `worktreePath` is null, and
 conductor cannot see it at all.
 
+Conductor's own thread creation (`conductor t3 create`, the TUI, `build`, the
+dispatcher) used to break that rule itself on V1 servers, by creating a project
+per worktree. On orchestration V2 it does not: see below.
+
 ## Running it
 
 ```bash
@@ -70,6 +74,10 @@ conductor adopt --bind-only        # bind an already-provisioned worktree
 
 The watcher polls T3's snapshot every few seconds. It is the only cleanup path
 there is, so if it is not running, hibernation and teardown do not happen.
+Against a V2 server it also holds a shell subscription, so a change in T3 is
+acted on within about a second rather than at the next poll. When a pass fails
+it re-reads T3's origin and token (T3 picks its port at startup, so a restarted
+server can move) and re-detects the protocol.
 
 ### Guards
 
@@ -189,6 +197,62 @@ worktree has different ports than it had before.** Local database names are
 derived from the first port and change with it; remote `dev_<city>` names are
 stable across hibernation.
 
+## Orchestration V1 and V2
+
+T3 has two orchestration protocols and a nightly can switch a machine from one
+to the other. Conductor speaks both and picks per connection; nothing needs
+configuring.
+
+**Detection.** `GET /.well-known/t3/environment` carries
+`orchestrationProtocolVersion` (absent means V1). The answer is cached per
+client and dropped whenever a request fails in a way that could mean the server
+changed underneath it — unreachable origin, a 404 on a V1-only route, a 426 on
+the socket — and the failed call is retried once under the new answer.
+
+| | V1 | V2 |
+|---|---|---|
+| Live threads | `GET /api/orchestration/shell` | same route, header `x-t3-orchestration-protocol: 2` |
+| Archived threads | `GET /api/orchestration/snapshot` | WS `orchestration.getArchivedShellSnapshot` |
+| Thread commands | `POST /api/orchestration/dispatch` | WS `orchestration.dispatchCommand` |
+| Project create/delete | dispatch `project.*` | `POST /api/projects/mutate` |
+| New thread | `project.create` per worktree + `thread.create` | WS `orchestration.launchThread`, `existing_worktree`, under the **repository's** project |
+| Send a turn | `thread.turn.start` | `message.dispatch` |
+| Socket | `/ws?wsTicket=…` | `/ws?wsTicket=…&orchestrationProtocol=2` (426 without it) |
+| Change feed | none (polling) | WS `orchestration.subscribeShell` + `subscribeArchivedShell` |
+
+Terminals (`terminal.open` / `terminal.write`) and `subscribeServerConfig` are
+unchanged apart from the socket query.
+
+**Settling** reads the same fields on both: V2's thread shell still carries
+`settledAt` and `settledOverride`. The activity guard maps V2's single
+`pendingRuntimeRequest` onto "waiting on a human" (kind `user_input` is a
+question, anything else an approval), and its run status onto the session
+status the guard checks (`preparing`/`starting` → starting,
+`running`/`waiting` → running, `failed` → error).
+
+**Archived vs deleted.** V2 has no single route listing both, so the archive is
+read on both sides of the active read and the three are merged. A thread moving
+between archive and active between two reads would otherwise be in neither,
+which is indistinguishable from deletion — and deletion tears the worktree
+down at once.
+
+**One project per repository.** On V2 conductor launches its threads under the
+project rooted at the repository, bound to the worktree with
+`workspaceStrategy: existing_worktree`. That is the shape a thread started in
+T3's composer already has, so the sidebar, `adopt` and the watcher all see the
+same thing whichever way a worktree was made. V1 behaviour is unchanged.
+
+**The launch runs the setup hook.** `launchThread` runs the project's
+`runOnWorktreeCreate` script — `conductor adopt` — in the worktree, even though
+conductor is already provisioning it. Re-provisioning would drop and re-clone
+the database mid-setup, so conductor records a launch intent first
+(`~/.conductor/t3-launch-intents/`, valid ten minutes) and `adopt` on an
+already-registered worktree with a fresh intent only binds.
+
+**The first turn is still held.** The launch carries no `initialMessage`; the
+turn is sent with `message.dispatch` once the worktree is ready, exactly as on
+V1. A V2 turn counts as started once its run leaves `preparing`/`queued`.
+
 ## Where worktrees live
 
 Wherever T3 put them — by default `~/.t3/worktrees/<repo>/<branch>`. The
@@ -205,7 +269,8 @@ repositories with a `main` branch collide on one database.
 ## What conductor cannot do
 
 - **It cannot write into a thread.** `thread.activity.append` is internal to T3;
-  both dispatch endpoints reject it from an outside client. Setup output is
+  both dispatch endpoints reject it from an outside client (V2 has no such
+  command at all). Setup output is
   visible because it runs in a real terminal, not because conductor reported it.
 - **It cannot override T3's delete flow.** If you confirm "Delete the worktree
   too?", T3 removes the directory itself. The watcher reconciles afterwards.

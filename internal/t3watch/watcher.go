@@ -18,8 +18,8 @@ import (
 
 // Defaults for the watcher loop.
 const (
-	// DefaultInterval is how often T3 is polled. The snapshot is small and
-	// local; this is nowhere near expensive enough to justify a subscription.
+	// DefaultInterval is how often T3 is polled. Against a V2 server a shell
+	// subscription triggers passes sooner; polling stays as the floor.
 	DefaultInterval = 5 * time.Second
 	// DefaultDebounce is how long a worktree sits with no live thread before
 	// its resources are released.
@@ -60,6 +60,10 @@ type Watcher struct {
 	// lastRefused is the suppressed teardown count last reported, so the
 	// refusal is logged when it changes rather than on every tick.
 	lastRefused int
+
+	// shell is the V2 shell subscription, when there is one. It only shortens
+	// the time to react; polling continues underneath it regardless.
+	shell *t3.ShellWatch
 }
 
 // New builds a watcher over the given store.
@@ -133,27 +137,93 @@ func (w *Watcher) Stop() {
 
 func (w *Watcher) loop(ctx context.Context) {
 	defer close(w.done)
+	defer w.closeShellWatch()
 
 	// The first pass is a catch-up: nothing replays what happened while the
 	// watcher was down, so every worktree is judged from scratch on boot.
 	if err := w.Tick(ctx); err != nil {
 		w.logf("first pass failed: %v", err)
+		w.recover(err)
 	}
+	w.ensureShellWatch(ctx)
 
 	ticker := time.NewTicker(w.Interval)
 	defer ticker.Stop()
+
+	// kick coalesces a burst of shell changes into one pass shortly after.
+	var kick <-chan time.Time
 	for {
+		var changed, ended <-chan struct{}
+		if w.shell != nil {
+			changed, ended = w.shell.Changed(), w.shell.Done()
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if err := w.Tick(ctx); err != nil {
-				w.mu.Lock()
-				w.lastErr = err
-				w.mu.Unlock()
-				w.logf("tick failed: %v", err)
+		case <-ended:
+			w.logf("shell subscription ended (%v); polling until it reconnects", w.shell.Err())
+			w.closeShellWatch()
+		case <-changed:
+			if kick == nil {
+				kick = time.After(shellKickDelay)
 			}
+		case <-kick:
+			kick = nil
+			w.runTick(ctx)
+		case <-ticker.C:
+			w.runTick(ctx)
+			w.ensureShellWatch(ctx)
 		}
+	}
+}
+
+// shellKickDelay batches the burst of stream items one user action produces
+// (an archive is a removal on one stream and an update on the other).
+const shellKickDelay = 500 * time.Millisecond
+
+func (w *Watcher) runTick(ctx context.Context) {
+	if err := w.Tick(ctx); err != nil {
+		w.mu.Lock()
+		w.lastErr = err
+		w.mu.Unlock()
+		w.logf("tick failed: %v", err)
+		w.recover(err)
+	}
+}
+
+// recover reacts to a failed pass by re-reading where T3 is.
+//
+// The origin used to be captured once at startup. T3 chooses its port when it
+// starts, so after a restart on a different port the watcher kept polling a
+// dead address forever. Rediscovering on failure also drops the cached
+// orchestration protocol, so a server upgraded from V1 to V2 is re-detected.
+func (w *Watcher) recover(error) {
+	before := w.client.Origin
+	if w.client.Rediscover() {
+		w.logf("T3 Code moved from %s to %s", before, w.client.Origin)
+	}
+	w.closeShellWatch()
+}
+
+// ensureShellWatch opens the V2 shell subscription if there is none. Against a
+// V1 server it is a no-op: the protocol is cached, so this costs nothing.
+func (w *Watcher) ensureShellWatch(ctx context.Context) {
+	if w.shell != nil {
+		return
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	watch, err := w.client.WatchShell(dialCtx)
+	if err != nil {
+		return // V1, or unreachable: polling covers both.
+	}
+	w.shell = watch
+}
+
+func (w *Watcher) closeShellWatch() {
+	if w.shell != nil {
+		w.shell.Close()
+		w.shell = nil
 	}
 }
 

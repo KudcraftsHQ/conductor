@@ -190,20 +190,54 @@ func (m t3Mux) createWindow(project, branch, worktreePath string, agent codingag
 	}
 	_ = agent // The agent only selects wording; T3 decides what actually runs.
 
-	// The project is rooted at the worktree, not the main repo, so each
-	// worktree gets its own file tree, scripts and preview in the T3 UI.
-	projectID, err := client.EnsureProject(ctx, m.WindowName(project, branch), worktreePath)
+	protocol, err := client.Protocol(ctx)
 	if err != nil {
 		return err
 	}
 
-	// The worktree's own project is brand new and has no default model, so the
-	// main repository's project is the better hint: it carries whatever the user
-	// picked for this codebase. Both are only hints — ResolveModelSelection
-	// validates them against the running build's provider registry, which
-	// matters because a project default can name a disabled instance.
-	model, err := client.ResolveModelSelection(ctx,
-		client.ProjectDefaultModels(ctx, projectID, mainRepoProjectID(ctx, client, project))...)
+	var projectID string
+	var modelHints []t3.ModelSelection
+	if protocol >= t3.ProtocolV2 {
+		// V2: the thread lives under the repository's own project and is bound
+		// to the worktree by launchThread's existing_worktree strategy — the
+		// same shape a thread started in T3's composer has. No per-worktree
+		// project, so nothing is left behind in the sidebar and the watcher,
+		// adopt and the UI all see one project per repository.
+		root := mainRepoPath(project)
+		if root == "" {
+			return fmt.Errorf("cannot open a T3 thread for %s/%s: the project's repository root is unknown", project, branch)
+		}
+		projectID, err = client.EnsureProject(ctx, project, root)
+		if err != nil {
+			return err
+		}
+		modelHints = client.ProjectDefaultModels(ctx, projectID)
+
+		// launchThread runs the project's runOnWorktreeCreate script in the
+		// worktree — which is `conductor adopt`. Conductor is provisioning this
+		// worktree itself, so tell adopt to bind rather than re-provision;
+		// otherwise it would drop and re-clone the database underneath the
+		// provisioning already in flight.
+		if err := t3.WriteLaunchIntent(worktreePath); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not record the T3 launch intent: %v\n", err)
+		}
+	} else {
+		// V1: the project is rooted at the worktree, not the main repo, so each
+		// worktree gets its own file tree, scripts and preview in the T3 UI.
+		projectID, err = client.EnsureProject(ctx, m.WindowName(project, branch), worktreePath)
+		if err != nil {
+			return err
+		}
+		// The worktree's own project is brand new and has no default model, so
+		// the main repository's project is the better hint: it carries whatever
+		// the user picked for this codebase.
+		modelHints = client.ProjectDefaultModels(ctx, projectID, mainRepoProjectID(ctx, client, project))
+	}
+
+	// Hints only: ResolveModelSelection validates them against the running
+	// build's provider registry, which matters because a project default can
+	// name a disabled instance.
+	model, err := client.ResolveModelSelection(ctx, modelHints...)
 	if err != nil {
 		return fmt.Errorf("cannot open a T3 thread for %s/%s: %w", project, branch, err)
 	}
@@ -401,22 +435,31 @@ func threadOccupying(snapshot *t3.ShellSnapshot, worktreePath string, markerIDs 
 // project is created by conductor moments earlier and has no default, so
 // without this every conductor thread would fall back to a generic guess.
 func mainRepoProjectID(ctx context.Context, client *t3.Client, project string) string {
-	cfg, err := config.Load()
-	if err != nil || cfg == nil {
-		return ""
-	}
-	entry, ok := cfg.GetProject(project)
-	if !ok || entry == nil || entry.Path == "" {
+	root := mainRepoPath(project)
+	if root == "" {
 		return ""
 	}
 	snapshot, err := client.Shell(ctx)
 	if err != nil {
 		return ""
 	}
-	if found, ok := snapshot.FindProjectByRoot(entry.Path); ok {
+	if found, ok := snapshot.FindProjectByRoot(root); ok {
 		return found.ID
 	}
 	return ""
+}
+
+// mainRepoPath returns the registered repository root of a conductor project.
+func mainRepoPath(project string) string {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return ""
+	}
+	entry, ok := cfg.GetProject(project)
+	if !ok || entry == nil {
+		return ""
+	}
+	return entry.Path
 }
 
 // findThread resolves a worktree window to its live T3 thread.

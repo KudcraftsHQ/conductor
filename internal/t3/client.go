@@ -8,6 +8,9 @@
 //   - WebSocket, for everything else — terminals, worktrees, previews. These
 //     have no HTTP equivalent, so terminal control requires the socket.
 //
+// The orchestration half exists in two protocols (V1 and Orchestrator V2);
+// see protocol.go for how one is chosen and v2.go for the V2 transport.
+//
 // The server is alpha and its API is unversioned: the schemas are compiled
 // into its bundle rather than published. Decoding is therefore deliberately
 // lenient about unknown fields, and every call reports the server's own error
@@ -24,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,6 +43,40 @@ type Client struct {
 	Origin string
 	Token  string
 	HTTP   *http.Client
+
+	// mu guards the protocol cache. See protocol.go.
+	mu         sync.Mutex
+	protocol   int
+	descriptor *EnvironmentDescriptor
+	// baselines holds, per thread, the V2 run that was latest when conductor
+	// last dispatched a turn to it. See startTurnV2.
+	baselines map[string]string
+}
+
+// httpClient tolerates a zero Client, which tests construct.
+func (c *Client) httpClient() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return http.DefaultClient
+}
+
+// Rediscover re-reads the origin and token from the environment and drops the
+// cached protocol. A long-running caller — the watcher — uses it after a
+// connection failure: T3 picks its port at startup, so a restarted server can
+// be somewhere else entirely, and an upgraded one can speak another protocol.
+// It reports whether the origin changed.
+func (c *Client) Rediscover() bool {
+	c.ResetProtocol()
+	changed := false
+	if origin, err := DiscoverOrigin(); err == nil && origin != "" && origin != c.Origin {
+		c.Origin = origin
+		changed = true
+	}
+	if token, err := DiscoverToken(); err == nil && token != "" {
+		c.Token = token
+	}
+	return changed
 }
 
 // New builds a Client, discovering the origin and token from the environment.
@@ -179,6 +217,15 @@ func (e apiError) Error() string {
 
 // do performs an authenticated request and decodes a JSON response into out.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doWith(ctx, method, path, nil, body, out)
+}
+
+// doWith is do with extra request headers.
+//
+// A transport failure drops the cached protocol, since whatever answers next
+// may be a different server. A response that looks like a protocol mismatch
+// is wrapped in errProtocolMismatch so withProtocol can re-detect and retry.
+func (c *Client) doWith(ctx context.Context, method, path string, headers map[string]string, body, out any) error {
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -196,9 +243,13 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 
-	res, err := c.HTTP.Do(req)
+	res, err := c.httpClient().Do(req)
 	if err != nil {
+		c.ResetProtocol()
 		return fmt.Errorf("T3 Code server unreachable at %s: %w", c.Origin, err)
 	}
 	defer func() { _ = res.Body.Close() }()
@@ -209,6 +260,10 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		if strings.HasPrefix(path, "/api/orchestration/") && looksLikeProtocolMismatch(res.StatusCode, string(data)) {
+			return fmt.Errorf("T3 Code %s %s: HTTP %d: %s: %w",
+				method, path, res.StatusCode, truncate(string(data), 200), errProtocolMismatch)
+		}
 		var apiErr apiError
 		if json.Unmarshal(data, &apiErr) == nil && (apiErr.Code != "" || apiErr.Tag != "") {
 			if apiErr.Code == "auth_invalid" {
@@ -248,31 +303,65 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Shell returns the lightweight snapshot of projects and threads.
+// Shell returns the lightweight snapshot of projects and live threads.
+//
+// Under V2 the route is the same but the payload is not; it is converted to the
+// V1-shaped ShellSnapshot every caller already understands.
 func (c *Client) Shell(ctx context.Context) (*ShellSnapshot, error) {
-	var snapshot ShellSnapshot
-	if err := c.do(ctx, http.MethodGet, "/api/orchestration/shell", nil, &snapshot); err != nil {
-		return nil, err
-	}
-	return &snapshot, nil
+	var out *ShellSnapshot
+	err := c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			snapshot, err := c.shellV2(ctx)
+			if err != nil {
+				return err
+			}
+			out = snapshot
+			return nil
+		}
+		var snapshot ShellSnapshot
+		if err := c.do(ctx, http.MethodGet, "/api/orchestration/shell", nil, &snapshot); err != nil {
+			return err
+		}
+		out = &snapshot
+		return nil
+	})
+	return out, err
 }
 
-// Snapshot returns the full orchestration snapshot: every thread T3 still
-// holds, archived ones included.
+// Snapshot returns every thread T3 still holds, archived ones included.
 //
 // The lighter Shell snapshot drops archived threads, which makes a thread that
 // vanished from it ambiguous — archived or deleted, and those mean opposite
 // things to a worktree. This one answers both at once: present and unarchived
 // is live, present and archived holds the worktree open, absent is deleted.
+//
+// V1 has a route for exactly this. V2 removed it; there the active shell comes
+// over HTTP and the archived threads over the socket
+// (orchestration.getArchivedShellSnapshot), and the two are merged.
 func (c *Client) Snapshot(ctx context.Context) (*ShellSnapshot, error) {
-	var snapshot ShellSnapshot
-	if err := c.do(ctx, http.MethodGet, "/api/orchestration/snapshot", nil, &snapshot); err != nil {
-		return nil, err
-	}
-	return &snapshot, nil
+	var out *ShellSnapshot
+	err := c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			snapshot, err := c.fullSnapshotV2(ctx)
+			if err != nil {
+				return err
+			}
+			out = snapshot
+			return nil
+		}
+		var snapshot ShellSnapshot
+		if err := c.do(ctx, http.MethodGet, "/api/orchestration/snapshot", nil, &snapshot); err != nil {
+			return err
+		}
+		out = &snapshot
+		return nil
+	})
+	return out, err
 }
 
-// Dispatch submits one orchestration command to the command bus.
+// Dispatch submits one orchestration command to the V1 command bus. Under V2
+// thread commands go through dispatchV2 and project commands through
+// mutateProject; callers use the protocol-neutral operations instead.
 func (c *Client) Dispatch(ctx context.Context, command any) error {
 	return c.do(ctx, http.MethodPost, "/api/orchestration/dispatch", command, nil)
 }

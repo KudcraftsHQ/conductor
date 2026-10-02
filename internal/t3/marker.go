@@ -1,9 +1,12 @@
 package t3
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // MarkerFileName records, inside a worktree, that T3 Code is hosting it.
@@ -68,4 +71,61 @@ func HasMarker(worktreePath string) bool {
 
 func markerPath(worktreePath string) string {
 	return filepath.Join(worktreePath, MarkerFileName)
+}
+
+// LaunchIntentTTL bounds how long a launch intent is honoured. Long enough for
+// T3 to prepare the thread and run the setup script; short enough that a
+// stale intent cannot turn a later, deliberate `conductor adopt` into a no-op.
+const LaunchIntentTTL = 10 * time.Minute
+
+// WriteLaunchIntent records that conductor is about to launch a V2 thread on a
+// worktree it is provisioning itself.
+//
+// Under orchestration V2, conductor binds its thread with launchThread under
+// the repository's project, and launchThread runs that project's
+// runOnWorktreeCreate script — `conductor adopt` — in the worktree. Adopt on an
+// already-registered worktree re-provisions it, which drops and re-clones the
+// dev database. The intent tells adopt that this run is the echo of
+// conductor's own launch and should only bind.
+//
+// It lives under ~/.conductor rather than in the worktree so it can never show
+// up in git status.
+func WriteLaunchIntent(worktreePath string) error {
+	path, err := launchIntentPath(worktreePath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"+worktreePath+"\n"), 0644)
+}
+
+// ConsumeLaunchIntent reports whether a fresh launch intent exists for the
+// worktree, and removes it either way.
+func ConsumeLaunchIntent(worktreePath string) bool {
+	path, err := launchIntentPath(worktreePath)
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	_ = os.Remove(path)
+	first, _, _ := strings.Cut(string(data), "\n")
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(first))
+	if err != nil {
+		return false
+	}
+	return time.Since(at) < LaunchIntentTTL
+}
+
+func launchIntentPath(worktreePath string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	sum := sha1.Sum([]byte(normalizePath(worktreePath)))
+	return filepath.Join(home, ".conductor", "t3-launch-intents", hex.EncodeToString(sum[:])), nil
 }

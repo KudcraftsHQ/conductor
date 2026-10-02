@@ -46,6 +46,9 @@ type Thread struct {
 	ModelSelection      ModelSelection  `json:"modelSelection"`
 	Session             *ThreadSession  `json:"session"`
 	LatestTurn          json.RawMessage `json:"latestTurn"`
+	// RunID is V2's latestRunId. V1 has no equivalent and leaves it empty; it
+	// is how WaitForTurn tells a new run from the one before it.
+	RunID string `json:"-"`
 }
 
 // Settled override values, from T3's own schema:

@@ -138,15 +138,26 @@ func (c *Client) EnsureProject(ctx context.Context, title, workspaceRoot string)
 	}
 
 	projectID := NewID()
-	command := ProjectCreateCommand{
-		Type:          "project.create",
-		CommandID:     NewID(),
-		ProjectID:     projectID,
-		Title:         title,
-		WorkspaceRoot: workspaceRoot,
-		CreatedAt:     Now(),
-	}
-	if err := c.Dispatch(ctx, command); err != nil {
+	err = c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			return c.mutateProject(ctx, v2ProjectCreateMutation{
+				Type:          "project.create",
+				CommandID:     NewID(),
+				ProjectID:     projectID,
+				Title:         title,
+				WorkspaceRoot: workspaceRoot,
+			})
+		}
+		return c.Dispatch(ctx, ProjectCreateCommand{
+			Type:          "project.create",
+			CommandID:     NewID(),
+			ProjectID:     projectID,
+			Title:         title,
+			WorkspaceRoot: workspaceRoot,
+			CreatedAt:     Now(),
+		})
+	})
+	if err != nil {
 		return "", fmt.Errorf("failed to create T3 project %q: %w", title, err)
 	}
 	return projectID, nil
@@ -159,13 +170,28 @@ func (c *Client) EnsureProject(ctx context.Context, title, workspaceRoot string)
 // on this machine default to an instance that is configured but disabled, so
 // these are candidates for SelectModel to validate, never answers.
 func (c *Client) ProjectDefaultModels(ctx context.Context, projectIDs ...string) []ModelSelection {
-	var detail struct {
-		Projects []struct {
-			ID                    string          `json:"id"`
-			DefaultModelSelection *ModelSelection `json:"defaultModelSelection"`
-		} `json:"projects"`
+	type projectDefault struct {
+		ID                    string          `json:"id"`
+		DefaultModelSelection *ModelSelection `json:"defaultModelSelection"`
 	}
-	if err := c.do(ctx, "GET", "/api/orchestration/shell", nil, &detail); err != nil {
+	var detail struct {
+		Projects []projectDefault `json:"projects"`
+	}
+	err := c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			shell, err := c.fetchShellV2(ctx)
+			if err != nil {
+				return err
+			}
+			detail.Projects = nil
+			for _, project := range shell.Projects {
+				detail.Projects = append(detail.Projects, projectDefault{ID: project.ID, DefaultModelSelection: project.DefaultModelSelection})
+			}
+			return nil
+		}
+		return c.do(ctx, "GET", "/api/orchestration/shell", nil, &detail)
+	})
+	if err != nil {
 		return nil
 	}
 	var out []ModelSelection
@@ -262,20 +288,25 @@ func (c *Client) CreateThread(ctx context.Context, opts CreateThreadOptions) (st
 	}
 
 	threadID := NewID()
-	create := ThreadCreateCommand{
-		Type:            "thread.create",
-		CommandID:       NewID(),
-		ThreadID:        threadID,
-		ProjectID:       opts.ProjectID,
-		Title:           opts.Title,
-		ModelSelection:  opts.Model,
-		RuntimeMode:     opts.RuntimeMode,
-		InteractionMode: InteractionModeDefault,
-		Branch:          ptr(opts.Branch),
-		WorktreePath:    ptr(opts.WorktreePath),
-		CreatedAt:       Now(),
-	}
-	if err := c.Dispatch(ctx, create); err != nil {
+	err := c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			return c.createThreadV2(ctx, threadID, opts)
+		}
+		return c.Dispatch(ctx, ThreadCreateCommand{
+			Type:            "thread.create",
+			CommandID:       NewID(),
+			ThreadID:        threadID,
+			ProjectID:       opts.ProjectID,
+			Title:           opts.Title,
+			ModelSelection:  opts.Model,
+			RuntimeMode:     opts.RuntimeMode,
+			InteractionMode: InteractionModeDefault,
+			Branch:          ptr(opts.Branch),
+			WorktreePath:    ptr(opts.WorktreePath),
+			CreatedAt:       Now(),
+		})
+	})
+	if err != nil {
 		return "", fmt.Errorf("failed to create T3 thread %q: %w", opts.Title, err)
 	}
 
@@ -295,6 +326,42 @@ func (c *Client) CreateThread(ctx context.Context, opts CreateThreadOptions) (st
 		}
 	}
 	return threadID, nil
+}
+
+// createThreadV2 opens the thread through orchestration.launchThread, bound to
+// the worktree with the existing_worktree strategy.
+//
+// The first turn is deliberately *not* sent as the launch's initialMessage.
+// Conductor holds the first turn until the worktree is provisioned (ReadyGate),
+// and folding it into the launch would mean either holding the thread itself
+// back for minutes or giving up the hold. Launching bare and dispatching the
+// turn afterwards keeps V1's shape: the thread appears at once, the turn waits.
+//
+// Without a worktree path there is nothing to bind, so the thread runs at the
+// project root.
+func (c *Client) createThreadV2(ctx context.Context, threadID string, opts CreateThreadOptions) error {
+	strategy := v2WorkspaceStrategy{Type: "root", Branch: opts.Branch}
+	if opts.WorktreePath != "" {
+		strategy = v2WorkspaceStrategy{Type: "existing_worktree", WorktreePath: opts.WorktreePath, Branch: opts.Branch}
+	}
+	launched, err := c.launchThreadV2(ctx, v2ThreadLaunchInput{
+		CommandID:         NewID(),
+		CreationSource:    v2CreationSource,
+		ThreadID:          threadID,
+		ProjectID:         opts.ProjectID,
+		Title:             opts.Title,
+		ModelSelection:    opts.Model,
+		RuntimeMode:       opts.RuntimeMode,
+		InteractionMode:   InteractionModeDefault,
+		WorkspaceStrategy: strategy,
+	})
+	if err != nil {
+		return err
+	}
+	if launched != threadID {
+		return fmt.Errorf("T3 launched thread %s, not the requested %s", launched, threadID)
+	}
+	return nil
 }
 
 // turnStartTimeout bounds the wait for a turn to begin. Starting a provider
@@ -324,10 +391,17 @@ func (c *Client) WaitForTurn(ctx context.Context, threadID string, timeout time.
 			if thread.ID != threadID {
 				continue
 			}
+			if c.isBaselineRun(threadID, thread.RunID) {
+				// V2: the shell still shows the run from before this turn was
+				// dispatched. Its failure or success says nothing about ours.
+				continue
+			}
 			if reason, failed := thread.Failed(); failed {
+				c.clearBaseline(threadID)
 				return fmt.Errorf("thread %s created but its turn did not start: %s", threadID, reason)
 			}
 			if thread.Started() {
+				c.clearBaseline(threadID)
 				return nil
 			}
 			if thread.Session != nil {
@@ -336,6 +410,7 @@ func (c *Client) WaitForTurn(ctx context.Context, threadID string, timeout time.
 		}
 
 		if time.Now().After(deadline) {
+			c.clearBaseline(threadID)
 			status := lastSessionStatus
 			if status == "" {
 				status = "no provider session"
@@ -354,33 +429,121 @@ func (c *Client) WaitForTurn(ctx context.Context, threadID string, timeout time.
 
 // StartTurn submits chat input to a thread. This is the API equivalent of
 // typing into the composer, and is what lets hermes drive a thread remotely.
+//
+// runtimeMode only applies to V1, where it rides on every turn. V2's
+// message.dispatch has no such field: the thread's own runtime mode governs.
 func (c *Client) StartTurn(ctx context.Context, threadID, text, runtimeMode string) error {
 	if runtimeMode == "" {
 		runtimeMode = RuntimeModeFullAccess
 	}
-	command := ThreadTurnStartCommand{
-		Type:      "thread.turn.start",
-		CommandID: NewID(),
-		ThreadID:  threadID,
-		Message: TurnMessage{
-			MessageID:   NewID(),
-			Role:        "user",
-			Text:        text,
-			Attachments: []any{},
-		},
-		RuntimeMode:     runtimeMode,
-		InteractionMode: InteractionModeDefault,
-		CreatedAt:       Now(),
+	return c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			return c.startTurnV2(ctx, threadID, text)
+		}
+		command := ThreadTurnStartCommand{
+			Type:      "thread.turn.start",
+			CommandID: NewID(),
+			ThreadID:  threadID,
+			Message: TurnMessage{
+				MessageID:   NewID(),
+				Role:        "user",
+				Text:        text,
+				Attachments: []any{},
+			},
+			RuntimeMode:     runtimeMode,
+			InteractionMode: InteractionModeDefault,
+			CreatedAt:       Now(),
+		}
+		return c.Dispatch(ctx, command)
+	})
+}
+
+// startTurnV2 dispatches message.dispatch.
+//
+// The thread is read first for two reasons: an older V2 server needs the
+// client to pick the dispatch mode from the thread's active run, and
+// WaitForTurn needs the run that was latest *before* this message, so it does
+// not mistake the previous run's verdict for this one's.
+func (c *Client) startTurnV2(ctx context.Context, threadID, text string) error {
+	var activeRunID *string
+	baseline := ""
+	if shell, err := c.fetchShellV2(ctx); err == nil {
+		for _, t := range shell.Threads {
+			if t.ID == threadID {
+				activeRunID = t.ActiveRunID
+				if t.LatestRunID != nil {
+					baseline = *t.LatestRunID
+				}
+			}
+		}
 	}
-	return c.Dispatch(ctx, command)
+	command := buildMessageDispatchV2(threadID, text, c.serverResolvesCommandContext(), activeRunID)
+	c.setBaseline(threadID, baseline)
+	if err := c.dispatchV2(ctx, command); err != nil {
+		c.clearBaseline(threadID)
+		return err
+	}
+	return nil
+}
+
+// setBaseline, isBaselineRun and clearBaseline track, per thread, the run that
+// was latest when conductor dispatched a turn. Empty means "no run yet",
+// which matches a thread whose RunID is empty.
+func (c *Client) setBaseline(threadID, runID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.baselines == nil {
+		c.baselines = make(map[string]string)
+	}
+	c.baselines[threadID] = runID
+}
+
+func (c *Client) isBaselineRun(threadID, runID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	baseline, ok := c.baselines[threadID]
+	return ok && baseline == runID
+}
+
+func (c *Client) clearBaseline(threadID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.baselines, threadID)
 }
 
 // ArchiveThread archives a thread, which also reaps its terminals.
 func (c *Client) ArchiveThread(ctx context.Context, threadID string) error {
-	return c.Dispatch(ctx, ThreadArchiveCommand{
-		Type:      "thread.archive",
-		CommandID: NewID(),
-		ThreadID:  threadID,
+	return c.threadCommand(ctx, "thread.archive", threadID)
+}
+
+// DeleteThread permanently removes a thread.
+func (c *Client) DeleteThread(ctx context.Context, threadID string) error {
+	return c.threadCommand(ctx, "thread.delete", threadID)
+}
+
+// threadCommand sends a command whose only argument is the thread id. Both
+// protocols spell these identically; only the transport differs.
+func (c *Client) threadCommand(ctx context.Context, kind, threadID string) error {
+	command := v2ThreadIDCommand{Type: kind, CommandID: NewID(), ThreadID: threadID}
+	return c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			return c.dispatchV2(ctx, command)
+		}
+		return c.Dispatch(ctx, command)
+	})
+}
+
+// deleteProject removes a project on either protocol.
+func (c *Client) deleteProject(ctx context.Context, projectID string) error {
+	return c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			return c.mutateProject(ctx, v2ProjectDeleteMutation{
+				Type: "project.delete", CommandID: NewID(), ProjectID: projectID, Force: true,
+			})
+		}
+		return c.Dispatch(ctx, ProjectDeleteCommand{
+			Type: "project.delete", CommandID: NewID(), ProjectID: projectID, Force: true,
+		})
 	})
 }
 
@@ -415,12 +578,7 @@ func (c *Client) CloseWorktree(ctx context.Context, worktreePath string) error {
 	if !ok || project.ID != threads[0].ProjectID {
 		return nil
 	}
-	if err := c.Dispatch(ctx, ProjectDeleteCommand{
-		Type:      "project.delete",
-		CommandID: NewID(),
-		ProjectID: project.ID,
-		Force:     true,
-	}); err != nil {
+	if err := c.deleteProject(ctx, project.ID); err != nil {
 		return fmt.Errorf("thread archived but its project could not be removed: %w", err)
 	}
 	return nil

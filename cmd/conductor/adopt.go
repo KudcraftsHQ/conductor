@@ -94,7 +94,16 @@ hibernated worktree is woken by hand.`,
 		// than holding the store's lock for its whole duration.
 		manager := workspace.NewManagerWithStore(s.GetConfigSnapshot(), s)
 		var provisionErr error
-		if adoptBind {
+		// Under T3 orchestration V2, conductor's own thread launch runs this
+		// hook in a worktree conductor is already provisioning. The intent it
+		// left says so; re-provisioning here would drop and re-clone the
+		// database mid-setup. Only an already-registered worktree qualifies — a
+		// fresh registration always needs provisioning.
+		launchEcho := !registered && t3.ConsumeLaunchIntent(worktreePath)
+		if launchEcho {
+			fmt.Println("Conductor launched this thread itself — binding only")
+		}
+		if adoptBind || launchEcho {
 			// A worktree that is already set up needs the thread binding and
 			// nothing else. Provisioning it would drop and re-clone a database
 			// that is working perfectly well.
