@@ -260,6 +260,9 @@ type CreateThreadOptions struct {
 	// created; the error is reported and the turn is sent anyway, because a
 	// thread with no turn is harder to recover from than an early one.
 	ReadyGate func(context.Context) error
+	// Provisioning, when set, reports whether the worktree is still being
+	// provisioned; the first-turn wait keeps going while it is.
+	Provisioning func() bool
 }
 
 // CreateThread opens a thread bound to a worktree and, when a task prompt is
@@ -321,7 +324,11 @@ func (c *Client) CreateThread(ctx context.Context, opts CreateThreadOptions) (st
 			// The thread exists; report the failure without pretending it does not.
 			return threadID, fmt.Errorf("thread created but its first turn failed: %w", err)
 		}
-		if err := c.WaitForTurn(ctx, threadID, turnStartTimeout); err != nil {
+		if _, err := c.WaitForTurnWith(ctx, threadID, TurnWait{
+			Timeout:      turnStartTimeout,
+			MaxWait:      turnPrepareCap,
+			Provisioning: opts.Provisioning,
+		}); err != nil {
 			return threadID, err
 		}
 	}
@@ -364,64 +371,146 @@ func (c *Client) createThreadV2(ctx context.Context, threadID string, opts Creat
 	return nil
 }
 
-// turnStartTimeout bounds the wait for a turn to begin. Starting a provider
-// session spawns a process, so this is seconds rather than milliseconds.
+// turnStartTimeout bounds the wait for a turn to begin when nothing visible is
+// happening. Starting a provider session spawns a process, so this is seconds
+// rather than milliseconds.
 const turnStartTimeout = 45 * time.Second
 
+// turnPrepareCap bounds the wait while the thread or its worktree is visibly
+// being prepared. On V2 a launched thread's first run sits in "preparing"
+// until the project's setup script — `conductor adopt`, a database clone —
+// has finished, and a remote clone takes minutes. Matches readyGateTimeout.
+const turnPrepareCap = 20 * time.Minute
+
+// TurnOutcome says how a dispatched turn was accepted.
+type TurnOutcome int
+
+const (
+	// TurnStarted means a run for the message has begun.
+	TurnStarted TurnOutcome = iota + 1
+	// TurnJoinedActive means a run was already active when the message was
+	// sent, and it was handed to that run. With deliveryIntent "auto" the
+	// server decides how: steered into the running turn (seen live on
+	// 0.0.46-nightly.20261003), or queued to start when it ends.
+	TurnJoinedActive
+)
+
+// TurnWait tunes WaitForTurnWith.
+type TurnWait struct {
+	// Timeout is how long to wait while nothing shows any sign of progress.
+	Timeout time.Duration
+	// MaxWait caps the wait while the thread is visibly preparing (a run in
+	// preparing, queued or starting) or Provisioning reports true. Each such
+	// observation pushes the deadline out by Timeout, never beyond MaxWait.
+	MaxWait time.Duration
+	// Provisioning optionally reports that conductor's own provisioning of the
+	// worktree is still in progress, which counts as preparing.
+	Provisioning func() bool
+}
+
 // WaitForTurn blocks until a turn has begun on the thread, or reports why it
-// did not.
-//
-// Dispatching thread.turn.start only means the command bus accepted it. The
-// provider session starts afterwards and asynchronously, and when it refuses,
-// the reason lands in thread.session.lastError and nowhere else — no error
-// comes back on the dispatch, and the turn simply never appears. Without this
-// check conductor reports success for a thread that will never run, which is
-// exactly how an unknown provider instance stayed hidden for so long.
+// did not. See WaitForTurnWith.
 func (c *Client) WaitForTurn(ctx context.Context, threadID string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	var lastSessionStatus string
+	_, err := c.WaitForTurnWith(ctx, threadID, TurnWait{Timeout: timeout, MaxWait: turnPrepareCap})
+	return err
+}
+
+// WaitForTurnWith blocks until a turn has begun on the thread, or reports why
+// it did not.
+//
+// Dispatching only means the command was accepted. The provider session
+// starts afterwards and asynchronously, and when it refuses, the reason lands
+// on the thread and nowhere else — no error comes back on the dispatch, and
+// the turn simply never appears. Without this check conductor reports success
+// for a thread that will never run.
+//
+// A preparing thread is not a stuck one. While a run is preparing, queued or
+// starting — or the worktree is still being provisioned — the wait extends,
+// up to MaxWait; only a failed run or a long silence is reported as failure.
+// On V2 a message sent while another run was active is steered into it or
+// queued behind it, and is reported as TurnJoinedActive once that run is seen
+// running.
+func (c *Client) WaitForTurnWith(ctx context.Context, threadID string, opts TurnWait) (TurnOutcome, error) {
+	if opts.Timeout <= 0 {
+		opts.Timeout = turnStartTimeout
+	}
+	if opts.MaxWait < opts.Timeout {
+		opts.MaxWait = opts.Timeout
+	}
+	defer c.clearBaseline(threadID)
+
+	start := time.Now()
+	deadline := start.Add(opts.Timeout)
+	hardCap := start.Add(opts.MaxWait)
+	var lastStatus string
+	sawPreparing := false
 
 	for {
 		snapshot, err := c.Shell(ctx)
 		if err != nil {
-			return fmt.Errorf("thread %s created but its turn could not be verified: %w", threadID, err)
+			return 0, fmt.Errorf("thread %s: its turn could not be verified: %w", threadID, err)
 		}
-		for i := range snapshot.Threads {
-			thread := snapshot.Threads[i]
-			if thread.ID != threadID {
-				continue
-			}
-			if c.isBaselineRun(threadID, thread.RunID) {
-				// V2: the shell still shows the run from before this turn was
-				// dispatched. Its failure or success says nothing about ours.
-				continue
-			}
-			if reason, failed := thread.Failed(); failed {
-				c.clearBaseline(threadID)
-				return fmt.Errorf("thread %s created but its turn did not start: %s", threadID, reason)
-			}
-			if thread.Started() {
-				c.clearBaseline(threadID)
-				return nil
-			}
+		preparing := false
+		if thread, ok := snapshot.FindThreadByID(threadID); ok {
 			if thread.Session != nil {
-				lastSessionStatus = thread.Session.Status
+				lastStatus = thread.Session.Status
 			}
+			baseline, hasBaseline := c.baseline(threadID)
+			switch {
+			case !hasBaseline || thread.RunID != baseline.runID:
+				// V1, or a run newer than the one before this message: its
+				// verdict is ours.
+				if reason, failed := thread.Failed(); failed {
+					return 0, fmt.Errorf("thread %s: its turn did not start: %s", threadID, reason)
+				}
+				if thread.Started() {
+					return TurnStarted, nil
+				}
+				preparing = lastStatus == "starting"
+			case baseline.active:
+				// Still the run that was active when the message was sent; the
+				// message was steered into it or queued behind it. Once that run
+				// is underway the message is in good hands. A failure of that
+				// run is not ours to report.
+				switch lastStatus {
+				case "running":
+					return TurnJoinedActive, nil
+				case "starting":
+					preparing = true
+				}
+			}
+		}
+		if !preparing && opts.Provisioning != nil && opts.Provisioning() {
+			preparing = true
 		}
 
-		if time.Now().After(deadline) {
-			c.clearBaseline(threadID)
-			status := lastSessionStatus
+		now := time.Now()
+		if preparing {
+			sawPreparing = true
+			if extended := now.Add(opts.Timeout); extended.After(deadline) {
+				deadline = extended
+				if deadline.After(hardCap) {
+					deadline = hardCap
+				}
+			}
+		}
+		if now.After(deadline) {
+			status := lastStatus
 			if status == "" {
 				status = "no provider session"
 			}
-			return fmt.Errorf(
-				"thread %s created but no turn started within %s (session: %s). Check the thread in T3",
-				threadID, timeout, status)
+			if sawPreparing {
+				return 0, fmt.Errorf(
+					"thread %s: no turn started within %s; it was still preparing (session: %s). Check the thread in T3",
+					threadID, now.Sub(start).Round(time.Second), status)
+			}
+			return 0, fmt.Errorf(
+				"thread %s: no turn started within %s (session: %s). Check the thread in T3",
+				threadID, opts.Timeout, status)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return 0, ctx.Err()
 		case <-time.After(time.Second):
 		}
 	}
@@ -466,14 +555,15 @@ func (c *Client) StartTurn(ctx context.Context, threadID, text, runtimeMode stri
 // not mistake the previous run's verdict for this one's.
 func (c *Client) startTurnV2(ctx context.Context, threadID, text string) error {
 	var activeRunID *string
-	baseline := ""
+	baseline := runBaseline{}
 	if shell, err := c.fetchShellV2(ctx); err == nil {
 		for _, t := range shell.Threads {
 			if t.ID == threadID {
 				activeRunID = t.ActiveRunID
 				if t.LatestRunID != nil {
-					baseline = *t.LatestRunID
+					baseline.runID = *t.LatestRunID
 				}
+				baseline.active = t.ActiveRunID != nil && *t.ActiveRunID != ""
 			}
 		}
 	}
@@ -486,23 +576,29 @@ func (c *Client) startTurnV2(ctx context.Context, threadID, text string) error {
 	return nil
 }
 
-// setBaseline, isBaselineRun and clearBaseline track, per thread, the run that
-// was latest when conductor dispatched a turn. Empty means "no run yet",
-// which matches a thread whose RunID is empty.
-func (c *Client) setBaseline(threadID, runID string) {
+// runBaseline is the thread's latest run when conductor dispatched a turn,
+// and whether a run was active then. Empty runID means "no run yet", which
+// matches a thread whose RunID is empty.
+type runBaseline struct {
+	runID  string
+	active bool
+}
+
+// setBaseline, baseline and clearBaseline track the runBaseline per thread.
+func (c *Client) setBaseline(threadID string, b runBaseline) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.baselines == nil {
-		c.baselines = make(map[string]string)
+		c.baselines = make(map[string]runBaseline)
 	}
-	c.baselines[threadID] = runID
+	c.baselines[threadID] = b
 }
 
-func (c *Client) isBaselineRun(threadID, runID string) bool {
+func (c *Client) baseline(threadID string) (runBaseline, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	baseline, ok := c.baselines[threadID]
-	return ok && baseline == runID
+	b, ok := c.baselines[threadID]
+	return b, ok
 }
 
 func (c *Client) clearBaseline(threadID string) {

@@ -194,8 +194,17 @@ func looksLikeProtocolMismatch(status int, body string) bool {
 	case http.StatusNotFound, http.StatusUpgradeRequired:
 		return true
 	case http.StatusBadRequest:
-		return strings.Contains(strings.ToLower(body), protocolHeader) ||
+		// Live V2 (0.0.46-nightly.20261003) rejects a shell request without
+		// the protocol header with an empty 400 body.
+		return strings.TrimSpace(body) == "" ||
+			strings.Contains(strings.ToLower(body), protocolHeader) ||
 			strings.Contains(body, "orchestration_protocol")
 	}
 	return false
+}
+
+// looksLikeHTML reports whether a response body is an HTML page.
+func looksLikeHTML(data []byte) bool {
+	trimmed := strings.TrimSpace(string(data))
+	return strings.HasPrefix(trimmed, "<")
 }

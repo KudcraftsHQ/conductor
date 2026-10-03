@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/ready"
 	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/stray"
 	"github.com/hammashamzah/conductor/internal/t3"
@@ -57,6 +58,9 @@ type Watcher struct {
 	// only touches tmux for the worktrees whose verdict changed.
 	devApplied map[string]DevWant
 	lastSweep  time.Time
+	// lastInconsistent is whether the last snapshot was inconsistent, so that
+	// is logged once per change rather than every tick.
+	lastInconsistent bool
 	// lastRefused is the suppressed teardown count last reported, so the
 	// refusal is logged when it changes rather than on every tick.
 	lastRefused int
@@ -230,13 +234,25 @@ func (w *Watcher) closeShellWatch() {
 // Tick runs one reconciliation pass. Exported so `conductor t3 watch once` can
 // run exactly one, which is also how the whole thing is exercised by hand.
 func (w *Watcher) Tick(ctx context.Context) error {
+	snapshot, err := w.client.Snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read the T3 snapshot: %w", err)
+	}
+
+	// Reload only now, after the (V2: multi-read, ~300ms) snapshot.
+	// conductor.json is rewritten whole by whoever saves last, and anything
+	// this tick writes is saved from the state loaded here; reloading before
+	// the snapshot left that whole read as a window in which a concurrent
+	// `conductor worktree create` was silently overwritten.
 	if err := w.store.Reload(); err != nil {
 		return fmt.Errorf("failed to reload conductor state: %w", err)
 	}
 
-	snapshot, err := w.client.Snapshot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to read the T3 snapshot: %w", err)
+	if snapshot.Inconsistent != w.lastInconsistent {
+		if snapshot.Inconsistent {
+			w.logf("T3 kept changing while it was read; teardowns wait for a consistent snapshot")
+		}
+		w.lastInconsistent = snapshot.Inconsistent
 	}
 
 	cfg := w.store.GetConfigSnapshot()
@@ -467,6 +483,7 @@ func collect(cfg *config.Config) []Worktree {
 				Hibernated:   worktree.Hibernated,
 				Archived:     worktree.Archived,
 				IsRoot:       worktree.IsRoot,
+				Provisioning: worktree.SetupStatus.InProgress() && !worktree.SetupStalled(ready.StaleAfter),
 				KnownThreads: threads,
 				Ports:        worktree.Ports,
 			})
@@ -478,6 +495,9 @@ func collect(cfg *config.Config) []Worktree {
 // countGoneWorktrees counts how many hosted worktrees have lost every thread,
 // before the batch cap is applied.
 func countGoneWorktrees(worktrees []Worktree, snapshot *t3.ShellSnapshot) int {
+	if snapshot == nil || snapshot.Inconsistent {
+		return 0
+	}
 	live, archived := indexThreads(snapshot)
 	n := 0
 	for _, worktree := range worktrees {

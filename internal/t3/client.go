@@ -50,7 +50,7 @@ type Client struct {
 	descriptor *EnvironmentDescriptor
 	// baselines holds, per thread, the V2 run that was latest when conductor
 	// last dispatched a turn to it. See startTurnV2.
-	baselines map[string]string
+	baselines map[string]runBaseline
 }
 
 // httpClient tolerates a zero Client, which tests construct.
@@ -278,6 +278,11 @@ func (c *Client) doWith(ctx context.Context, method, path string, headers map[st
 		return nil
 	}
 	if err := json.Unmarshal(data, out); err != nil {
+		// A V2 server answers a V1-only route (/snapshot, /dispatch) with its
+		// web app's HTML and a 200, not a 404: the SPA fallback catches it.
+		if strings.HasPrefix(path, "/api/orchestration/") && looksLikeHTML(data) {
+			return fmt.Errorf("T3 Code %s %s returned the web app, not JSON: %w", method, path, errProtocolMismatch)
+		}
 		return fmt.Errorf("failed to decode T3 response for %s: %w", path, err)
 	}
 	return nil

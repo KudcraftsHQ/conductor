@@ -16,6 +16,15 @@ type ShellSnapshot struct {
 	Projects         []Project `json:"projects"`
 	Threads          []Thread  `json:"threads"`
 	UpdatedAt        time.Time `json:"updatedAt"`
+
+	// Inconsistent marks a snapshot assembled from reads that did not all see
+	// the same server state. On V2 the active and archived threads come from
+	// separate reads, and when the server's sequence moved between them a
+	// thread can be missing from both. Such a snapshot is fine for display and
+	// for keeping things alive, and must never be the evidence for destroying
+	// anything. Zero means consistent: only the V2 merge can produce one that
+	// is not, and it sets this explicitly.
+	Inconsistent bool `json:"-"`
 }
 
 // Project is a T3 project: a workspace root plus its scripts.

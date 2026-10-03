@@ -164,6 +164,19 @@ func TestMergeV2SnapshotsNeverLosesAMovingThread(t *testing.T) {
 	require.Len(t, merged.Threads, 1)
 }
 
+// The three reads are only an exact picture when the server did not move
+// between them. Equal sequences say it did not; anything else is marked, so
+// the watcher never tears down on it.
+func TestMergeV2SnapshotsMarksAMovingServerInconsistent(t *testing.T) {
+	at := func(seq int) *v2ArchivedShellSnapshot { return &v2ArchivedShellSnapshot{SnapshotSequence: seq} }
+	active := &v2ShellSnapshot{SnapshotSequence: 7}
+
+	assert.False(t, mergeV2Snapshots(at(7), active, at(7)).Inconsistent)
+	assert.True(t, mergeV2Snapshots(at(6), active, at(7)).Inconsistent, "moved before the active read")
+	assert.True(t, mergeV2Snapshots(at(7), active, at(8)).Inconsistent, "moved after the active read")
+	assert.True(t, mergeV2Snapshots(nil, active, at(7)).Inconsistent, "a missing read is never consistent")
+}
+
 func TestBuildMessageDispatchV2(t *testing.T) {
 	command := buildMessageDispatchV2("thr-1", "hello", true, nil)
 	encoded, err := json.Marshal(command)
@@ -283,7 +296,10 @@ func (f *fakeT3) serve(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte(`{"_tag":"HttpApiDecodeError","message":"Missing key x-t3-orchestration-protocol"}`))
 				return
 			}
-			_, _ = w.Write(f.shell)
+			f.mu.Lock()
+			body := f.shell
+			f.mu.Unlock()
+			_, _ = w.Write(body)
 			return
 		}
 		_, _ = w.Write([]byte(`{"snapshotSequence":1,"projects":[],"threads":[{"id":"v1-live","worktreePath":"/w/one"}]}`))
@@ -359,7 +375,10 @@ func (f *fakeT3) serveWS(w http.ResponseWriter, r *http.Request, p int) {
 
 			switch m.Method {
 			case MethodV2GetArchivedShellSnapshot:
-				exit(m.ID, json.RawMessage(f.archived))
+				f.mu.Lock()
+				archived := f.archived
+				f.mu.Unlock()
+				exit(m.ID, json.RawMessage(archived))
 			case MethodV2DispatchCommand:
 				exit(m.ID, map[string]any{"sequence": 4813})
 			case MethodV2LaunchThread:
@@ -475,7 +494,10 @@ func TestV2StartTurnDispatchesMessage(t *testing.T) {
 
 	// The run that was latest before the dispatch is the baseline, so
 	// WaitForTurn does not take the previous run as this turn's verdict.
-	assert.True(t, c.isBaselineRun("thr-running", "run-a2"))
+	baseline, ok := c.baseline("thr-running")
+	require.True(t, ok)
+	assert.Equal(t, "run-a2", baseline.runID)
+	assert.True(t, baseline.active, "thr-running had an active run when the message was sent")
 }
 
 func TestV2WaitForTurnIgnoresThePreviousRun(t *testing.T) {
@@ -716,20 +738,86 @@ func TestRediscoverPicksUpAMovedServer(t *testing.T) {
 	assert.False(t, c.Rediscover())
 }
 
-func TestLaunchIntent(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	wt := "/home/u/.t3/worktrees/kudtrading/feat-z"
+// A server that never holds still across the three reads is retried, then
+// reported as Inconsistent rather than as an exact picture.
+func TestV2SnapshotRetriesThenReportsInconsistent(t *testing.T) {
+	f := newFakeT3(t, ProtocolV2)
+	c := f.client()
+	f.mu.Lock()
+	f.archived = []byte(`{"schemaVersion":3,"snapshotSequence":1,"projects":[],"threads":[]}`)
+	f.mu.Unlock()
 
-	assert.False(t, ConsumeLaunchIntent(wt), "no intent recorded")
-	require.NoError(t, WriteLaunchIntent(wt+"/"))
-	assert.True(t, ConsumeLaunchIntent(wt), "trailing separator does not matter")
-	assert.False(t, ConsumeLaunchIntent(wt), "consumed once")
-
-	// A stale intent is not honoured.
-	require.NoError(t, WriteLaunchIntent(wt))
-	path, err := launchIntentPath(wt)
+	snapshot, err := c.Snapshot(testCtx(t))
 	require.NoError(t, err)
-	stale := time.Now().Add(-2 * LaunchIntentTTL).UTC().Format(time.RFC3339)
-	require.NoError(t, os.WriteFile(path, []byte(stale+"\n"), 0644))
-	assert.False(t, ConsumeLaunchIntent(wt))
+	assert.True(t, snapshot.Inconsistent)
+	assert.Len(t, f.callsTo(MethodV2GetArchivedShellSnapshot), 2*v2SnapshotAttempts)
+}
+
+// A turn whose run is preparing — the launch's setup script, a database clone
+// — is not a turn that failed to start. The wait extends past Timeout while
+// the run is visibly preparing, and succeeds once it starts.
+func TestV2WaitForTurnWaitsThroughPreparing(t *testing.T) {
+	f := newFakeT3(t, ProtocolV2)
+	c := f.client()
+	ctx := testCtx(t)
+	setShell := func(body string) {
+		f.mu.Lock()
+		f.shell = []byte(`{"schemaVersion":3,"snapshotSequence":1,"projects":[],"archivedThreads":[],"threads":[` + body + `]}`)
+		f.mu.Unlock()
+	}
+	setShell(`{"id":"thr-new","status":"idle","latestRunId":null,"activeRunId":null,"archivedAt":null,"deletedAt":null}`)
+	require.NoError(t, c.StartTurn(ctx, "thr-new", "hello", ""))
+
+	setShell(`{"id":"thr-new","status":"preparing","activityRunStatus":"preparing","latestRunId":"run-1","activeRunId":"run-1","archivedAt":null,"deletedAt":null}`)
+	go func() {
+		time.Sleep(2500 * time.Millisecond)
+		setShell(`{"id":"thr-new","status":"running","activityRunStatus":"running","latestRunId":"run-1","latestRunStartedAt":"2026-10-03T04:00:00.000Z","activeRunId":"run-1","archivedAt":null,"deletedAt":null}`)
+	}()
+	outcome, err := c.WaitForTurnWith(ctx, "thr-new", TurnWait{Timeout: time.Second, MaxWait: 8 * time.Second})
+	require.NoError(t, err, "preparing must extend the one-second timeout")
+	assert.Equal(t, TurnStarted, outcome)
+}
+
+// Preparing is waited through only up to MaxWait.
+func TestV2WaitForTurnPreparingIsCapped(t *testing.T) {
+	f := newFakeT3(t, ProtocolV2)
+	c := f.client()
+	ctx := testCtx(t)
+	f.mu.Lock()
+	f.shell = []byte(`{"schemaVersion":3,"snapshotSequence":1,"projects":[],"archivedThreads":[],"threads":[
+		{"id":"thr-new","status":"preparing","activityRunStatus":"preparing","latestRunId":"run-1","activeRunId":"run-1","archivedAt":null,"deletedAt":null}]}`)
+	f.mu.Unlock()
+	_, err := c.WaitForTurnWith(ctx, "thr-new", TurnWait{Timeout: time.Second, MaxWait: 2 * time.Second})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "still preparing")
+}
+
+// Conductor's own provisioning counts as preparing too.
+func TestWaitForTurnExtendsWhileProvisioning(t *testing.T) {
+	f := newFakeT3(t, ProtocolV2)
+	c := f.client()
+	ctx := testCtx(t)
+	f.mu.Lock()
+	f.shell = []byte(`{"schemaVersion":3,"snapshotSequence":1,"projects":[],"archivedThreads":[],"threads":[
+		{"id":"thr-new","status":"idle","latestRunId":null,"activeRunId":null,"archivedAt":null,"deletedAt":null}]}`)
+	f.mu.Unlock()
+	start := time.Now()
+	_, err := c.WaitForTurnWith(ctx, "thr-new", TurnWait{
+		Timeout: time.Second, MaxWait: 3 * time.Second,
+		Provisioning: func() bool { return true },
+	})
+	require.Error(t, err)
+	assert.GreaterOrEqual(t, time.Since(start), 2500*time.Millisecond, "provisioning extended the wait to MaxWait")
+}
+
+// A message sent while a run is active is handed to it (steered or queued),
+// which is a success as soon as the active run is seen running.
+func TestV2WaitForTurnReportsJoiningTheActiveRun(t *testing.T) {
+	f := newFakeT3(t, ProtocolV2)
+	c := f.client()
+	ctx := testCtx(t)
+	require.NoError(t, c.StartTurn(ctx, "thr-running", "also this", ""))
+	outcome, err := c.WaitForTurnWith(ctx, "thr-running", TurnWait{Timeout: 2 * time.Second})
+	require.NoError(t, err)
+	assert.Equal(t, TurnJoinedActive, outcome)
 }

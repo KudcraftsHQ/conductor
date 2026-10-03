@@ -213,14 +213,10 @@ func (m t3Mux) createWindow(project, branch, worktreePath string, agent codingag
 		}
 		modelHints = client.ProjectDefaultModels(ctx, projectID)
 
-		// launchThread runs the project's runOnWorktreeCreate script in the
-		// worktree — which is `conductor adopt`. Conductor is provisioning this
-		// worktree itself, so tell adopt to bind rather than re-provision;
-		// otherwise it would drop and re-clone the database underneath the
-		// provisioning already in flight.
-		if err := t3.WriteLaunchIntent(worktreePath); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not record the T3 launch intent: %v\n", err)
-		}
+		// launchThread runs the project's runOnWorktreeCreate script — that
+		// is `conductor adopt` — in the worktree. Adopt sees the worktree is
+		// already registered and set up (or being set up by this very
+		// process) and only binds; see planExisting in cmd/conductor/adopt.go.
 	} else {
 		// V1: the project is rooted at the worktree, not the main repo, so each
 		// worktree gets its own file tree, scripts and preview in the T3 UI.
@@ -242,7 +238,13 @@ func (m t3Mux) createWindow(project, branch, worktreePath string, agent codingag
 		return fmt.Errorf("cannot open a T3 thread for %s/%s: %w", project, branch, err)
 	}
 
-	threadID, err := client.CreateThread(ctx, t3.CreateThreadOptions{
+	// The thread itself is quick; holding its first turn for the worktree
+	// (readyGate, up to readyGateTimeout) and then waiting for the turn to
+	// start (up to its own preparing cap) is not. The 60s context above
+	// bounded both, which cut a slow database clone off at a minute.
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), 2*readyGateTimeout+5*time.Minute)
+	defer cancelCreate()
+	threadID, err := client.CreateThread(createCtx, t3.CreateThreadOptions{
 		ProjectID:    projectID,
 		Title:        m.WindowName(project, branch),
 		Branch:       branch,
@@ -250,6 +252,7 @@ func (m t3Mux) createWindow(project, branch, worktreePath string, agent codingag
 		Model:        model,
 		TaskPrompt:   taskPrompt,
 		ReadyGate:    readyGate(worktreePath),
+		Provisioning: WorktreeProvisioning(worktreePath),
 	})
 	if err != nil {
 		// A thread whose turn never started is reported, not swallowed: the
@@ -545,6 +548,20 @@ func readyGate(worktreePath string) func(context.Context) error {
 			fmt.Fprintf(os.Stderr, "%s is ready\n", worktreePath)
 		}
 		return nil
+	}
+}
+
+// WorktreeProvisioning reports whether conductor is still provisioning the
+// worktree at path: registered-but-not-yet (imminent), setup running, or setup
+// done with a phase (database, dev server) not yet true. Failed, stalled and
+// ready all answer false — waiting longer will not change them.
+func WorktreeProvisioning(path string) func() bool {
+	return func() bool {
+		cfg, err := config.Load()
+		if err != nil || cfg == nil {
+			return false
+		}
+		return !ready.Resolve(cfg, path, ready.DefaultPhases).State.Terminal()
 	}
 }
 

@@ -64,11 +64,14 @@ type Worktree struct {
 	// Branch is what the dev-server window is keyed by, so it is not
 	// interchangeable with Name: the window is project/branch while the entry
 	// is registered under a city.
-	Branch       string
-	Path         string
-	Hibernated   bool
-	Archived     bool
-	IsRoot       bool
+	Branch     string
+	Path       string
+	Hibernated bool
+	Archived   bool
+	IsRoot     bool
+	// Provisioning is true while another process is provisioning the worktree
+	// (setup status creating or running, and not stalled).
+	Provisioning bool
 	KnownThreads []string
 	// Ports are the worktree's allocated ports. Nothing but its own supervised
 	// server should listen on them, which is how a stray is recognised.
@@ -114,22 +117,36 @@ type Decider struct {
 	// the dev server stops. Settling and unsettling in quick succession should
 	// not cost a rebuild.
 	SettleDebounce time.Duration
+	// TeardownConfirm is how long a worktree must stay threadless before it is
+	// torn down. A teardown is the one irreversible action, so a single
+	// snapshot is never enough evidence: the worktree has to be seen with no
+	// thread at all on at least two passes this far apart, both from consistent
+	// snapshots. A thread moving between T3's active and archived lists shows
+	// up in neither for an instant; it cannot do that twice, seconds apart.
+	TeardownConfirm time.Duration
 	// Now defaults to time.Now.
 	Now Clock
 
 	zeroLiveSince map[string]time.Time
 	settledSince  map[string]time.Time
+	goneSince     map[string]time.Time
 }
+
+// DefaultTeardownConfirm is TeardownConfirm's default: two watcher polls and
+// change.
+const DefaultTeardownConfirm = 12 * time.Second
 
 // NewDecider returns a Decider with the given debounce and teardown cap.
 func NewDecider(debounce time.Duration, maxTeardowns int) *Decider {
 	return &Decider{
-		Debounce:       debounce,
-		MaxTeardowns:   maxTeardowns,
-		SettleDebounce: DefaultSettleDebounce,
-		Now:            time.Now,
-		zeroLiveSince:  make(map[string]time.Time),
-		settledSince:   make(map[string]time.Time),
+		Debounce:        debounce,
+		MaxTeardowns:    maxTeardowns,
+		SettleDebounce:  DefaultSettleDebounce,
+		TeardownConfirm: DefaultTeardownConfirm,
+		Now:             time.Now,
+		zeroLiveSince:   make(map[string]time.Time),
+		settledSince:    make(map[string]time.Time),
+		goneSince:       make(map[string]time.Time),
 	}
 }
 
@@ -151,6 +168,9 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 	}
 	if d.settledSince == nil {
 		d.settledSince = make(map[string]time.Time)
+	}
+	if d.goneSince == nil {
+		d.goneSince = make(map[string]time.Time)
 	}
 	now := d.now()
 	live, archived := indexThreads(snapshot)
@@ -179,12 +199,30 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 			Archive:  len(archivedIDs),
 		}
 
+		if len(liveIDs) > 0 || len(archivedIDs) > 0 {
+			// Any thread at all, live or archived, holds the tree.
+			delete(d.goneSince, key)
+		}
+
 		switch {
 		case len(liveIDs) == 0 && len(archivedIDs) == 0:
 			// Every thread that ever held this worktree is gone from T3
-			// altogether, which only happens by deletion.
+			// altogether, which only happens by deletion — but only a
+			// consistent snapshot can say so, and only twice in a row.
 			delete(d.zeroLiveSince, key)
 			delete(d.settledSince, key)
+			if snapshot == nil || snapshot.Inconsistent {
+				// No evidence either way: neither start nor reset the clock.
+				break
+			}
+			since, seen := d.goneSince[key]
+			if !seen {
+				d.goneSince[key] = now
+				break
+			}
+			if now.Sub(since) < d.TeardownConfirm {
+				break
+			}
 			decision.Action = ActionTeardown
 			teardowns++
 
@@ -193,6 +231,13 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 			if worktree.Hibernated {
 				// Waking provisions the dev server itself.
 				delete(d.settledSince, key)
+				if worktree.Provisioning {
+					// Something else — adopt run by a T3 launch, or a wake
+					// by hand — is already provisioning it. A second
+					// provision would drop and re-clone the database under
+					// the first.
+					break
+				}
 				decision.Action = ActionWake
 				break
 			}

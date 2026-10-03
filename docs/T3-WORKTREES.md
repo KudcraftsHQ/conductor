@@ -87,6 +87,14 @@ These exist because the failure modes are expensive:
   `thread.delete` for every thread in it, which with one project per repository
   is every worktree at once. More than `--max-teardowns` (default 3) in a single
   pass and the watcher does nothing and says so.
+- **A teardown needs two consistent sightings.** A worktree is torn down only
+  after it has had no thread at all — live or archived — on two passes at least
+  12 s apart, each from a consistent snapshot. Any thread seen in between
+  resets the clock; an inconsistent snapshot (see *Archived vs deleted*) is no
+  evidence and neither starts nor finishes it.
+- **One provision at a time.** The watcher does not wake a hibernated worktree
+  that is already being provisioned (setup status creating/running, not
+  stalled), and `adopt` decides under a cross-process lock.
 - **Hibernation is debounced** by 10 minutes, so archiving a thread by mistake
   costs a click to undo rather than a database reclone.
 - **Worktrees with no bound threads are invisible.** Anything created under tmux
@@ -230,11 +238,17 @@ question, anything else an approval), and its run status onto the session
 status the guard checks (`preparing`/`starting` → starting,
 `running`/`waiting` → running, `failed` → error).
 
-**Archived vs deleted.** V2 has no single route listing both, so the archive is
-read on both sides of the active read and the three are merged. A thread moving
-between archive and active between two reads would otherwise be in neither,
-which is indistinguishable from deletion — and deletion tears the worktree
-down at once.
+**Archived vs deleted.** V2 has no single route listing both (the server's
+all-locations read is internal), so the archive is read on both sides of the
+active read and the three are merged. A thread moving between archive and
+active between two reads would otherwise be in neither, which is
+indistinguishable from deletion. Each read also carries the server's
+application-event sequence, read in the same transaction as its threads; equal
+sequences on all three mean nothing moved and the merge is exact. Otherwise the
+reads are retried (four attempts) and a snapshot that never settles is marked
+inconsistent, and the watcher will not tear anything down on it. Against the
+live 0.0.46-nightly.20261003 server with ~420 threads, 40 of 40 snapshots were
+consistent at ~280 ms each.
 
 **One project per repository.** On V2 conductor launches its threads under the
 project rooted at the repository, bound to the worktree with
@@ -242,16 +256,34 @@ project rooted at the repository, bound to the worktree with
 T3's composer already has, so the sidebar, `adopt` and the watcher all see the
 same thing whichever way a worktree was made. V1 behaviour is unchanged.
 
-**The launch runs the setup hook.** `launchThread` runs the project's
-`runOnWorktreeCreate` script — `conductor adopt` — in the worktree, even though
-conductor is already provisioning it. Re-provisioning would drop and re-clone
-the database mid-setup, so conductor records a launch intent first
-(`~/.conductor/t3-launch-intents/`, valid ten minutes) and `adopt` on an
-already-registered worktree with a fresh intent only binds.
+**Every launch runs the setup hook.** On V2, `launchThread` prepares every
+non-resumed launch, and preparation runs the project's `runOnWorktreeCreate`
+script — `conductor adopt` — whatever the workspace strategy: a new worktree, a
+new thread in an existing worktree (UI, `t3_thread_launch`, `create_threads`,
+conductor's own launch), and a thread at the project root, where the
+"worktree" is the repository itself. So `adopt` decides from conductor's own
+state, never re-provisioning a worktree that is set up:
+
+| Situation | `adopt` does |
+|---|---|
+| path is the repository root | nothing |
+| not registered yet | registers and provisions |
+| being provisioned (creating/running, live owner) | binds only |
+| hibernated | binds only; the watcher wakes it |
+| set up (done, or no status recorded) | binds only |
+| last setup failed or stalled | provisions again |
+| `--reprovision` | provisions again (unless one is running) |
+
+For an `existing_worktree` or root launch T3 does not wait for the hook: it
+writes it to a terminal and moves on, so the turn may start first.
 
 **The first turn is still held.** The launch carries no `initialMessage`; the
 turn is sent with `message.dispatch` once the worktree is ready, exactly as on
 V1. A V2 turn counts as started once its run leaves `preparing`/`queued`.
+While a run is preparing (or the worktree is still provisioning) the start
+wait extends past its 45 s, up to 20 minutes; only a failed run or 45 s of no
+visible progress is reported as failure. A message sent while a run is active
+is handed to it — the server steers it in or queues it — and reported as such.
 
 ## Where worktrees live
 

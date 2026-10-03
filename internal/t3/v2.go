@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // Orchestration V2 wire types and operations.
@@ -224,18 +225,21 @@ func (c *Client) shellV2(ctx context.Context) (*ShellSnapshot, error) {
 
 // fullSnapshotV2 is Snapshot for a V2 server: active and archived threads.
 //
-// They come from two reads — HTTP for the active shell, the socket for the
-// archive — and a thread moving between the two in between would be in
-// neither, which reads exactly like a deletion. The watcher tears a worktree
-// down on deletion, immediately and irreversibly, so that window has to be
-// closed rather than made rare.
+// V2 offers no single read of both: the active shell is HTTP, the archive is
+// a socket RPC, and the one server query that returns both is not exposed. A
+// thread moving between the two in between would be in neither, which reads
+// exactly like a deletion — and the watcher tears a worktree down on
+// deletion, irreversibly. Two defences, both needed:
 //
-// The archive is therefore read on both sides of the active read, and every
-// thread seen in any of the three is kept, the latest read winning. A thread
-// archived at any point in the sequence is in the active read or the second
-// archive read; one unarchived is in the first archive read or the active
-// read. Only a thread that is absent from all three — actually deleted, or
-// created and deleted inside the window — is absent from the result.
+//  1. The archive is read on both sides of the active read and every thread
+//     seen in any of the three is kept, the latest read winning. A single
+//     archive or unarchive inside the window cannot lose a thread.
+//  2. Each read carries the server's application-event sequence (read in the
+//     same transaction as the threads). Equal sequences on all three mean
+//     nothing changed in between, so the union is an exact picture. If the
+//     server keeps moving, the reads are retried a few times; a snapshot that
+//     never settles is returned marked Inconsistent, which callers may show
+//     but must not destroy anything on.
 func (c *Client) fullSnapshotV2(ctx context.Context) (*ShellSnapshot, error) {
 	conn, err := c.dial(ctx, ProtocolV2)
 	if err != nil {
@@ -243,20 +247,37 @@ func (c *Client) fullSnapshotV2(ctx context.Context) (*ShellSnapshot, error) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	before, err := conn.archivedShellV2(ctx)
-	if err != nil {
-		return nil, err
+	var out *ShellSnapshot
+	for attempt := 0; attempt < v2SnapshotAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 75 * time.Millisecond):
+			}
+		}
+		before, err := conn.archivedShellV2(ctx)
+		if err != nil {
+			return nil, err
+		}
+		active, err := c.fetchShellV2(ctx)
+		if err != nil {
+			return nil, err
+		}
+		after, err := conn.archivedShellV2(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out = mergeV2Snapshots(before, active, after)
+		if !out.Inconsistent {
+			return out, nil
+		}
 	}
-	active, err := c.fetchShellV2(ctx)
-	if err != nil {
-		return nil, err
-	}
-	after, err := conn.archivedShellV2(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return mergeV2Snapshots(before, active, after), nil
+	return out, nil
 }
+
+// v2SnapshotAttempts bounds how often fullSnapshotV2 re-reads a moving server.
+const v2SnapshotAttempts = 4
 
 // mergeV2Snapshots implements the three-read union described on
 // fullSnapshotV2. Order of the result: active threads, then archived, each in
@@ -266,6 +287,11 @@ func mergeV2Snapshots(before *v2ArchivedShellSnapshot, active *v2ShellSnapshot, 
 	for _, p := range active.Projects {
 		out.Projects = append(out.Projects, p.toProject())
 	}
+	// Fail closed: a missing archive read, or any sequence that differs, means
+	// the three reads may describe different moments.
+	out.Inconsistent = before == nil || after == nil ||
+		before.SnapshotSequence != active.SnapshotSequence ||
+		after.SnapshotSequence != active.SnapshotSequence
 
 	type entry struct {
 		thread Thread
