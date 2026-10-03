@@ -508,6 +508,12 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 	if m.store != nil {
 		_ = m.store.SetWorktreeStatus(projectName, worktreeName, status)
 		_ = m.store.WakeWorktree(projectName, worktreeName, worktree.Ports, worktree.DatabaseName, worktree.DatabaseURL)
+		// Flush now, not after the save debounce: the dev window below runs
+		// `conductor run`, which reads the ports from conductor.json. Read
+		// before the save lands, a woken worktree has none, so PORT is never
+		// set and the server comes up on the project's defaults (3000/3001)
+		// instead of its own.
+		_ = m.store.ForceSave()
 	} else {
 		worktree.MarkSetup(status)
 		worktree.Hibernated = false
