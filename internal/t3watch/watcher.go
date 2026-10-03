@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -99,7 +100,10 @@ func (w *Watcher) logf(format string, args ...any) {
 	if w.Log == nil {
 		return
 	}
-	fmt.Fprintf(w.Log, "[t3watch] "+format+"\n", args...)
+	// Timestamped: the service appends to a plain file, so without this there
+	// is no telling when anything happened.
+	fmt.Fprintf(w.Log, "%s [t3watch] "+format+"\n",
+		append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
 }
 
 // Start runs the loop until Stop is called.
@@ -264,13 +268,14 @@ func (w *Watcher) Tick(ctx context.Context) error {
 	// quiet tick — and this is exactly the moment somebody needs to know.
 	// It is said once per change of count, though: repeated every five seconds
 	// it grew the log to tens of megabytes and buried everything else.
-	refused := countGoneWorktrees(worktrees, snapshot)
+	gone := goneWorktrees(worktrees, snapshot)
+	refused := len(gone)
 	if refused <= w.decider.MaxTeardowns {
 		refused = 0
 	}
 	if refused != w.lastRefused && refused > 0 {
 		w.logf("refusing to tear down %d worktrees at once — deleting a T3 project deletes every thread in it. "+
-			"Run 'conductor t3 reconcile --archive' if this really was intended.", refused)
+			"Run 'conductor t3 reconcile --archive' if this really was intended. %v", refused, gone)
 	}
 	w.lastRefused = refused
 
@@ -492,24 +497,29 @@ func collect(cfg *config.Config) []Worktree {
 	return out
 }
 
-// countGoneWorktrees counts how many hosted worktrees have lost every thread,
-// before the batch cap is applied.
-func countGoneWorktrees(worktrees []Worktree, snapshot *t3.ShellSnapshot) int {
+// goneWorktrees names the hosted worktrees that have lost every thread, before
+// the batch cap is applied. Named rather than counted, so a refusal in the log
+// says which worktrees it was about.
+func goneWorktrees(worktrees []Worktree, snapshot *t3.ShellSnapshot) []string {
 	if snapshot == nil || snapshot.Inconsistent {
-		return 0
+		return nil
 	}
 	live, archived := indexThreads(snapshot)
-	n := 0
+	var out []string
 	for _, worktree := range worktrees {
 		if worktree.IsRoot || worktree.Archived || worktree.Path == "" || len(worktree.KnownThreads) == 0 {
 			continue
 		}
+		if worktree.Provisioning {
+			continue // Held: see Decide.
+		}
 		key := normalize(worktree.Path)
 		if len(live[key]) == 0 && len(archived[key]) == 0 {
-			n++
+			out = append(out, worktree.Key())
 		}
 	}
-	return n
+	sort.Strings(out)
+	return out
 }
 
 func sameStrings(a, b []string) bool {

@@ -363,3 +363,23 @@ func TestNoDevVerdictOutsideActive(t *testing.T) {
 	assert.Equal(t, ActionWake, decision.Action)
 	assert.Equal(t, DevKeep, decision.Dev)
 }
+
+// A worktree whose setup is still running is held, however long its thread
+// takes to show up in T3.
+func TestProvisioningWorktreeIsNeverTornDown(t *testing.T) {
+	worktree := hosted("a")
+	worktree.Provisioning = true
+	snapshot := &t3.ShellSnapshot{}
+
+	d := decider(time.Now())
+	decision := only(t, confirmed(d, time.Now(), []Worktree{worktree}, snapshot))
+	assert.Equal(t, ActionNone, decision.Action)
+	assert.Empty(t, goneWorktrees([]Worktree{worktree}, snapshot))
+
+	// Once setup has finished, the confirmation starts from scratch.
+	worktree.Provisioning = false
+	start := time.Now()
+	d.Now = func() time.Time { return start }
+	assert.Equal(t, ActionNone, only(t, d.Decide([]Worktree{worktree}, snapshot)).Action)
+	assert.Equal(t, ActionTeardown, only(t, confirmed(d, start.Add(time.Second), []Worktree{worktree}, snapshot)).Action)
+}

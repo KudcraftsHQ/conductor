@@ -211,6 +211,13 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 			// consistent snapshot can say so, and only twice in a row.
 			delete(d.zeroLiveSince, key)
 			delete(d.settledSince, key)
+			if worktree.Provisioning {
+				// A worktree still being set up is never gone: whatever
+				// launched it is holding it, even if T3 has not shown its
+				// thread yet. The clock restarts once setup ends.
+				delete(d.goneSince, key)
+				break
+			}
 			if snapshot == nil || snapshot.Inconsistent {
 				// No evidence either way: neither start nor reset the clock.
 				break
