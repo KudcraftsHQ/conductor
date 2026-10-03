@@ -73,6 +73,9 @@ type Watcher struct {
 
 // New builds a watcher over the given store.
 func New(s *store.Store) (*Watcher, error) {
+	// Before anything is spawned: setup and archive scripts need bun and
+	// conductor, which a systemd service's PATH does not have.
+	ensureUserPath()
 	client, err := t3.New()
 	if err != nil {
 		return nil, err
