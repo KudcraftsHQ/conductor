@@ -105,9 +105,13 @@ func (w *Watcher) logf(format string, args ...any) {
 	}
 	// Timestamped: the service appends to a plain file, so without this there
 	// is no telling when anything happened.
-	fmt.Fprintf(w.Log, "%s [t3watch] "+format+"\n",
-		append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...)
+	fmt.Fprintf(w.Log, "%s [t3watch] "+format+"\n", append([]any{Timestamp()}, args...)...)
 }
+
+// Timestamp is the prefix every watcher log line carries: RFC3339 in UTC, so
+// the plain log file the service appends to can be lined up against T3's own
+// event times. Rotation is logrotate's job (copytruncate), not ours.
+func Timestamp() string { return time.Now().UTC().Format(time.RFC3339) }
 
 // Start runs the loop until Stop is called.
 func (w *Watcher) Start() error {

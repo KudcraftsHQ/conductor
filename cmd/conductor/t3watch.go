@@ -66,17 +66,18 @@ survive a deletion made by mistake.`,
 			return err
 		}
 		if t3WatchDryRun {
-			fmt.Println("Watching T3 Code (dry run — nothing will be changed). Ctrl-C to stop.")
+			fmt.Printf("%s [t3watch] Watching T3 Code (dry run — nothing will be changed). Ctrl-C to stop.\n",
+				t3watch.Timestamp())
 		} else {
-			fmt.Printf("Watching T3 Code every %s, hibernating after %s idle. Ctrl-C to stop.\n",
-				t3WatchInterval, t3WatchDebounce)
+			fmt.Printf("%s [t3watch] Watching T3 Code every %s, hibernating after %s idle. Ctrl-C to stop.\n",
+				t3watch.Timestamp(), t3WatchInterval, t3WatchDebounce)
 		}
 
 		signals := make(chan os.Signal, 1)
 		signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 		<-signals
 
-		fmt.Println("\nStopping the watcher...")
+		fmt.Printf("\n%s [t3watch] Stopping the watcher...\n", t3watch.Timestamp())
 		watcher.Stop()
 		return nil
 	},
