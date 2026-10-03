@@ -24,7 +24,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -276,7 +275,7 @@ func Kill(pids []int) int {
 		}
 	}
 	for i := len(all) - 1; i >= 0; i-- {
-		_ = syscall.Kill(all[i], syscall.SIGTERM)
+		terminate(all[i])
 	}
 	// Give a dev server its shutdown handler before insisting.
 	deadline := time.Now().Add(5 * time.Second)
@@ -287,8 +286,8 @@ func Kill(pids []int) int {
 		time.Sleep(250 * time.Millisecond)
 	}
 	for i := len(all) - 1; i >= 0; i-- {
-		if syscall.Kill(all[i], 0) == nil {
-			_ = syscall.Kill(all[i], syscall.SIGKILL)
+		if alive(all[i]) {
+			forceKill(all[i])
 		}
 	}
 	return len(all)
@@ -296,7 +295,7 @@ func Kill(pids []int) int {
 
 func anyAlive(pids []int) bool {
 	for _, pid := range pids {
-		if syscall.Kill(pid, 0) == nil {
+		if alive(pid) {
 			return true
 		}
 	}
