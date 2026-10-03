@@ -138,15 +138,26 @@ func (c *Client) EnsureProject(ctx context.Context, title, workspaceRoot string)
 	}
 
 	projectID := NewID()
-	command := ProjectCreateCommand{
-		Type:          "project.create",
-		CommandID:     NewID(),
-		ProjectID:     projectID,
-		Title:         title,
-		WorkspaceRoot: workspaceRoot,
-		CreatedAt:     Now(),
-	}
-	if err := c.Dispatch(ctx, command); err != nil {
+	err = c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			return c.mutateProject(ctx, v2ProjectCreateMutation{
+				Type:          "project.create",
+				CommandID:     NewID(),
+				ProjectID:     projectID,
+				Title:         title,
+				WorkspaceRoot: workspaceRoot,
+			})
+		}
+		return c.Dispatch(ctx, ProjectCreateCommand{
+			Type:          "project.create",
+			CommandID:     NewID(),
+			ProjectID:     projectID,
+			Title:         title,
+			WorkspaceRoot: workspaceRoot,
+			CreatedAt:     Now(),
+		})
+	})
+	if err != nil {
 		return "", fmt.Errorf("failed to create T3 project %q: %w", title, err)
 	}
 	return projectID, nil
@@ -159,13 +170,28 @@ func (c *Client) EnsureProject(ctx context.Context, title, workspaceRoot string)
 // on this machine default to an instance that is configured but disabled, so
 // these are candidates for SelectModel to validate, never answers.
 func (c *Client) ProjectDefaultModels(ctx context.Context, projectIDs ...string) []ModelSelection {
-	var detail struct {
-		Projects []struct {
-			ID                    string          `json:"id"`
-			DefaultModelSelection *ModelSelection `json:"defaultModelSelection"`
-		} `json:"projects"`
+	type projectDefault struct {
+		ID                    string          `json:"id"`
+		DefaultModelSelection *ModelSelection `json:"defaultModelSelection"`
 	}
-	if err := c.do(ctx, "GET", "/api/orchestration/shell", nil, &detail); err != nil {
+	var detail struct {
+		Projects []projectDefault `json:"projects"`
+	}
+	err := c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			shell, err := c.fetchShellV2(ctx)
+			if err != nil {
+				return err
+			}
+			detail.Projects = nil
+			for _, project := range shell.Projects {
+				detail.Projects = append(detail.Projects, projectDefault{ID: project.ID, DefaultModelSelection: project.DefaultModelSelection})
+			}
+			return nil
+		}
+		return c.do(ctx, "GET", "/api/orchestration/shell", nil, &detail)
+	})
+	if err != nil {
 		return nil
 	}
 	var out []ModelSelection
@@ -234,6 +260,9 @@ type CreateThreadOptions struct {
 	// created; the error is reported and the turn is sent anyway, because a
 	// thread with no turn is harder to recover from than an early one.
 	ReadyGate func(context.Context) error
+	// Provisioning, when set, reports whether the worktree is still being
+	// provisioned; the first-turn wait keeps going while it is.
+	Provisioning func() bool
 }
 
 // CreateThread opens a thread bound to a worktree and, when a task prompt is
@@ -262,20 +291,25 @@ func (c *Client) CreateThread(ctx context.Context, opts CreateThreadOptions) (st
 	}
 
 	threadID := NewID()
-	create := ThreadCreateCommand{
-		Type:            "thread.create",
-		CommandID:       NewID(),
-		ThreadID:        threadID,
-		ProjectID:       opts.ProjectID,
-		Title:           opts.Title,
-		ModelSelection:  opts.Model,
-		RuntimeMode:     opts.RuntimeMode,
-		InteractionMode: InteractionModeDefault,
-		Branch:          ptr(opts.Branch),
-		WorktreePath:    ptr(opts.WorktreePath),
-		CreatedAt:       Now(),
-	}
-	if err := c.Dispatch(ctx, create); err != nil {
+	err := c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			return c.createThreadV2(ctx, threadID, opts)
+		}
+		return c.Dispatch(ctx, ThreadCreateCommand{
+			Type:            "thread.create",
+			CommandID:       NewID(),
+			ThreadID:        threadID,
+			ProjectID:       opts.ProjectID,
+			Title:           opts.Title,
+			ModelSelection:  opts.Model,
+			RuntimeMode:     opts.RuntimeMode,
+			InteractionMode: InteractionModeDefault,
+			Branch:          ptr(opts.Branch),
+			WorktreePath:    ptr(opts.WorktreePath),
+			CreatedAt:       Now(),
+		})
+	})
+	if err != nil {
 		return "", fmt.Errorf("failed to create T3 thread %q: %w", opts.Title, err)
 	}
 
@@ -290,63 +324,193 @@ func (c *Client) CreateThread(ctx context.Context, opts CreateThreadOptions) (st
 			// The thread exists; report the failure without pretending it does not.
 			return threadID, fmt.Errorf("thread created but its first turn failed: %w", err)
 		}
-		if err := c.WaitForTurn(ctx, threadID, turnStartTimeout); err != nil {
+		if _, err := c.WaitForTurnWith(ctx, threadID, TurnWait{
+			Timeout:      turnStartTimeout,
+			MaxWait:      turnPrepareCap,
+			Provisioning: opts.Provisioning,
+		}); err != nil {
 			return threadID, err
 		}
 	}
 	return threadID, nil
 }
 
-// turnStartTimeout bounds the wait for a turn to begin. Starting a provider
-// session spawns a process, so this is seconds rather than milliseconds.
+// createThreadV2 opens the thread through orchestration.launchThread, bound to
+// the worktree with the existing_worktree strategy.
+//
+// The first turn is deliberately *not* sent as the launch's initialMessage.
+// Conductor holds the first turn until the worktree is provisioned (ReadyGate),
+// and folding it into the launch would mean either holding the thread itself
+// back for minutes or giving up the hold. Launching bare and dispatching the
+// turn afterwards keeps V1's shape: the thread appears at once, the turn waits.
+//
+// Without a worktree path there is nothing to bind, so the thread runs at the
+// project root.
+func (c *Client) createThreadV2(ctx context.Context, threadID string, opts CreateThreadOptions) error {
+	strategy := v2WorkspaceStrategy{Type: "root", Branch: opts.Branch}
+	if opts.WorktreePath != "" {
+		strategy = v2WorkspaceStrategy{Type: "existing_worktree", WorktreePath: opts.WorktreePath, Branch: opts.Branch}
+	}
+	launched, err := c.launchThreadV2(ctx, v2ThreadLaunchInput{
+		CommandID:         NewID(),
+		CreationSource:    v2CreationSource,
+		ThreadID:          threadID,
+		ProjectID:         opts.ProjectID,
+		Title:             opts.Title,
+		ModelSelection:    opts.Model,
+		RuntimeMode:       opts.RuntimeMode,
+		InteractionMode:   InteractionModeDefault,
+		WorkspaceStrategy: strategy,
+	})
+	if err != nil {
+		return err
+	}
+	if launched != threadID {
+		return fmt.Errorf("T3 launched thread %s, not the requested %s", launched, threadID)
+	}
+	return nil
+}
+
+// turnStartTimeout bounds the wait for a turn to begin when nothing visible is
+// happening. Starting a provider session spawns a process, so this is seconds
+// rather than milliseconds.
 const turnStartTimeout = 45 * time.Second
 
+// turnPrepareCap bounds the wait while the thread or its worktree is visibly
+// being prepared. On V2 a launched thread's first run sits in "preparing"
+// until the project's setup script — `conductor adopt`, a database clone —
+// has finished, and a remote clone takes minutes. Matches readyGateTimeout.
+const turnPrepareCap = 20 * time.Minute
+
+// TurnOutcome says how a dispatched turn was accepted.
+type TurnOutcome int
+
+const (
+	// TurnStarted means a run for the message has begun.
+	TurnStarted TurnOutcome = iota + 1
+	// TurnJoinedActive means a run was already active when the message was
+	// sent, and it was handed to that run. With deliveryIntent "auto" the
+	// server decides how: steered into the running turn (seen live on
+	// 0.0.46-nightly.20261003), or queued to start when it ends.
+	TurnJoinedActive
+)
+
+// TurnWait tunes WaitForTurnWith.
+type TurnWait struct {
+	// Timeout is how long to wait while nothing shows any sign of progress.
+	Timeout time.Duration
+	// MaxWait caps the wait while the thread is visibly preparing (a run in
+	// preparing, queued or starting) or Provisioning reports true. Each such
+	// observation pushes the deadline out by Timeout, never beyond MaxWait.
+	MaxWait time.Duration
+	// Provisioning optionally reports that conductor's own provisioning of the
+	// worktree is still in progress, which counts as preparing.
+	Provisioning func() bool
+}
+
 // WaitForTurn blocks until a turn has begun on the thread, or reports why it
-// did not.
-//
-// Dispatching thread.turn.start only means the command bus accepted it. The
-// provider session starts afterwards and asynchronously, and when it refuses,
-// the reason lands in thread.session.lastError and nowhere else — no error
-// comes back on the dispatch, and the turn simply never appears. Without this
-// check conductor reports success for a thread that will never run, which is
-// exactly how an unknown provider instance stayed hidden for so long.
+// did not. See WaitForTurnWith.
 func (c *Client) WaitForTurn(ctx context.Context, threadID string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	var lastSessionStatus string
+	_, err := c.WaitForTurnWith(ctx, threadID, TurnWait{Timeout: timeout, MaxWait: turnPrepareCap})
+	return err
+}
+
+// WaitForTurnWith blocks until a turn has begun on the thread, or reports why
+// it did not.
+//
+// Dispatching only means the command was accepted. The provider session
+// starts afterwards and asynchronously, and when it refuses, the reason lands
+// on the thread and nowhere else — no error comes back on the dispatch, and
+// the turn simply never appears. Without this check conductor reports success
+// for a thread that will never run.
+//
+// A preparing thread is not a stuck one. While a run is preparing, queued or
+// starting — or the worktree is still being provisioned — the wait extends,
+// up to MaxWait; only a failed run or a long silence is reported as failure.
+// On V2 a message sent while another run was active is steered into it or
+// queued behind it, and is reported as TurnJoinedActive once that run is seen
+// running.
+func (c *Client) WaitForTurnWith(ctx context.Context, threadID string, opts TurnWait) (TurnOutcome, error) {
+	if opts.Timeout <= 0 {
+		opts.Timeout = turnStartTimeout
+	}
+	if opts.MaxWait < opts.Timeout {
+		opts.MaxWait = opts.Timeout
+	}
+	defer c.clearBaseline(threadID)
+
+	start := time.Now()
+	deadline := start.Add(opts.Timeout)
+	hardCap := start.Add(opts.MaxWait)
+	var lastStatus string
+	sawPreparing := false
 
 	for {
 		snapshot, err := c.Shell(ctx)
 		if err != nil {
-			return fmt.Errorf("thread %s created but its turn could not be verified: %w", threadID, err)
+			return 0, fmt.Errorf("thread %s: its turn could not be verified: %w", threadID, err)
 		}
-		for i := range snapshot.Threads {
-			thread := snapshot.Threads[i]
-			if thread.ID != threadID {
-				continue
-			}
-			if reason, failed := thread.Failed(); failed {
-				return fmt.Errorf("thread %s created but its turn did not start: %s", threadID, reason)
-			}
-			if thread.Started() {
-				return nil
-			}
+		preparing := false
+		if thread, ok := snapshot.FindThreadByID(threadID); ok {
 			if thread.Session != nil {
-				lastSessionStatus = thread.Session.Status
+				lastStatus = thread.Session.Status
 			}
+			baseline, hasBaseline := c.baseline(threadID)
+			switch {
+			case !hasBaseline || thread.RunID != baseline.runID:
+				// V1, or a run newer than the one before this message: its
+				// verdict is ours.
+				if reason, failed := thread.Failed(); failed {
+					return 0, fmt.Errorf("thread %s: its turn did not start: %s", threadID, reason)
+				}
+				if thread.Started() {
+					return TurnStarted, nil
+				}
+				preparing = lastStatus == "starting"
+			case baseline.active:
+				// Still the run that was active when the message was sent; the
+				// message was steered into it or queued behind it. Once that run
+				// is underway the message is in good hands. A failure of that
+				// run is not ours to report.
+				switch lastStatus {
+				case "running":
+					return TurnJoinedActive, nil
+				case "starting":
+					preparing = true
+				}
+			}
+		}
+		if !preparing && opts.Provisioning != nil && opts.Provisioning() {
+			preparing = true
 		}
 
-		if time.Now().After(deadline) {
-			status := lastSessionStatus
+		now := time.Now()
+		if preparing {
+			sawPreparing = true
+			if extended := now.Add(opts.Timeout); extended.After(deadline) {
+				deadline = extended
+				if deadline.After(hardCap) {
+					deadline = hardCap
+				}
+			}
+		}
+		if now.After(deadline) {
+			status := lastStatus
 			if status == "" {
 				status = "no provider session"
 			}
-			return fmt.Errorf(
-				"thread %s created but no turn started within %s (session: %s). Check the thread in T3",
-				threadID, timeout, status)
+			if sawPreparing {
+				return 0, fmt.Errorf(
+					"thread %s: no turn started within %s; it was still preparing (session: %s). Check the thread in T3",
+					threadID, now.Sub(start).Round(time.Second), status)
+			}
+			return 0, fmt.Errorf(
+				"thread %s: no turn started within %s (session: %s). Check the thread in T3",
+				threadID, opts.Timeout, status)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return 0, ctx.Err()
 		case <-time.After(time.Second):
 		}
 	}
@@ -354,33 +518,128 @@ func (c *Client) WaitForTurn(ctx context.Context, threadID string, timeout time.
 
 // StartTurn submits chat input to a thread. This is the API equivalent of
 // typing into the composer, and is what lets hermes drive a thread remotely.
+//
+// runtimeMode only applies to V1, where it rides on every turn. V2's
+// message.dispatch has no such field: the thread's own runtime mode governs.
 func (c *Client) StartTurn(ctx context.Context, threadID, text, runtimeMode string) error {
 	if runtimeMode == "" {
 		runtimeMode = RuntimeModeFullAccess
 	}
-	command := ThreadTurnStartCommand{
-		Type:      "thread.turn.start",
-		CommandID: NewID(),
-		ThreadID:  threadID,
-		Message: TurnMessage{
-			MessageID:   NewID(),
-			Role:        "user",
-			Text:        text,
-			Attachments: []any{},
-		},
-		RuntimeMode:     runtimeMode,
-		InteractionMode: InteractionModeDefault,
-		CreatedAt:       Now(),
+	return c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			return c.startTurnV2(ctx, threadID, text)
+		}
+		command := ThreadTurnStartCommand{
+			Type:      "thread.turn.start",
+			CommandID: NewID(),
+			ThreadID:  threadID,
+			Message: TurnMessage{
+				MessageID:   NewID(),
+				Role:        "user",
+				Text:        text,
+				Attachments: []any{},
+			},
+			RuntimeMode:     runtimeMode,
+			InteractionMode: InteractionModeDefault,
+			CreatedAt:       Now(),
+		}
+		return c.Dispatch(ctx, command)
+	})
+}
+
+// startTurnV2 dispatches message.dispatch.
+//
+// The thread is read first for two reasons: an older V2 server needs the
+// client to pick the dispatch mode from the thread's active run, and
+// WaitForTurn needs the run that was latest *before* this message, so it does
+// not mistake the previous run's verdict for this one's.
+func (c *Client) startTurnV2(ctx context.Context, threadID, text string) error {
+	var activeRunID *string
+	baseline := runBaseline{}
+	if shell, err := c.fetchShellV2(ctx); err == nil {
+		for _, t := range shell.Threads {
+			if t.ID == threadID {
+				activeRunID = t.ActiveRunID
+				if t.LatestRunID != nil {
+					baseline.runID = *t.LatestRunID
+				}
+				baseline.active = t.ActiveRunID != nil && *t.ActiveRunID != ""
+			}
+		}
 	}
-	return c.Dispatch(ctx, command)
+	command := buildMessageDispatchV2(threadID, text, c.serverResolvesCommandContext(), activeRunID)
+	c.setBaseline(threadID, baseline)
+	if err := c.dispatchV2(ctx, command); err != nil {
+		c.clearBaseline(threadID)
+		return err
+	}
+	return nil
+}
+
+// runBaseline is the thread's latest run when conductor dispatched a turn,
+// and whether a run was active then. Empty runID means "no run yet", which
+// matches a thread whose RunID is empty.
+type runBaseline struct {
+	runID  string
+	active bool
+}
+
+// setBaseline, baseline and clearBaseline track the runBaseline per thread.
+func (c *Client) setBaseline(threadID string, b runBaseline) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.baselines == nil {
+		c.baselines = make(map[string]runBaseline)
+	}
+	c.baselines[threadID] = b
+}
+
+func (c *Client) baseline(threadID string) (runBaseline, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b, ok := c.baselines[threadID]
+	return b, ok
+}
+
+func (c *Client) clearBaseline(threadID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.baselines, threadID)
 }
 
 // ArchiveThread archives a thread, which also reaps its terminals.
 func (c *Client) ArchiveThread(ctx context.Context, threadID string) error {
-	return c.Dispatch(ctx, ThreadArchiveCommand{
-		Type:      "thread.archive",
-		CommandID: NewID(),
-		ThreadID:  threadID,
+	return c.threadCommand(ctx, "thread.archive", threadID)
+}
+
+// DeleteThread permanently removes a thread.
+func (c *Client) DeleteThread(ctx context.Context, threadID string) error {
+	return c.threadCommand(ctx, "thread.delete", threadID)
+}
+
+// threadCommand sends a command whose only argument is the thread id. Both
+// protocols spell these identically; only the transport differs.
+func (c *Client) threadCommand(ctx context.Context, kind, threadID string) error {
+	command := v2ThreadIDCommand{Type: kind, CommandID: NewID(), ThreadID: threadID}
+	return c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			return c.dispatchV2(ctx, command)
+		}
+		return c.Dispatch(ctx, command)
+	})
+}
+
+// deleteProject removes a project on either protocol.
+func (c *Client) deleteProject(ctx context.Context, projectID string) error {
+	return c.withProtocol(ctx, func(p int) error {
+		if p >= ProtocolV2 {
+			return c.mutateProject(ctx, v2ProjectDeleteMutation{
+				Type: "project.delete", CommandID: NewID(), ProjectID: projectID, Force: true,
+			})
+		}
+		return c.Dispatch(ctx, ProjectDeleteCommand{
+			Type: "project.delete", CommandID: NewID(), ProjectID: projectID, Force: true,
+		})
 	})
 }
 
@@ -415,12 +674,7 @@ func (c *Client) CloseWorktree(ctx context.Context, worktreePath string) error {
 	if !ok || project.ID != threads[0].ProjectID {
 		return nil
 	}
-	if err := c.Dispatch(ctx, ProjectDeleteCommand{
-		Type:      "project.delete",
-		CommandID: NewID(),
-		ProjectID: project.ID,
-		Force:     true,
-	}); err != nil {
+	if err := c.deleteProject(ctx, project.ID); err != nil {
 		return fmt.Errorf("thread archived but its project could not be removed: %w", err)
 	}
 	return nil

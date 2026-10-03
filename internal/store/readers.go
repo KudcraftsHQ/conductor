@@ -324,114 +324,75 @@ func (s *Store) GetGitHubConfig(projectName string) (owner, repo string, ok bool
 // Deep Copy Helpers
 // ============================================================================
 
+// The copy helpers start from a value copy of the whole struct and then
+// replace only the reference fields (pointers, slices, maps). Listing fields
+// one by one silently dropped every field added after the list was written —
+// Hibernated among them, which made the T3 watcher re-hibernate an already
+// hibernated worktree on every tick. TestConfigSnapshotCopiesEveryField
+// fails if a field is ever lost or aliased again.
+
 func (s *Store) copyProject(p *config.Project) *config.Project {
 	if p == nil {
 		return nil
 	}
-	cp := &config.Project{
-		Path:                    p.Path,
-		AddedAt:                 p.AddedAt,
-		DefaultPortsPerWorktree: p.DefaultPortsPerWorktree,
-		GitHubOwner:             p.GitHubOwner,
-		GitHubRepo:              p.GitHubRepo,
-		Worktrees:               make(map[string]*config.Worktree, len(p.Worktrees)),
-		Database:                s.copyDatabaseConfig(p.Database),
-	}
+	cp := *p
+	cp.Worktrees = make(map[string]*config.Worktree, len(p.Worktrees))
 	for name, wt := range p.Worktrees {
 		cp.Worktrees[name] = s.copyWorktree(wt)
 	}
-	return cp
+	cp.Database = s.copyDatabaseConfig(p.Database)
+	if p.Tooling != nil {
+		tooling := *p.Tooling
+		cp.Tooling = &tooling
+	}
+	return &cp
 }
 
 func (s *Store) copyDatabaseConfig(db *config.DatabaseConfig) *config.DatabaseConfig {
 	if db == nil {
 		return nil
 	}
-	cp := &config.DatabaseConfig{
-		Source:          db.Source,
-		SizeThresholdMB: db.SizeThresholdMB,
-		SyncSchedule:    db.SyncSchedule,
-		DBNamePattern:   db.DBNamePattern,
-		// Remote mode fields
-		Mode:           db.Mode,
-		SSHHost:        db.SSHHost,
-		CloneURL:       db.CloneURL,
-		DevURL:         db.DevURL,
-		DevURLExternal: db.DevURLExternal,
+	cp := *db
+	if db.ExcludeTables != nil {
+		cp.ExcludeTables = append([]string(nil), db.ExcludeTables...)
 	}
-	// Copy slice
-	if len(db.ExcludeTables) > 0 {
-		cp.ExcludeTables = make([]string, len(db.ExcludeTables))
-		copy(cp.ExcludeTables, db.ExcludeTables)
-	}
-	// Copy map
-	if len(db.FilterTables) > 0 {
+	if db.FilterTables != nil {
 		cp.FilterTables = make(map[string]string, len(db.FilterTables))
 		for k, v := range db.FilterTables {
 			cp.FilterTables[k] = v
 		}
 	}
-	// Copy nested struct
 	if db.SyncStatus != nil {
-		cp.SyncStatus = &config.DatabaseSyncStatus{
-			LastSyncAt:     db.SyncStatus.LastSyncAt,
-			GoldenCopySize: db.SyncStatus.GoldenCopySize,
-			TableCount:     db.SyncStatus.TableCount,
-			ExcludedCount:  db.SyncStatus.ExcludedCount,
-			LastError:      db.SyncStatus.LastError,
-			Status:         db.SyncStatus.Status,
-		}
+		status := *db.SyncStatus
+		cp.SyncStatus = &status
 	}
-	return cp
+	return &cp
 }
 
 func (s *Store) copyWorktree(wt *config.Worktree) *config.Worktree {
 	if wt == nil {
 		return nil
 	}
-	cp := &config.Worktree{
-		Path:           wt.Path,
-		Branch:         wt.Branch,
-		IsRoot:         wt.IsRoot,
-		CreatedAt:      wt.CreatedAt,
-		Archived:       wt.Archived,
-		ArchivedAt:     wt.ArchivedAt,
-		SetupStatus:    wt.SetupStatus,
-		ArchiveStatus:  wt.ArchiveStatus,
-		Tunnel:         s.copyTunnelState(wt.Tunnel),
-		DatabaseName:   wt.DatabaseName,
-		DatabaseURL:    wt.DatabaseURL,
-		ClickUpTaskID:  wt.ClickUpTaskID,
-		ClickUpTaskURL: wt.ClickUpTaskURL,
-	}
-
-	// Copy ports
+	cp := *wt
+	cp.Tunnel = s.copyTunnelState(wt.Tunnel)
 	if wt.Ports != nil {
-		cp.Ports = make([]int, len(wt.Ports))
-		copy(cp.Ports, wt.Ports)
+		cp.Ports = append([]int(nil), wt.Ports...)
 	}
-
-	// Copy PRs
 	if wt.PRs != nil {
-		cp.PRs = make([]config.PRInfo, len(wt.PRs))
-		copy(cp.PRs, wt.PRs)
+		cp.PRs = append([]config.PRInfo(nil), wt.PRs...)
 	}
-
-	return cp
+	if wt.T3Threads != nil {
+		cp.T3Threads = append([]string(nil), wt.T3Threads...)
+	}
+	return &cp
 }
 
 func (s *Store) copyTunnelState(t *config.TunnelState) *config.TunnelState {
 	if t == nil {
 		return nil
 	}
-	return &config.TunnelState{
-		Active:    t.Active,
-		Mode:      t.Mode,
-		URL:       t.URL,
-		Port:      t.Port,
-		PID:       t.PID,
-		StartedAt: t.StartedAt,
-	}
+	cp := *t
+	return &cp
 }
 
 // ============================================================================
@@ -444,37 +405,26 @@ func (s *Store) GetConfigSnapshot() *config.Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	cfg := &config.Config{
-		Version:         s.config.Version,
-		Defaults:        s.config.Defaults,
-		Updates:         s.config.Updates,
-		PortAllocations: make(map[string]*config.PortAlloc, len(s.config.PortAllocations)),
-		Projects:        make(map[string]*config.Project, len(s.config.Projects)),
+	cfg := *s.config
+	if s.config.Defaults.ClickUp != nil {
+		clickUp := *s.config.Defaults.ClickUp
+		cfg.Defaults.ClickUp = &clickUp
 	}
-
-	// Copy port allocations
+	// Both maps are always non-nil in a snapshot, as they always were.
+	cfg.PortAllocations = make(map[string]*config.PortAlloc, len(s.config.PortAllocations))
 	for port, alloc := range s.config.PortAllocations {
-		cfg.PortAllocations[port] = &config.PortAlloc{
-			Project:  alloc.Project,
-			Worktree: alloc.Worktree,
-			Index:    alloc.Index,
+		if alloc == nil {
+			cfg.PortAllocations[port] = nil
+			continue
 		}
+		a := *alloc
+		cfg.PortAllocations[port] = &a
 	}
-
-	// Copy projects
+	cfg.Projects = make(map[string]*config.Project, len(s.config.Projects))
 	for name, project := range s.config.Projects {
 		cfg.Projects[name] = s.copyProject(project)
 	}
-
-	// Copy tunnel defaults
-	cfg.Defaults.Tunnel = config.TunnelDefaults{
-		Domain:          s.config.Defaults.Tunnel.Domain,
-		CloudflareToken: s.config.Defaults.Tunnel.CloudflareToken,
-		AccountID:       s.config.Defaults.Tunnel.AccountID,
-		ZoneID:          s.config.Defaults.Tunnel.ZoneID,
-	}
-
-	return cfg
+	return &cfg
 }
 
 // GetAllPortInfo returns port info for display (delegating to config method)

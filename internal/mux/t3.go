@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -185,30 +186,67 @@ func (m t3Mux) createWindow(project, branch, worktreePath string, agent codingag
 	// command line, so they only write a file for agents that need one. T3 runs
 	// the agent through its own provider registry — there is no argv to append
 	// to — so a file is the only channel conductor has, whichever agent it is.
-	if err := codingagent.WriteContextFile(worktreePath, T3AgentPrompt(project, branch, worktreePorts(worktreePath))); err != nil {
+	ports, database := worktreeAllocation(worktreePath)
+	if err := WriteT3AgentContext(worktreePath, project, branch, ports, database); err != nil {
 		return fmt.Errorf("failed to write agent context file: %w", err)
 	}
 	_ = agent // The agent only selects wording; T3 decides what actually runs.
 
-	// The project is rooted at the worktree, not the main repo, so each
-	// worktree gets its own file tree, scripts and preview in the T3 UI.
-	projectID, err := client.EnsureProject(ctx, m.WindowName(project, branch), worktreePath)
+	protocol, err := client.Protocol(ctx)
 	if err != nil {
 		return err
 	}
 
-	// The worktree's own project is brand new and has no default model, so the
-	// main repository's project is the better hint: it carries whatever the user
-	// picked for this codebase. Both are only hints — ResolveModelSelection
-	// validates them against the running build's provider registry, which
-	// matters because a project default can name a disabled instance.
-	model, err := client.ResolveModelSelection(ctx,
-		client.ProjectDefaultModels(ctx, projectID, mainRepoProjectID(ctx, client, project))...)
+	var projectID string
+	var modelHints []t3.ModelSelection
+	if protocol >= t3.ProtocolV2 {
+		// V2: the thread lives under the repository's own project and is bound
+		// to the worktree by launchThread's existing_worktree strategy — the
+		// same shape a thread started in T3's composer has. No per-worktree
+		// project, so nothing is left behind in the sidebar and the watcher,
+		// adopt and the UI all see one project per repository.
+		root := mainRepoPath(project)
+		if root == "" {
+			return fmt.Errorf("cannot open a T3 thread for %s/%s: the project's repository root is unknown", project, branch)
+		}
+		projectID, err = client.EnsureProject(ctx, project, root)
+		if err != nil {
+			return err
+		}
+		modelHints = client.ProjectDefaultModels(ctx, projectID)
+
+		// launchThread runs the project's runOnWorktreeCreate script — that
+		// is `conductor adopt` — in the worktree. Adopt sees the worktree is
+		// already registered and set up (or being set up by this very
+		// process) and only binds; see planExisting in cmd/conductor/adopt.go.
+	} else {
+		// V1: the project is rooted at the worktree, not the main repo, so each
+		// worktree gets its own file tree, scripts and preview in the T3 UI.
+		projectID, err = client.EnsureProject(ctx, m.WindowName(project, branch), worktreePath)
+		if err != nil {
+			return err
+		}
+		// The worktree's own project is brand new and has no default model, so
+		// the main repository's project is the better hint: it carries whatever
+		// the user picked for this codebase.
+		modelHints = client.ProjectDefaultModels(ctx, projectID, mainRepoProjectID(ctx, client, project))
+	}
+
+	// Hints only: ResolveModelSelection validates them against the running
+	// build's provider registry, which matters because a project default can
+	// name a disabled instance.
+	model, err := client.ResolveModelSelection(ctx, modelHints...)
 	if err != nil {
 		return fmt.Errorf("cannot open a T3 thread for %s/%s: %w", project, branch, err)
 	}
 
-	threadID, err := client.CreateThread(ctx, t3.CreateThreadOptions{
+	// The thread itself is quick; holding its first turn for the worktree
+	// (readyGate, up to readyGateTimeout) and then waiting for the turn to
+	// start (up to its own preparing cap) is not. The 60s context above
+	// bounded both, which cut a slow database clone off at a minute.
+	createCtx, cancelCreate := context.WithTimeout(context.Background(), 2*readyGateTimeout+5*time.Minute)
+	defer cancelCreate()
+	threadID, err := client.CreateThread(createCtx, t3.CreateThreadOptions{
 		ProjectID:    projectID,
 		Title:        m.WindowName(project, branch),
 		Branch:       branch,
@@ -216,6 +254,7 @@ func (m t3Mux) createWindow(project, branch, worktreePath string, agent codingag
 		Model:        model,
 		TaskPrompt:   taskPrompt,
 		ReadyGate:    readyGate(worktreePath),
+		Provisioning: WorktreeProvisioning(worktreePath),
 	})
 	if err != nil {
 		// A thread whose turn never started is reported, not swallowed: the
@@ -401,22 +440,31 @@ func threadOccupying(snapshot *t3.ShellSnapshot, worktreePath string, markerIDs 
 // project is created by conductor moments earlier and has no default, so
 // without this every conductor thread would fall back to a generic guess.
 func mainRepoProjectID(ctx context.Context, client *t3.Client, project string) string {
-	cfg, err := config.Load()
-	if err != nil || cfg == nil {
-		return ""
-	}
-	entry, ok := cfg.GetProject(project)
-	if !ok || entry == nil || entry.Path == "" {
+	root := mainRepoPath(project)
+	if root == "" {
 		return ""
 	}
 	snapshot, err := client.Shell(ctx)
 	if err != nil {
 		return ""
 	}
-	if found, ok := snapshot.FindProjectByRoot(entry.Path); ok {
+	if found, ok := snapshot.FindProjectByRoot(root); ok {
 		return found.ID
 	}
 	return ""
+}
+
+// mainRepoPath returns the registered repository root of a conductor project.
+func mainRepoPath(project string) string {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return ""
+	}
+	entry, ok := cfg.GetProject(project)
+	if !ok || entry == nil {
+		return ""
+	}
+	return entry.Path
 }
 
 // findThread resolves a worktree window to its live T3 thread.
@@ -444,22 +492,41 @@ func (m t3Mux) findThread(project, branch string) (*t3.Client, string, error) {
 	return client, thread.ID, nil
 }
 
-// worktreePorts looks up the ports allocated to a worktree, so the context file
+// worktreeAllocation looks up the ports and database allocated to a worktree, so the context file
 // can name the address rather than describe how to find it.
 //
 // Empty is a fine answer: the prompt says so and points at
 // `conductor t3 dev status`. Guessing a default would be worse than admitting
 // there is nothing allocated yet.
-func worktreePorts(worktreePath string) []int {
+func worktreeAllocation(worktreePath string) ([]int, string) {
 	cfg, err := config.Load()
 	if err != nil || cfg == nil {
-		return nil
+		return nil, ""
 	}
 	_, _, worktree, err := cfg.DetectProject(worktreePath)
 	if err != nil || worktree == nil {
-		return nil
+		return nil, ""
 	}
-	return worktree.Ports
+	return worktree.Ports, worktree.DatabaseName
+}
+
+// WriteT3AgentContext writes a T3-hosted worktree's context file and the shims
+// that make agents load it, and keeps all of them out of git.
+//
+// It is called wherever the facts in the file can change — adopt, provision
+// and wake (which allocates new ports) — and by 'conductor t3 context' to
+// backfill worktrees provisioned before the shims existed.
+func WriteT3AgentContext(worktreePath, project, branch string, ports []int, database string) error {
+	prompt := T3AgentPrompt(project, branch, ports, database)
+	if err := codingagent.WriteContextFile(worktreePath, prompt); err != nil {
+		return err
+	}
+	if err := codingagent.WriteAutoloadShims(worktreePath, codingagent.ContextFileContent(prompt)); err != nil {
+		return err
+	}
+	entries := append([]string{t3.MarkerFileName, config.ProvisioningSentinel}, codingagent.AutoloadFiles()...)
+	codingagent.ExcludeFromGit(worktreePath, entries...)
+	return nil
 }
 
 // readyGate returns the function CreateThread calls before submitting a
@@ -505,6 +572,20 @@ func readyGate(worktreePath string) func(context.Context) error {
 	}
 }
 
+// WorktreeProvisioning reports whether conductor is still provisioning the
+// worktree at path: registered-but-not-yet (imminent), setup running, or setup
+// done with a phase (database, dev server) not yet true. Failed, stalled and
+// ready all answer false — waiting longer will not change them.
+func WorktreeProvisioning(path string) func() bool {
+	return func() bool {
+		cfg, err := config.Load()
+		if err != nil || cfg == nil {
+			return false
+		}
+		return !ready.Resolve(cfg, path, ready.DefaultPhases).State.Terminal()
+	}
+}
+
 // readyGateTimeout bounds the hold on a first turn. A remote database clone is
 // minutes; beyond this something is wrong and a late turn beats no turn.
 const readyGateTimeout = 20 * time.Minute
@@ -520,118 +601,85 @@ const readyGateTimeout = 20 * time.Minute
 // this is for. Everything an agent could get wrong about this environment —
 // starting a second dev server, hardcoding a port that changes on every wake,
 // working against a database that is still being cloned — has to be said here.
-func T3AgentPrompt(project, branch string, ports []int) string {
+func T3AgentPrompt(project, branch string, ports []int, database string) string {
 	window := tmux.WindowTarget(project, branch)
 
 	// The address is written in rather than left to be looked up. An agent that
 	// has to run a command to find out where the app is will guess 3000 instead,
 	// and be wrong in a way that looks like the app is broken.
-	address := "run 'conductor t3 dev status' — this worktree had no ports when this file was written"
+	address := "unknown — this worktree had no ports when this file was written"
+	portLine := "none yet — run 'conductor status'"
 	if len(ports) > 0 {
 		address = fmt.Sprintf("http://localhost:%d", ports[0])
+		portStrs := make([]string, len(ports))
+		for i, p := range ports {
+			portStrs[i] = strconv.Itoa(p)
+		}
+		portLine = strings.Join(portStrs, ", ")
+	}
+	// Only the name: a URL carries credentials, and this file is read into
+	// every agent's context.
+	if database == "" {
+		database = "none"
 	}
 
 	return fmt.Sprintf(`## Conductor T3 Code Integration
 
-This worktree is managed by conductor. T3 Code owns its lifecycle; conductor
-owns its ports, database, tunnel and dev server.
+This worktree is managed by conductor: it owns the ports, database, tunnel and
+dev server. Rewritten on every provision and wake, so the values below are
+current; 'conductor t3 dev status' is authoritative if they ever disagree.
+
+  App:       %s
+  Ports:     %s
+  Database:  %s
+  Dev server: tmux window %s
 
 ### Wait for provisioning before touching data
-The environment is built after this worktree appears, not before — the dev
-database is a full clone and takes minutes — and T3 may start your first turn
-while that is still running. Before any migration, seed, query or test:
+The database is a full clone and may still be building when your first turn
+starts. Before any migration, seed, query or test:
 
-  conductor wait
+  conductor wait              # 0 ready, 1 setup failed (prints log), 2 timeout
 
-It blocks until the setup script has finished and the database answers, then
-exits 0. Exit 1 means setup failed and prints the tail of its log; 2 means it
-gave up waiting. Add --for all if you also need the dev server listening.
-Do not poll for a file — readiness is state, not a marker.
-
-### The app is at %s
-That is this worktree's own port, not a shared one. Use it for every request,
-every browser navigation and every E2E base URL.
-
-  conductor t3 dev status              # address, window, and whether it is up
-
-If this worktree was hibernated and woken since this file was written, the port
-changed — 'conductor t3 dev status' is always current, this line is not.
+Add --for all if you also need the dev server listening. Do not poll for a file.
 
 ### Do not start a dev server — one is already running
-It lives in tmux, not in your terminal, so that it survives T3 Code restarts and
-is shared by every thread bound to this worktree:
+It lives in tmux, shared by every thread on this worktree. A second one collides
+on the port. Never run 'conductor run', 'npm run dev' or similar yourself.
 
-  %s
-
-Starting a second one collides on the port the first is still holding. When
-something goes wrong, restart it rather than working around it:
-
-  conductor t3 dev restart             # interrupt and bring it back; recreates
-                                       # the window if it went missing
-  conductor t3 dev stop                # leave it stopped
-  conductor t3 dev status              # is it running, is the port listening
-
-'restart' is the answer to a wedged server, a stale build, a changed .env, or a
-window that is gone. Do not run 'conductor run' yourself: in your terminal it
-would occupy the turn and hold the port outside tmux, where nothing else can
-reach or restart it.
+  conductor t3 dev status     # address, window, whether the port listens
+  conductor t3 dev restart    # wedged server, stale build, changed .env
+  conductor t3 dev stop
 
 ### Reading the dev server logs
-The server writes to its tmux window; this is how you read it.
+Read them before concluding a request failed — the stack trace is there.
 
-  conductor t3 logs -n 200             # recent output (inferred from the cwd)
-  conductor t3 logs -f                 # follow live
-  conductor t3 logs %s %s   # explicit
-
-Read the logs before concluding a request failed — a 500 in the browser and the
-stack trace that caused it are in two different places, and only one of them is
-here.
+  conductor t3 logs -n 200    # recent output (inferred from the cwd)
+  conductor t3 logs -f        # follow live
+  conductor t3 logs %s %s
 
 ### E2E runs go through the queue, never straight to Playwright
-This machine runs one browser job at a time, enforced by an OS-level lock. Do
-not run 'npx playwright test' directly, do not launch your own Chromium or
-Puppeteer, do not use --workers > 1 or shards. Submit the job instead:
+One browser job at a time on this machine. Never run 'npx playwright test'
+directly, launch your own Chromium/Puppeteer, or use --workers > 1 or shards:
 
-  e2e-queue worker status              # a worker must be RUNNING for jobs to run
+  e2e-queue worker status     # a worker must be RUNNING
   e2e-queue enqueue test --label %s \
     --cwd "$PWD" --env BASE_URL=%s \
     -- npx playwright test --workers=1
-  e2e-queue jobs --limit 5             # find your job id
-  e2e-queue job <id>                   # its output, exit code and timing
+  e2e-queue jobs --limit 5 ; e2e-queue job <id>
 
-Everything after '--' is an argv array run without a shell, so quote nothing
-for the shell's benefit and expand nothing yourself.
-
-### Capturing what the app looked like
-Screenshots are the proof; a passing exit code is not. Take them inside the
-queued job, where the browser is:
-
-  await page.screenshot({ path: 'e2e-artifacts/<step>.png', fullPage: true })
-
-Write them under e2e-artifacts/ in this worktree so they stay with the branch,
-and report the paths when you are done. If a browser pool is running, the job is
-handed a warm tab instead of launching one — attach to it rather than calling
-chromium.launch():
-
-  e2e-queue browser start --base-url %s
-  chromium.connectOverCDP(process.env.E2E_QUEUE_BROWSER_CDP)
-
-The tab's cookies, storage and page are reset after every job.
+Screenshots are the proof — take them in the job, under e2e-artifacts/:
+await page.screenshot({ path: 'e2e-artifacts/<step>.png', fullPage: true }).
+With a browser pool running ('e2e-queue browser start --base-url <app>'),
+attach via chromium.connectOverCDP(process.env.E2E_QUEUE_BROWSER_CDP).
 
 ### Never hardcode ports or database names
-Read them from the environment — CONDUCTOR_PORT, CONDUCTOR_PORTS,
-CONDUCTOR_PORT_<LABEL> — or from the .env the setup script writes. Archiving
-every thread on this worktree releases its ports and drops its database;
-unarchiving one rebuilds both, and the new ports are not the old ones. The
-working tree and branch are never touched by that, so your uncommitted work
-survives it.
-
-Run 'conductor status' to see the current allocation.`,
-		address,
-		window,
+Read CONDUCTOR_PORT, CONDUCTOR_PORTS, CONDUCTOR_PORT_<LABEL> or the .env the
+setup script writes. Archiving every thread releases the ports and drops the
+database; unarchiving rebuilds both with new ports. Your working tree and
+branch are never touched.`,
+		address, portLine, database, window,
 		project, branch,
 		// A label is a display string, but slashes in it read as a path and
 		// invite somebody to treat it as one.
-		strings.ReplaceAll(project+"-"+branch, "/", "-"), address,
-		address)
+		strings.ReplaceAll(project+"-"+branch, "/", "-"), address)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -65,26 +66,51 @@ type wsExit struct {
 type Conn struct {
 	ws     *websocket.Conn
 	nextID int
+	// Protocol is the orchestration protocol the socket was opened for.
+	Protocol int
 }
 
 // Dial opens an authenticated RPC connection. Close it when done.
+//
+// A V2 server refuses the upgrade with 426 unless the client names the
+// protocol in the query, so the query follows the detected protocol. A 426
+// means the cached answer is stale: it is re-detected and the dial retried once.
 func (c *Client) Dial(ctx context.Context) (*Conn, error) {
+	var conn *Conn
+	err := c.withProtocol(ctx, func(p int) error {
+		dialed, err := c.dial(ctx, p)
+		if err != nil {
+			return err
+		}
+		conn = dialed
+		return nil
+	})
+	return conn, err
+}
+
+func (c *Client) dial(ctx context.Context, protocol int) (*Conn, error) {
 	ticket, err := c.websocketTicket(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	endpoint := strings.Replace(c.Origin, "http", "ws", 1) +
-		"/ws?wsTicket=" + url.QueryEscape(ticket)
+	endpoint := strings.Replace(c.Origin, "http", "ws", 1) + "/ws?wsTicket=" + url.QueryEscape(ticket)
+	if protocol >= ProtocolV2 {
+		endpoint += "&" + protocolQueryParam + "=" + fmt.Sprint(protocol)
+	}
 
-	ws, _, err := websocket.Dial(ctx, endpoint, nil)
+	ws, res, err := websocket.Dial(ctx, endpoint, nil)
 	if err != nil {
+		if res != nil && res.StatusCode == http.StatusUpgradeRequired {
+			return nil, fmt.Errorf("T3 refused the websocket for protocol %d (HTTP 426): %w", protocol, errProtocolMismatch)
+		}
+		c.ResetProtocol()
 		return nil, fmt.Errorf("failed to open T3 websocket: %w", err)
 	}
 	// Terminal history can be large; the default 32KiB read limit truncates it.
 	ws.SetReadLimit(32 << 20)
 
-	return &Conn{ws: ws, nextID: 1}, nil
+	return &Conn{ws: ws, nextID: 1, Protocol: protocol}, nil
 }
 
 // Close shuts the connection down.

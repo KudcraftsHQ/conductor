@@ -1,12 +1,15 @@
 package workspace
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/hammashamzah/conductor/internal/codingagent"
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/t3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -158,4 +161,60 @@ func TestRegisterWorktreeRejectsADuplicateName(t *testing.T) {
 
 	_, err := NewManager(cfg).RegisterWorktree("proj", "sydney", "b", "/somewhere", 1)
 	assert.Error(t, err)
+}
+
+// Waking a T3-hosted worktree allocates new ports, and the agent's context
+// file and shims are how the agent learns them — so Provision rewrites them,
+// before the slow setup, rather than leaving the pre-hibernation address.
+func TestProvisionRewritesAgentContextWithTheWokenPort(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CONDUCTOR_MUX", "tmux") // never open a real dev window
+	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+
+	repoPath, worktreePath, branch := gitRepoWithWorktree(t)
+	cfg, name := lifecycleConfig(repoPath, worktreePath, branch)
+	require.NoError(t, t3.WriteMarker(worktreePath, []string{"thread-1"}))
+
+	// A stale file from before hibernation, and a port the woken tree cannot get.
+	require.NoError(t, os.WriteFile(filepath.Join(worktreePath, codingagent.ContextFileName),
+		[]byte("App: http://localhost:3999\n"), 0644))
+	manager := NewManager(cfg)
+	require.NoError(t, manager.ReleaseResources("proj", name))
+	cfg.Projects["other"] = &config.Project{Worktrees: map[string]*config.Worktree{}}
+	taken, err := cfg.AllocatePorts("other", "x", 1)
+	require.NoError(t, err)
+	require.Equal(t, []int{3100}, taken)
+	_ = manager.Provision("proj", name) // setup may fail without a script; the file is written first
+
+	ports := cfg.Projects["proj"].Worktrees[name].Ports
+	require.NotEmpty(t, ports)
+	assert.NotEqual(t, 3100, ports[0])
+
+	context, err := os.ReadFile(filepath.Join(worktreePath, codingagent.ContextFileName))
+	require.NoError(t, err)
+	assert.Contains(t, string(context), fmt.Sprintf("http://localhost:%d", ports[0]))
+	assert.NotContains(t, string(context), "3999")
+
+	local, err := os.ReadFile(filepath.Join(worktreePath, codingagent.AgentsLocalFile))
+	require.NoError(t, err)
+	assert.Contains(t, string(local), fmt.Sprintf("http://localhost:%d", ports[0]))
+	assert.FileExists(t, filepath.Join(worktreePath, codingagent.ClaudeLocalFile))
+}
+
+// A worktree T3 does not host gets its prompt on the agent's command line and
+// must not grow shim files on wake.
+func TestProvisionLeavesNonT3WorktreesAlone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CONDUCTOR_MUX", "tmux")
+
+	repoPath, worktreePath, branch := gitRepoWithWorktree(t)
+	cfg, name := lifecycleConfig(repoPath, worktreePath, branch)
+
+	manager := NewManager(cfg)
+	require.NoError(t, manager.ReleaseResources("proj", name))
+	_ = manager.Provision("proj", name)
+
+	assert.NoFileExists(t, filepath.Join(worktreePath, codingagent.ClaudeLocalFile))
+	assert.NoFileExists(t, filepath.Join(worktreePath, codingagent.ContextFileName))
 }
