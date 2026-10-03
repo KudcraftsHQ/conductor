@@ -14,6 +14,7 @@ import (
 	"github.com/hammashamzah/conductor/internal/github"
 	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/store"
+	"github.com/hammashamzah/conductor/internal/t3"
 	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/tunnel"
 	_ "github.com/lib/pq"
@@ -489,6 +490,16 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 		worktree.Ports = ports
 		if !strings.HasPrefix(worktree.DatabaseName, "dev_") {
 			m.assignDatabase(projectName, project, worktree)
+		}
+	}
+
+	// The agent's context file names the port and database, and a wake just
+	// changed both. Rewrite it before the slow setup, so an agent woken with
+	// the worktree is told to wait rather than handed the old address. Only
+	// T3-hosted worktrees: tmux and herdr pass the prompt on the command line.
+	if t3.HasMarker(worktree.Path) || mux.Current().Kind() == mux.KindT3 {
+		if err := mux.WriteT3AgentContext(worktree.Path, projectName, worktree.Branch, worktree.Ports, worktree.DatabaseName); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not write the agent context file: %v\n", err)
 		}
 	}
 

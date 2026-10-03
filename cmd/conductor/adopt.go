@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -120,6 +119,12 @@ again here unless its last setup failed or stalled:
 		// runs against a snapshot with writes going through the store, rather
 		// than holding the store's lock for its whole duration.
 		manager := workspace.NewManagerWithStore(s.GetConfigSnapshot(), s)
+
+		// Write the agent's context file before provisioning, not after it.
+		// T3 may start the first turn while the database is still cloning,
+		// and this file is what tells the agent to 'conductor wait' for it.
+		writeAdoptContext(manager, projectName, name, worktreePath)
+
 		var provisionErr error
 		if plan.provision {
 			provisionErr = manager.Provision(projectName, name)
@@ -134,16 +139,8 @@ again here unless its last setup failed or stalled:
 
 		bindThreads(s, projectName, name, worktreePath)
 
-		// Write the agent's context file. Under this arrangement T3 creates the
-		// thread, so nothing else does — and it is the only channel conductor
-		// has to tell an agent not to start a second dev server, not to
-		// hardcode a port that changes on every wake, and to wait for the
-		// database before running anything against it.
-		if wt, err := manager.GetWorktree(projectName, name); err == nil && wt != nil {
-			if err := codingagent.WriteContextFile(worktreePath, mux.T3AgentPrompt(projectName, wt.Branch, wt.Ports)); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not write the agent context file: %v\n", err)
-			}
-		}
+		// Rewrite it now that provisioning settled the ports and database.
+		writeAdoptContext(manager, projectName, name, worktreePath)
 
 		if wt, err := manager.GetWorktree(projectName, name); err == nil && wt != nil {
 			if len(wt.Ports) > 0 {
@@ -155,6 +152,21 @@ again here unless its last setup failed or stalled:
 		}
 		return provisionErr
 	},
+}
+
+// writeAdoptContext writes the context file and agent shims for an adopted
+// worktree. Under this arrangement T3 creates the thread, so nothing else does
+// — and it is the only channel conductor has to tell an agent not to start a
+// second dev server, not to hardcode a port that changes on every wake, and to
+// wait for the database before running anything against it.
+func writeAdoptContext(manager *workspace.Manager, projectName, name, worktreePath string) {
+	wt, err := manager.GetWorktree(projectName, name)
+	if err != nil || wt == nil {
+		return
+	}
+	if err := mux.WriteT3AgentContext(worktreePath, projectName, wt.Branch, wt.Ports, wt.DatabaseName); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not write the agent context file: %v\n", err)
+	}
 }
 
 // resolveAdoptPath defaults to the working directory, so the command can be run
@@ -307,47 +319,13 @@ func pathsEqualClean(a, b string) bool {
 
 // excludeConductorFiles hides conductor's own droppings from git.
 //
-// .conductor-t3-thread lives in the worktree root and belongs to conductor, not
-// to the repository, so it has no business in `git status` — and an agent
-// tidying up before a commit will otherwise commit it. This goes in
-// .git/info/exclude rather than .gitignore because the worktree's .gitignore is
-// a tracked file of somebody else's project.
-//
-// Failure is not reported: an unwritable exclude file is untidy, not broken.
+// .conductor-t3-thread, the context file and the agent shims live in the
+// worktree root and belong to conductor, not to the repository, so they have no
+// business in `git status` — and an agent tidying up before a commit will
+// otherwise commit them.
 func excludeConductorFiles(worktreePath string) {
-	gitDir, err := exec.Command("git", "-C", worktreePath, "rev-parse", "--git-dir").Output()
-	if err != nil {
-		return
-	}
-	dir := strings.TrimSpace(string(gitDir))
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(worktreePath, dir)
-	}
-	path := filepath.Join(dir, "info", "exclude")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return
-	}
-
-	existing, _ := os.ReadFile(path)
-	var missing []string
-	for _, entry := range []string{t3.MarkerFileName, config.ProvisioningSentinel} {
-		if !strings.Contains(string(existing), entry) {
-			missing = append(missing, entry)
-		}
-	}
-	if len(missing) == 0 {
-		return
-	}
-
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer func() { _ = file.Close() }()
-	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
-		_, _ = file.WriteString("\n")
-	}
-	_, _ = file.WriteString("\n# conductor\n" + strings.Join(missing, "\n") + "\n")
+	entries := append([]string{t3.MarkerFileName, config.ProvisioningSentinel}, codingagent.AutoloadFiles()...)
+	codingagent.ExcludeFromGit(worktreePath, entries...)
 }
 
 // findWorktreeByPath looks a worktree up by where it is rather than what it is
