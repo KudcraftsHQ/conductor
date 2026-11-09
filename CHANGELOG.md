@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Worktree name collisions across projects**: `conductor worktree create` now excludes city names already used by *any* project's worktrees, not just the current project's. Remote dev databases (`dev_<city>`) live on a shared server, so a name reused by another project caused the remote DB clone to fail with `database "dev_<city>" already exists`. When every city name is taken, a unique suffixed name (`city-2`, `city-3`, …) is generated instead of returning a colliding city.
 
 ### Added
+- **Empty worktree databases**: `"empty": true` in a project's `database` config gives each new worktree an empty database (`CREATE DATABASE` on the remote dev server via SSH, or on the local server) instead of a clone of the source; `source`/`cloneUrl` become optional and golden sync is refused. `database reinstantiate` recreates it empty (remote or local mode) and then runs the new optional `seedCommand` in the worktree with the setup script's environment. `database config` shows both and sets them with `--empty` / `--seed-command`. `database set-source` no longer drops the rest of an existing database config.
 - **Herdr Worktree Opener**: `conductor worktree open <name> --herdr` opens a focused Herdr workspace for the worktree
   - `--claude` starts interactive Claude Code, `--dev` starts the project dev server through `conductor run`, and `--prompt` runs Claude Code non-interactively
   - Options can be combined, including a one-shot Claude task alongside the dev-server pane

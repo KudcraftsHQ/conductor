@@ -327,6 +327,19 @@ type DatabaseConfig struct {
 	// DevURLExternal is the external connection string for dev databases (used by worktrees)
 	// This is what gets written to .env for the app to connect. Database name is appended.
 	DevURLExternal string `json:"devUrlExternal,omitempty"`
+
+	// Empty gives each worktree an empty database instead of a copy of the
+	// source: CREATE DATABASE on the dev server (remote mode, over the same SSH
+	// + devUrl path) or on the local server (local mode), and nothing more. The
+	// project's setup script is expected to migrate and seed it. Source and
+	// CloneURL are not needed and never read, and golden-copy sync is refused.
+	Empty bool `json:"empty,omitempty"`
+	// SeedCommand is a shell command run in the worktree directory after
+	// `conductor database reinstantiate` has recreated the worktree's database,
+	// with the same environment as the setup script (CONDUCTOR_DB_URL,
+	// DATABASE_URL, CONDUCTOR_PORT, CONDUCTOR_ROOT_PATH...). Worktree creation
+	// does not run it: the setup script runs there instead.
+	SeedCommand string `json:"seedCommand,omitempty"`
 }
 
 // DatabaseSyncStatus tracks the status of database synchronization

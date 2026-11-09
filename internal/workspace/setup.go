@@ -165,7 +165,7 @@ func (sm *SetupManager) RunSetupAsync(
 			// Check if we're using remote mode
 			if project.Database != nil && project.Database.Mode == config.DatabaseModeRemote {
 				// Remote mode: clone on the remote server
-				dbMsg := fmt.Sprintf("Cloning database remotely for worktree %s...\n", worktreeName)
+				dbMsg := fmt.Sprintf("Creating database remotely for worktree %s...\n", worktreeName)
 				sm.mu.Lock()
 				if buf, ok := sm.logs[key]; ok {
 					buf.WriteString(dbMsg)
@@ -189,7 +189,7 @@ func (sm *SetupManager) RunSetupAsync(
 
 				dbName, dbURL, err := cloneWorktreeDBRemote(context.Background(), project.Database, projectName, worktreeName, progress)
 				if err != nil {
-					errMsg := fmt.Sprintf("Warning: remote database clone failed: %v\n", err)
+					errMsg := fmt.Sprintf("Warning: remote database creation failed: %v\n", err)
 					sm.mu.Lock()
 					if buf, ok := sm.logs[key]; ok {
 						buf.WriteString(errMsg)
@@ -229,11 +229,7 @@ func (sm *SetupManager) RunSetupAsync(
 					logFile.WriteString(dbMsg)
 				}
 
-				// Get conductor directory for dbsync storage
-				conductorDir, _ := config.ConductorDir()
-
-				// Clone the database
-				if err := cloneWorktreeDB(defaults.LocalPostgresURL, worktree.DatabaseName, projectName, conductorDir); err != nil {
+				if err := cloneWorktreeDB(project.Database, defaults.LocalPostgresURL, worktree.DatabaseName, projectName); err != nil {
 					errMsg := fmt.Sprintf("Warning: database clone failed: %v\n", err)
 					sm.mu.Lock()
 					if buf, ok := sm.logs[key]; ok {
@@ -476,9 +472,9 @@ func runSetupSync(project *config.Project, projectName, worktreeName string, wor
 		// Check if we're using remote mode
 		if project.Database != nil && project.Database.Mode == config.DatabaseModeRemote {
 			// Remote mode: clone on the remote server
-			fmt.Printf("Cloning database remotely for worktree %s...\n", worktreeName)
+			fmt.Printf("Creating database remotely for worktree %s...\n", worktreeName)
 			if logFile != nil {
-				fmt.Fprintf(logFile, "Cloning database remotely for worktree %s...\n", worktreeName)
+				fmt.Fprintf(logFile, "Creating database remotely for worktree %s...\n", worktreeName)
 			}
 
 			progress := func(msg string) {
@@ -490,7 +486,7 @@ func runSetupSync(project *config.Project, projectName, worktreeName string, wor
 
 			dbName, dbURL, err := cloneWorktreeDBRemote(context.Background(), project.Database, projectName, worktreeName, progress)
 			if err != nil {
-				warnMsg := fmt.Sprintf("Warning: remote database clone failed: %v\n", err)
+				warnMsg := fmt.Sprintf("Warning: remote database creation failed: %v\n", err)
 				fmt.Print(warnMsg)
 				if logFile != nil {
 					logFile.WriteString(warnMsg)
@@ -514,7 +510,7 @@ func runSetupSync(project *config.Project, projectName, worktreeName string, wor
 				fmt.Fprintf(logFile, "Cloning database to %s...\n", worktree.DatabaseName)
 			}
 
-			if err := cloneWorktreeDB(cfg.Defaults.LocalPostgresURL, worktree.DatabaseName, projectName, conductorDir); err != nil {
+			if err := cloneWorktreeDB(project.Database, cfg.Defaults.LocalPostgresURL, worktree.DatabaseName, projectName); err != nil {
 				warnMsg := fmt.Sprintf("Warning: database clone failed: %v\n", err)
 				fmt.Print(warnMsg)
 				if logFile != nil {
@@ -592,25 +588,18 @@ func runSetupSync(project *config.Project, projectName, worktreeName string, wor
 	return setupErr
 }
 
-// cloneWorktreeDB clones the golden database to a worktree database (V3 only)
-func cloneWorktreeDB(localURL, dbName, projectName, conductorDir string) error {
-	// Use V3 golden database clone (no file-based fallback)
-	return database.CloneFromGoldenDB(context.Background(), localURL, projectName, dbName, nil)
+// cloneWorktreeDB creates a worktree's local database: a clone of the golden
+// database, or an empty one when the project's database config says "empty".
+func cloneWorktreeDB(cfg *config.DatabaseConfig, localURL, dbName, projectName string) error {
+	return database.ProvisionLocalWorktreeDB(context.Background(), cfg, localURL, projectName, dbName, nil)
 }
 
-// cloneWorktreeDBRemote clones the source database to a worktree database on the remote server via SSH
+// cloneWorktreeDBRemote creates a worktree's database on the remote server via
+// SSH: a clone of the source, or an empty one when the config says "empty".
 func cloneWorktreeDBRemote(ctx context.Context, cfg *config.DatabaseConfig, projectName, worktreeName string, progress func(string)) (string, string, error) {
-	if cfg.SSHHost == "" {
-		return "", "", fmt.Errorf("remote mode requires sshHost to be configured")
-	}
-	if cfg.CloneURL == "" || cfg.DevURL == "" {
-		return "", "", fmt.Errorf("remote mode requires cloneUrl and devUrl to be configured")
-	}
-
 	dbName := database.GenerateRemoteDBName(projectName, worktreeName)
 
-	err := database.RemoteCloneForWorktree(ctx, cfg.SSHHost, cfg.CloneURL, cfg.DevURL, dbName, cfg.ExcludeTables, progress)
-	if err != nil {
+	if err := database.ProvisionRemoteWorktreeDB(ctx, cfg, dbName, progress); err != nil {
 		return "", "", err
 	}
 

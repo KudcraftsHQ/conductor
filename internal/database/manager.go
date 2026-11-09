@@ -52,6 +52,10 @@ func (m *Manager) SyncProjectWithProgressCtx(ctx context.Context, projectName st
 	}()
 
 	// Use V3 (golden database) approach - much faster than file-based
+	if cfg != nil && cfg.Empty {
+		return nil, ErrEmptyModeNoSync
+	}
+
 	result, err := SyncToGoldenDB(ctx, cfg.Source, m.localURL, projectName, cfg, progress)
 	if err != nil {
 		return nil, err
@@ -173,18 +177,11 @@ func (m *Manager) IsRemoteMode(cfg *DatabaseConfig) bool {
 }
 
 // RemoteCloneForWorktree creates a database on the remote server for a worktree via SSH
+// (empty when cfg.Empty is set, see ProvisionRemoteWorktreeDB)
 func (m *Manager) RemoteCloneForWorktree(ctx context.Context, cfg *DatabaseConfig, projectName, worktreeName string, progress ProgressFunc) (string, error) {
-	if cfg.SSHHost == "" {
-		return "", fmt.Errorf("remote mode requires sshHost to be configured")
-	}
-	if cfg.CloneURL == "" || cfg.DevURL == "" {
-		return "", fmt.Errorf("remote mode requires cloneUrl and devUrl to be configured")
-	}
-
 	dbName := GenerateRemoteDBName(projectName, worktreeName)
 
-	err := RemoteCloneForWorktree(ctx, cfg.SSHHost, cfg.CloneURL, cfg.DevURL, dbName, cfg.ExcludeTables, progress)
-	if err != nil {
+	if err := ProvisionRemoteWorktreeDB(ctx, cfg, dbName, progress); err != nil {
 		return "", err
 	}
 

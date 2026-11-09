@@ -65,6 +65,9 @@ func GoldenDBURL(localURL string, projectName string) string {
 // SyncToGoldenDB syncs from remote source to local golden database using pipe
 // This is much faster than writing to a file first
 func SyncToGoldenDB(ctx context.Context, sourceURL string, localURL string, projectName string, cfg *DatabaseConfig, progress ProgressFunc) (*GoldenDBSyncResult, error) {
+	if cfg != nil && cfg.Empty {
+		return nil, ErrEmptyModeNoSync
+	}
 	startTime := time.Now()
 	var stepTimes []string // Collect timing for final summary
 

@@ -283,6 +283,33 @@ Large tables (audit logs, events) can be excluded from data sync while keeping t
 conductor database set-source "postgresql://..." --exclude=audit_logs,events
 ```
 
+**Empty databases (fixtures instead of a copy of production):**
+
+Set `"empty": true` in a project's `database` config and each new worktree gets
+an empty database — `CREATE DATABASE` on the dev server (remote mode, over the
+same `sshHost` + `devUrl`) or on the local server — instead of a clone. `source`
+and `cloneUrl` are then optional and never read, and golden-copy sync is
+refused. The setup script runs afterwards as usual, with `CONDUCTOR_DB_URL`, so
+it can migrate and seed the database.
+
+`database reinstantiate` drops and recreates it empty (remote or local mode),
+then runs `seedCommand`, if set, in the worktree with the setup script's
+environment (`CONDUCTOR_DB_URL`, `DATABASE_URL`, `CONDUCTOR_PORT`, …). It does
+not re-run the setup script. Worktree creation does not run `seedCommand`.
+
+```json
+"database": {
+  "mode": "remote",
+  "sshHost": "root@db-server",
+  "devUrl": "postgres://conductor_dev:…@localhost:5432",
+  "devUrlExternal": "postgres://conductor_dev:…@db-server:5432",
+  "empty": true,
+  "seedCommand": "bunx prisma migrate deploy && bun run db:fixtures"
+}
+```
+
+Or from the CLI: `conductor database config --empty --seed-command "…"`.
+
 #### Cloudflare Tunnels
 
 Expose your local dev server to the internet via Cloudflare tunnels:

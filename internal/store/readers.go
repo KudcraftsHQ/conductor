@@ -358,6 +358,8 @@ func (s *Store) copyDatabaseConfig(db *config.DatabaseConfig) *config.DatabaseCo
 		CloneURL:       db.CloneURL,
 		DevURL:         db.DevURL,
 		DevURLExternal: db.DevURLExternal,
+		Empty:          db.Empty,
+		SeedCommand:    db.SeedCommand,
 	}
 	// Copy slice
 	if len(db.ExcludeTables) > 0 {

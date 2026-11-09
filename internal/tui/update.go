@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/hammashamzah/conductor/internal/github"
 	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/opener"
+	"github.com/hammashamzah/conductor/internal/runner"
 	"github.com/hammashamzah/conductor/internal/tui/ipc"
 	"github.com/hammashamzah/conductor/internal/updater"
 	"github.com/hammashamzah/conductor/internal/workspace"
@@ -1432,12 +1434,26 @@ func (m *Model) executeDbReinstantiate() (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Step 2: Clone fresh from source via SSH
-		err = database.RemoteCloneForWorktree(ctx, dbConfig.SSHHost, dbConfig.CloneURL,
-			dbConfig.DevURL, dbName, dbConfig.ExcludeTables, nil)
+		// Step 2: Recreate it via SSH: cloned fresh from source, or empty
+		err = database.ProvisionRemoteWorktreeDB(ctx, dbConfig, dbName, nil)
 		if err != nil {
 			return DatabaseReinstantiateCompletedMsg{
 				ProjectName: projectName, WorktreeName: worktreeName, Err: err,
+			}
+		}
+
+		// Step 3: Seed it with the project's seedCommand, if any
+		if worktree := project.Worktrees[worktreeName]; worktree != nil {
+			var out bytes.Buffer
+			if _, err := runner.RunSeedCommand(projectName, project, worktreeName, worktree, &out, &out); err != nil {
+				tail := strings.TrimSpace(out.String())
+				if i := strings.LastIndex(tail, "\n"); i >= 0 {
+					tail = tail[i+1:]
+				}
+				return DatabaseReinstantiateCompletedMsg{
+					ProjectName: projectName, WorktreeName: worktreeName,
+					Err: fmt.Errorf("seedCommand failed: %w: %s", err, tail),
+				}
 			}
 		}
 

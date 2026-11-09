@@ -7,6 +7,7 @@ import (
 
 	"github.com/hammashamzah/conductor/internal/config"
 	"github.com/hammashamzah/conductor/internal/database"
+	"github.com/hammashamzah/conductor/internal/runner"
 	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -41,6 +42,25 @@ var databaseConfigCmd = &cobra.Command{
 			return fmt.Errorf("not in a registered project. Run 'conductor project add .' first")
 		}
 
+		// Set fields given as flags
+		if cmd.Flags().Changed("empty") || cmd.Flags().Changed("seed-command") {
+			if project.Database == nil {
+				return fmt.Errorf("database not configured for this project")
+			}
+			updated := *project.Database
+			if cmd.Flags().Changed("empty") {
+				updated.Empty = configEmpty
+			}
+			if cmd.Flags().Changed("seed-command") {
+				updated.SeedCommand = configSeedCommand
+			}
+			if err := s.SetDatabaseConfig(projectName, &updated); err != nil {
+				return fmt.Errorf("failed to save config: %w", err)
+			}
+			project.Database = &updated
+			fmt.Printf("✓ Updated database config for %s\n\n", projectName)
+		}
+
 		// Show current config
 		fmt.Printf("Database configuration for project: %s\n\n", projectName)
 
@@ -54,7 +74,24 @@ var databaseConfigCmd = &cobra.Command{
 			return nil
 		}
 
-		fmt.Printf("\nSource URL: %s\n", database.MaskConnectionString(project.Database.Source))
+		mode := project.Database.Mode
+		if mode == "" {
+			mode = config.DatabaseModeLocal
+		}
+		fmt.Printf("\nMode: %s\n", mode)
+		if project.Database.Empty {
+			fmt.Println("Worktree databases: empty (no copy of source)")
+		} else {
+			fmt.Println("Worktree databases: cloned from source")
+		}
+		seed := project.Database.SeedCommand
+		if seed == "" {
+			seed = "(none)"
+		}
+		fmt.Printf("Seed command (after reinstantiate): %s\n", seed)
+		if project.Database.Source != "" {
+			fmt.Printf("Source URL: %s\n", database.MaskConnectionString(project.Database.Source))
+		}
 		fmt.Printf("Size threshold: %d MB\n", project.Database.SizeThresholdMB)
 		fmt.Printf("Excluded tables: %v\n", project.Database.ExcludeTables)
 		fmt.Printf("DB name pattern: %s\n", getPattern(project.Database.DBNamePattern))
@@ -62,6 +99,11 @@ var databaseConfigCmd = &cobra.Command{
 		return nil
 	},
 }
+
+var (
+	configEmpty       bool
+	configSeedCommand string
+)
 
 var (
 	setSourceThreshold int
@@ -109,13 +151,16 @@ var databaseSetSourceCmd = &cobra.Command{
 			fmt.Println()
 		}
 
-		// Create or update database config
-		dbConfig := &config.DatabaseConfig{
-			Source:          sourceURL,
-			SizeThresholdMB: setSourceThreshold,
-			ExcludeTables:   setSourceExclude,
-			DBNamePattern:   setSourcePattern,
+		// Create or update database config, keeping fields this command does
+		// not set (mode, remote URLs, empty, seedCommand...)
+		dbConfig := &config.DatabaseConfig{}
+		if project.Database != nil {
+			*dbConfig = *project.Database
 		}
+		dbConfig.Source = sourceURL
+		dbConfig.SizeThresholdMB = setSourceThreshold
+		dbConfig.ExcludeTables = setSourceExclude
+		dbConfig.DBNamePattern = setSourcePattern
 
 		// Preserve existing settings if not specified
 		if project.Database != nil {
@@ -395,8 +440,8 @@ var databaseCloneCmd = &cobra.Command{
 
 		mgr := database.NewManager(defaults.LocalPostgresURL, conductorDir)
 
-		// Check if golden copy exists
-		if !mgr.HasGoldenCopy(projectName) {
+		// Check if golden copy exists (empty mode needs none)
+		if !project.Database.Empty && !mgr.HasGoldenCopy(projectName) {
 			return fmt.Errorf("no golden copy found. Run 'conductor database sync' first")
 		}
 
@@ -442,10 +487,14 @@ var databaseCloneCmd = &cobra.Command{
 
 		fmt.Printf("Cloning database for worktree '%s'...\n", worktreeName)
 		fmt.Printf("  Database: %s\n", dbName)
-		fmt.Printf("  Source: golden database\n\n")
+		if project.Database.Empty {
+			fmt.Printf("  Source: none (empty database)\n\n")
+		} else {
+			fmt.Printf("  Source: golden database\n\n")
+		}
 
-		// Clone from V3 golden database
-		err = database.CloneFromGoldenDB(cmd.Context(), defaults.LocalPostgresURL, projectName, dbName, func(msg string) {
+		// Clone from V3 golden database, or create it empty
+		err = database.ProvisionLocalWorktreeDB(cmd.Context(), project.Database, defaults.LocalPostgresURL, projectName, dbName, func(msg string) {
 			fmt.Printf("  %s\n", msg)
 		})
 		if err != nil {
@@ -467,8 +516,17 @@ var reinstantiateWorktree string
 
 var databaseReinstantiateCmd = &cobra.Command{
 	Use:   "reinstantiate",
-	Short: "Drop and re-clone worktree database from source (remote mode)",
-	Long:  "Drop the remote database via SSH and clone fresh data from source.\nThis is a destructive operation - all data in the database will be lost.",
+	Short: "Drop and recreate a worktree database (re-clone, or empty + seedCommand)",
+	Long: `Drop the worktree's database and create it again.
+
+Remote mode clones fresh data from the source via SSH. With "empty": true in the
+project's database config, the database is recreated empty instead (remote or
+local mode) and the source is never read. Either way, the database config's
+seedCommand, if set, then runs in the worktree with the setup script's
+environment (CONDUCTOR_DB_URL, DATABASE_URL, CONDUCTOR_PORT...). The project's
+setup script is not re-run.
+
+This is a destructive operation - all data in the database will be lost.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := store.Load()
 		if err != nil {
@@ -483,7 +541,7 @@ var databaseReinstantiateCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to get current directory: %w", err)
 		}
-		_, project, _, err := cfg.DetectProject(cwd)
+		projectName, project, _, err := cfg.DetectProject(cwd)
 		if err != nil {
 			return fmt.Errorf("not in a registered project")
 		}
@@ -491,14 +549,17 @@ var databaseReinstantiateCmd = &cobra.Command{
 		if project.Database == nil {
 			return fmt.Errorf("database not configured for this project")
 		}
+		dbConfig := project.Database
+		remote := dbConfig.Mode == config.DatabaseModeRemote
+		localURL := s.GetDefaults().LocalPostgresURL
 
-		// Check for remote mode
-		if project.Database.Mode != config.DatabaseModeRemote {
-			return fmt.Errorf("only remote database mode is supported. Configure with: conductor db set-source --mode remote")
-		}
-
-		if project.Database.SSHHost == "" {
+		switch {
+		case remote && dbConfig.SSHHost == "":
 			return fmt.Errorf("SSH host not configured for remote database")
+		case !remote && !dbConfig.Empty:
+			return fmt.Errorf("local mode reinstantiate needs \"empty\": true; for a golden-copy clone use 'conductor database clone'")
+		case !remote && localURL == "":
+			return fmt.Errorf("local PostgreSQL not configured. Run 'conductor database set-local <url>' first")
 		}
 
 		// Find the worktree
@@ -530,34 +591,57 @@ var databaseReinstantiateCmd = &cobra.Command{
 			return fmt.Errorf("worktree '%s' does not have a database configured", worktreeName)
 		}
 
-		dbConfig := project.Database
 		dbName := worktree.DatabaseName
 
 		fmt.Printf("Reinstantiating database for worktree '%s'...\n", worktreeName)
 		fmt.Printf("  Database: %s\n", dbName)
-		fmt.Printf("  SSH Host: %s\n", dbConfig.SSHHost)
+		if remote {
+			fmt.Printf("  SSH Host: %s\n", dbConfig.SSHHost)
+		}
+		if dbConfig.Empty {
+			fmt.Println("  Mode: empty (no source data)")
+		}
 		fmt.Println()
 
 		ctx := cmd.Context()
+		progress := func(msg string) { fmt.Printf("  %s\n", msg) }
 
-		// Step 1: Drop existing database via SSH
+		// Step 1: Drop the existing database
 		fmt.Println("  Dropping existing database...")
-		err = database.RemoteDropDatabase(ctx, dbConfig.SSHHost, dbConfig.DevURL, dbName)
+		if remote {
+			err = database.RemoteDropDatabase(ctx, dbConfig.SSHHost, dbConfig.DevURL, dbName)
+		} else {
+			err = database.DropDatabase(localURL, dbName)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to drop database: %w", err)
 		}
 
-		// Step 2: Clone fresh from source via SSH
-		fmt.Println("  Cloning fresh data from source...")
-		err = database.RemoteCloneForWorktree(ctx, dbConfig.SSHHost, dbConfig.CloneURL,
-			dbConfig.DevURL, dbName, dbConfig.ExcludeTables, func(msg string) {
-				fmt.Printf("  %s\n", msg)
-			})
+		// Step 2: Recreate it (empty, or cloned fresh from source)
+		if remote {
+			err = database.ProvisionRemoteWorktreeDB(ctx, dbConfig, dbName, progress)
+		} else {
+			err = database.ProvisionLocalWorktreeDB(ctx, dbConfig, localURL, projectName, dbName, progress)
+		}
 		if err != nil {
-			return fmt.Errorf("failed to clone database: %w", err)
+			return fmt.Errorf("failed to create database: %w", err)
 		}
 
 		fmt.Printf("\n✓ Database reinstantiated: %s\n", dbName)
+
+		// Step 3: Seed it
+		if dbConfig.SeedCommand != "" {
+			fmt.Printf("\nRunning seedCommand: %s\n", dbConfig.SeedCommand)
+		}
+		ran, err := runner.RunSeedCommand(projectName, project, worktreeName, worktree, os.Stdout, os.Stderr)
+		if err != nil {
+			return fmt.Errorf("seedCommand failed: %w", err)
+		}
+		if ran {
+			fmt.Println("\n✓ Seeded")
+		} else if dbConfig.Empty {
+			fmt.Println("\nThe database is empty. Set seedCommand in the database config to migrate and seed it here.")
+		}
 
 		return nil
 	},
@@ -814,6 +898,10 @@ func init() {
 	databaseCmd.AddCommand(databaseReinstantiateCmd)
 	databaseCmd.AddCommand(databaseMigrationStatusCmd)
 	databaseCmd.AddCommand(databaseSetupUsersCmd)
+
+	// config flags
+	databaseConfigCmd.Flags().BoolVar(&configEmpty, "empty", false, "Create worktree databases empty instead of cloning the source")
+	databaseConfigCmd.Flags().StringVar(&configSeedCommand, "seed-command", "", "Shell command run in the worktree after 'database reinstantiate' (\"\" to clear)")
 
 	// set-source flags
 	databaseSetSourceCmd.Flags().IntVar(&setSourceThreshold, "threshold", 0, "Auto-exclude tables larger than N MB")

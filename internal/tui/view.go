@@ -1771,7 +1771,9 @@ func (m *Model) renderDatabasesTable() string {
 
 		// Clone source - show host/db from CloneURL
 		cloneDisplay := "-"
-		if dbConfig.CloneURL != "" {
+		if dbConfig.Empty {
+			cloneDisplay = "empty"
+		} else if dbConfig.CloneURL != "" {
 			if info, err := parseDBSource(dbConfig.CloneURL); err == nil {
 				cloneDisplay = truncate(fmt.Sprintf("%s/%s", info.host, info.db), cloneW)
 			} else {
