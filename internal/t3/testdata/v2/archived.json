@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 3,
+  "snapshotSequence": 4812,
+  "projects": [],
+  "threads": [
+    {
+      "createdBy": "user",
+      "creationSource": "web",
+      "id": "thr-archived",
+      "projectId": "proj-repo",
+      "title": "kudtrading/old",
+      "providerInstanceId": "claudeAgent",
+      "modelSelection": {"instanceId": "claudeAgent", "model": "claude-opus-5"},
+      "runtimeMode": "full-access",
+      "interactionMode": "default",
+      "branch": "old",
+      "worktreePath": "/home/u/.t3/worktrees/kudtrading/old",
+      "lineage": {"parentThreadId": null, "relationshipToParent": null, "rootThreadId": "thr-archived"},
+      "forkedFrom": null,
+      "activeProviderThreadId": null,
+      "latestRunId": "run-o1",
+      "latestRunStartedAt": "2026-09-20T00:00:00.000Z",
+      "activeRunId": null,
+      "activityRunStatus": null,
+      "status": "completed",
+      "pendingRuntimeRequest": null,
+      "latestVisibleMessage": null,
+      "latestUserMessageAt": "2026-09-20T00:00:00.000Z",
+      "hasActionableProposedPlan": false,
+      "itemCount": 10,
+      "visibleItemCount": 10,
+      "createdAt": "2026-09-20T00:00:00.000Z",
+      "updatedAt": "2026-09-21T00:00:00.000Z",
+      "archivedAt": "2026-09-21T00:00:00.000Z",
+      "settledOverride": null,
+      "settledAt": "2026-09-20T06:00:00.000Z",
+      "deletedAt": null
+    }
+  ]
+}

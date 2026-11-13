@@ -14,6 +14,7 @@ import (
 	"github.com/hammashamzah/conductor/internal/github"
 	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/store"
+	"github.com/hammashamzah/conductor/internal/t3"
 	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/tunnel"
 	_ "github.com/lib/pq"
@@ -492,6 +493,16 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 		}
 	}
 
+	// The agent's context file names the port and database, and a wake just
+	// changed both. Rewrite it before the slow setup, so an agent woken with
+	// the worktree is told to wait rather than handed the old address. Only
+	// T3-hosted worktrees: tmux and herdr pass the prompt on the command line.
+	if t3.HasMarker(worktree.Path) || mux.Current().Kind() == mux.KindT3 {
+		if err := mux.WriteT3AgentContext(worktree.Path, projectName, worktree.Branch, worktree.Ports, worktree.DatabaseName); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not write the agent context file: %v\n", err)
+		}
+	}
+
 	if m.store != nil {
 		_ = m.store.SetWorktreeStatus(projectName, worktreeName, config.SetupStatusRunning)
 	}
@@ -508,6 +519,12 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 	if m.store != nil {
 		_ = m.store.SetWorktreeStatus(projectName, worktreeName, status)
 		_ = m.store.WakeWorktree(projectName, worktreeName, worktree.Ports, worktree.DatabaseName, worktree.DatabaseURL)
+		// Flush now, not after the save debounce: the dev window below runs
+		// `conductor run`, which reads the ports from conductor.json. Read
+		// before the save lands, a woken worktree has none, so PORT is never
+		// set and the server comes up on the project's defaults (3000/3001)
+		// instead of its own.
+		_ = m.store.ForceSave()
 	} else {
 		worktree.MarkSetup(status)
 		worktree.Hibernated = false

@@ -60,6 +60,10 @@ Do not register a *worktree* as a project: a thread in a project rooted at the
 worktree is a plain local checkout to T3, its `worktreePath` is null, and
 conductor cannot see it at all.
 
+Conductor's own thread creation (`conductor t3 create`, the TUI, `build`, the
+dispatcher) used to break that rule itself on V1 servers, by creating a project
+per worktree. On orchestration V2 it does not: see below.
+
 ## Running it
 
 ```bash
@@ -70,6 +74,10 @@ conductor adopt --bind-only        # bind an already-provisioned worktree
 
 The watcher polls T3's snapshot every few seconds. It is the only cleanup path
 there is, so if it is not running, hibernation and teardown do not happen.
+Against a V2 server it also holds a shell subscription, so a change in T3 is
+acted on within about a second rather than at the next poll. When a pass fails
+it re-reads T3's origin and token (T3 picks its port at startup, so a restarted
+server can move) and re-detects the protocol.
 
 ### Guards
 
@@ -79,6 +87,14 @@ These exist because the failure modes are expensive:
   `thread.delete` for every thread in it, which with one project per repository
   is every worktree at once. More than `--max-teardowns` (default 3) in a single
   pass and the watcher does nothing and says so.
+- **A teardown needs two consistent sightings.** A worktree is torn down only
+  after it has had no thread at all — live or archived — on two passes at least
+  12 s apart, each from a consistent snapshot. Any thread seen in between
+  resets the clock; an inconsistent snapshot (see *Archived vs deleted*) is no
+  evidence and neither starts nor finishes it.
+- **One provision at a time.** The watcher does not wake a hibernated worktree
+  that is already being provisioned (setup status creating/running, not
+  stalled), and `adopt` decides under a cross-process lock.
 - **Hibernation is debounced** by 10 minutes, so archiving a thread by mistake
   costs a click to undo rather than a database reclone.
 - **Worktrees with no bound threads are invisible.** Anything created under tmux
@@ -189,6 +205,86 @@ worktree has different ports than it had before.** Local database names are
 derived from the first port and change with it; remote `dev_<city>` names are
 stable across hibernation.
 
+## Orchestration V1 and V2
+
+T3 has two orchestration protocols and a nightly can switch a machine from one
+to the other. Conductor speaks both and picks per connection; nothing needs
+configuring.
+
+**Detection.** `GET /.well-known/t3/environment` carries
+`orchestrationProtocolVersion` (absent means V1). The answer is cached per
+client and dropped whenever a request fails in a way that could mean the server
+changed underneath it — unreachable origin, a 404 on a V1-only route, a 426 on
+the socket — and the failed call is retried once under the new answer.
+
+| | V1 | V2 |
+|---|---|---|
+| Live threads | `GET /api/orchestration/shell` | same route, header `x-t3-orchestration-protocol: 2` |
+| Archived threads | `GET /api/orchestration/snapshot` | WS `orchestration.getArchivedShellSnapshot` |
+| Thread commands | `POST /api/orchestration/dispatch` | WS `orchestration.dispatchCommand` |
+| Project create/delete | dispatch `project.*` | `POST /api/projects/mutate` |
+| New thread | `project.create` per worktree + `thread.create` | WS `orchestration.launchThread`, `existing_worktree`, under the **repository's** project |
+| Send a turn | `thread.turn.start` | `message.dispatch` |
+| Socket | `/ws?wsTicket=…` | `/ws?wsTicket=…&orchestrationProtocol=2` (426 without it) |
+| Change feed | none (polling) | WS `orchestration.subscribeShell` + `subscribeArchivedShell` |
+
+Terminals (`terminal.open` / `terminal.write`) and `subscribeServerConfig` are
+unchanged apart from the socket query.
+
+**Settling** reads the same fields on both: V2's thread shell still carries
+`settledAt` and `settledOverride`. The activity guard maps V2's single
+`pendingRuntimeRequest` onto "waiting on a human" (kind `user_input` is a
+question, anything else an approval), and its run status onto the session
+status the guard checks (`preparing`/`starting` → starting,
+`running`/`waiting` → running, `failed` → error).
+
+**Archived vs deleted.** V2 has no single route listing both (the server's
+all-locations read is internal), so the archive is read on both sides of the
+active read and the three are merged. A thread moving between archive and
+active between two reads would otherwise be in neither, which is
+indistinguishable from deletion. Each read also carries the server's
+application-event sequence, read in the same transaction as its threads; equal
+sequences on all three mean nothing moved and the merge is exact. Otherwise the
+reads are retried (four attempts) and a snapshot that never settles is marked
+inconsistent, and the watcher will not tear anything down on it. Against the
+live 0.0.46-nightly.20261003 server with ~420 threads, 40 of 40 snapshots were
+consistent at ~280 ms each.
+
+**One project per repository.** On V2 conductor launches its threads under the
+project rooted at the repository, bound to the worktree with
+`workspaceStrategy: existing_worktree`. That is the shape a thread started in
+T3's composer already has, so the sidebar, `adopt` and the watcher all see the
+same thing whichever way a worktree was made. V1 behaviour is unchanged.
+
+**Every launch runs the setup hook.** On V2, `launchThread` prepares every
+non-resumed launch, and preparation runs the project's `runOnWorktreeCreate`
+script — `conductor adopt` — whatever the workspace strategy: a new worktree, a
+new thread in an existing worktree (UI, `t3_thread_launch`, `create_threads`,
+conductor's own launch), and a thread at the project root, where the
+"worktree" is the repository itself. So `adopt` decides from conductor's own
+state, never re-provisioning a worktree that is set up:
+
+| Situation | `adopt` does |
+|---|---|
+| path is the repository root | nothing |
+| not registered yet | registers and provisions |
+| being provisioned (creating/running, live owner) | binds only |
+| hibernated | binds only; the watcher wakes it |
+| set up (done, or no status recorded) | binds only |
+| last setup failed or stalled | provisions again |
+| `--reprovision` | provisions again (unless one is running) |
+
+For an `existing_worktree` or root launch T3 does not wait for the hook: it
+writes it to a terminal and moves on, so the turn may start first.
+
+**The first turn is still held.** The launch carries no `initialMessage`; the
+turn is sent with `message.dispatch` once the worktree is ready, exactly as on
+V1. A V2 turn counts as started once its run leaves `preparing`/`queued`.
+While a run is preparing (or the worktree is still provisioning) the start
+wait extends past its 45 s, up to 20 minutes; only a failed run or 45 s of no
+visible progress is reported as failure. A message sent while a run is active
+is handed to it — the server steers it in or queues it — and reported as such.
+
 ## Where worktrees live
 
 Wherever T3 put them — by default `~/.t3/worktrees/<repo>/<branch>`. The
@@ -205,7 +301,8 @@ repositories with a `main` branch collide on one database.
 ## What conductor cannot do
 
 - **It cannot write into a thread.** `thread.activity.append` is internal to T3;
-  both dispatch endpoints reject it from an outside client. Setup output is
+  both dispatch endpoints reject it from an outside client (V2 has no such
+  command at all). Setup output is
   visible because it runs in a real terminal, not because conductor reported it.
 - **It cannot override T3's delete flow.** If you confirm "Delete the worktree
   too?", T3 removes the directory itself. The watcher reconciles afterwards.

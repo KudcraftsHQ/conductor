@@ -136,9 +136,11 @@ external tools can drive a thread without a browser.`,
 		if err != nil {
 			return err
 		}
-		// Long enough to cover starting a provider session, which the wait below
-		// blocks on; the 30s this used to allow was shorter than a cold start.
-		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
+		// The dispatch and lookup are quick; the wait below is not always: on
+		// V2 a thread still in its launch's setup (`conductor adopt`, a
+		// database clone) holds the turn until setup finishes. The wait
+		// extends only while something is visibly preparing.
+		ctx, cancel := context.WithTimeout(cmd.Context(), 25*time.Minute)
 		defer cancel()
 
 		snapshot, err := client.Shell(ctx)
@@ -155,8 +157,17 @@ external tools can drive a thread without a browser.`,
 		// Dispatching is not running: the provider session starts afterwards and
 		// reports refusals only on the thread. Reporting "Sent" without checking
 		// is how a thread that never ran looked like a success.
-		if err := client.WaitForTurn(ctx, thread.ID, 45*time.Second); err != nil {
+		outcome, err := client.WaitForTurnWith(ctx, thread.ID, t3.TurnWait{
+			Timeout:      45 * time.Second,
+			MaxWait:      20 * time.Minute,
+			Provisioning: mux.WorktreeProvisioning(worktreePath),
+		})
+		if err != nil {
 			return err
+		}
+		if outcome == t3.TurnJoinedActive {
+			fmt.Printf("Handed to the run already active on %s/thread/%s (steered or queued; T3 decides)\n", client.Origin, thread.ID)
+			return nil
 		}
 		fmt.Printf("Sent to %s/thread/%s\n", client.Origin, thread.ID)
 		return nil

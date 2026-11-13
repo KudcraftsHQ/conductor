@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **T3 agents now load the worktree's context file**: conductor wrote `.conductor-context.md` into every T3-hosted worktree, but no agent looked for it. Adopt, provision and wake now also write auto-load shims beside it, without touching tracked files or hiding the repository's own `AGENTS.md`:
+  - `CLAUDE.local.md` (Claude Code) imports it with `@.conductor-context.md`; an existing `CLAUDE.local.md` keeps its content and gets a marked block appended
+  - `AGENTS.local.md` (dsh) and `.pi/APPEND_SYSTEM.md` (pi) carry it inline, since neither resolves imports; the pi file is skipped when a global `~/.pi/agent/APPEND_SYSTEM.md` exists, which it would replace
+  - Codex gets no shim: every per-directory mechanism it has either replaces `AGENTS.md` or edits a tracked file
+  - The context file is rewritten on wake, with the new port, before setup starts — and on adopt before provisioning, so the first turn is told to `conductor wait`
+  - It now names the database and every port, and is about half as long
+  - `conductor t3 context [--all]` rewrites the file and shims for existing T3-hosted worktrees
+- **Conductor's files showing in `git status` of linked worktrees**: the exclude entries were written to the per-worktree git dir, which git does not read; they now go to the repository's common `info/exclude`
 - **Worktree name collisions across projects**: `conductor worktree create` now excludes city names already used by *any* project's worktrees, not just the current project's. Remote dev databases (`dev_<city>`) live on a shared server, so a name reused by another project caused the remote DB clone to fail with `database "dev_<city>" already exists`. When every city name is taken, a unique suffixed name (`city-2`, `city-3`, …) is generated instead of returning a colliding city.
 
 ### Added

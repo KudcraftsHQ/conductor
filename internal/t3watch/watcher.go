@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/hammashamzah/conductor/internal/config"
+	"github.com/hammashamzah/conductor/internal/ready"
 	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/stray"
 	"github.com/hammashamzah/conductor/internal/t3"
@@ -18,8 +20,8 @@ import (
 
 // Defaults for the watcher loop.
 const (
-	// DefaultInterval is how often T3 is polled. The snapshot is small and
-	// local; this is nowhere near expensive enough to justify a subscription.
+	// DefaultInterval is how often T3 is polled. Against a V2 server a shell
+	// subscription triggers passes sooner; polling stays as the floor.
 	DefaultInterval = 5 * time.Second
 	// DefaultDebounce is how long a worktree sits with no live thread before
 	// its resources are released.
@@ -57,13 +59,23 @@ type Watcher struct {
 	// only touches tmux for the worktrees whose verdict changed.
 	devApplied map[string]DevWant
 	lastSweep  time.Time
+	// lastInconsistent is whether the last snapshot was inconsistent, so that
+	// is logged once per change rather than every tick.
+	lastInconsistent bool
 	// lastRefused is the suppressed teardown count last reported, so the
 	// refusal is logged when it changes rather than on every tick.
 	lastRefused int
+
+	// shell is the V2 shell subscription, when there is one. It only shortens
+	// the time to react; polling continues underneath it regardless.
+	shell *t3.ShellWatch
 }
 
 // New builds a watcher over the given store.
 func New(s *store.Store) (*Watcher, error) {
+	// Before anything is spawned: setup and archive scripts need bun and
+	// conductor, which a systemd service's PATH does not have.
+	ensureUserPath()
 	client, err := t3.New()
 	if err != nil {
 		return nil, err
@@ -91,8 +103,15 @@ func (w *Watcher) logf(format string, args ...any) {
 	if w.Log == nil {
 		return
 	}
-	fmt.Fprintf(w.Log, "[t3watch] "+format+"\n", args...)
+	// Timestamped: the service appends to a plain file, so without this there
+	// is no telling when anything happened.
+	fmt.Fprintf(w.Log, "%s [t3watch] "+format+"\n", append([]any{Timestamp()}, args...)...)
 }
+
+// Timestamp is the prefix every watcher log line carries: RFC3339 in UTC, so
+// the plain log file the service appends to can be lined up against T3's own
+// event times. Rotation is logrotate's job (copytruncate), not ours.
+func Timestamp() string { return time.Now().UTC().Format(time.RFC3339) }
 
 // Start runs the loop until Stop is called.
 func (w *Watcher) Start() error {
@@ -133,40 +152,118 @@ func (w *Watcher) Stop() {
 
 func (w *Watcher) loop(ctx context.Context) {
 	defer close(w.done)
+	defer w.closeShellWatch()
 
 	// The first pass is a catch-up: nothing replays what happened while the
 	// watcher was down, so every worktree is judged from scratch on boot.
 	if err := w.Tick(ctx); err != nil {
 		w.logf("first pass failed: %v", err)
+		w.recover(err)
 	}
+	w.ensureShellWatch(ctx)
 
 	ticker := time.NewTicker(w.Interval)
 	defer ticker.Stop()
+
+	// kick coalesces a burst of shell changes into one pass shortly after.
+	var kick <-chan time.Time
 	for {
+		var changed, ended <-chan struct{}
+		if w.shell != nil {
+			changed, ended = w.shell.Changed(), w.shell.Done()
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if err := w.Tick(ctx); err != nil {
-				w.mu.Lock()
-				w.lastErr = err
-				w.mu.Unlock()
-				w.logf("tick failed: %v", err)
+		case <-ended:
+			w.logf("shell subscription ended (%v); polling until it reconnects", w.shell.Err())
+			w.closeShellWatch()
+		case <-changed:
+			if kick == nil {
+				kick = time.After(shellKickDelay)
 			}
+		case <-kick:
+			kick = nil
+			w.runTick(ctx)
+		case <-ticker.C:
+			w.runTick(ctx)
+			w.ensureShellWatch(ctx)
 		}
+	}
+}
+
+// shellKickDelay batches the burst of stream items one user action produces
+// (an archive is a removal on one stream and an update on the other).
+const shellKickDelay = 500 * time.Millisecond
+
+func (w *Watcher) runTick(ctx context.Context) {
+	if err := w.Tick(ctx); err != nil {
+		w.mu.Lock()
+		w.lastErr = err
+		w.mu.Unlock()
+		w.logf("tick failed: %v", err)
+		w.recover(err)
+	}
+}
+
+// recover reacts to a failed pass by re-reading where T3 is.
+//
+// The origin used to be captured once at startup. T3 chooses its port when it
+// starts, so after a restart on a different port the watcher kept polling a
+// dead address forever. Rediscovering on failure also drops the cached
+// orchestration protocol, so a server upgraded from V1 to V2 is re-detected.
+func (w *Watcher) recover(error) {
+	before := w.client.Origin
+	if w.client.Rediscover() {
+		w.logf("T3 Code moved from %s to %s", before, w.client.Origin)
+	}
+	w.closeShellWatch()
+}
+
+// ensureShellWatch opens the V2 shell subscription if there is none. Against a
+// V1 server it is a no-op: the protocol is cached, so this costs nothing.
+func (w *Watcher) ensureShellWatch(ctx context.Context) {
+	if w.shell != nil {
+		return
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	watch, err := w.client.WatchShell(dialCtx)
+	if err != nil {
+		return // V1, or unreachable: polling covers both.
+	}
+	w.shell = watch
+}
+
+func (w *Watcher) closeShellWatch() {
+	if w.shell != nil {
+		w.shell.Close()
+		w.shell = nil
 	}
 }
 
 // Tick runs one reconciliation pass. Exported so `conductor t3 watch once` can
 // run exactly one, which is also how the whole thing is exercised by hand.
 func (w *Watcher) Tick(ctx context.Context) error {
+	snapshot, err := w.client.Snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read the T3 snapshot: %w", err)
+	}
+
+	// Reload only now, after the (V2: multi-read, ~300ms) snapshot.
+	// conductor.json is rewritten whole by whoever saves last, and anything
+	// this tick writes is saved from the state loaded here; reloading before
+	// the snapshot left that whole read as a window in which a concurrent
+	// `conductor worktree create` was silently overwritten.
 	if err := w.store.Reload(); err != nil {
 		return fmt.Errorf("failed to reload conductor state: %w", err)
 	}
 
-	snapshot, err := w.client.Snapshot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to read the T3 snapshot: %w", err)
+	if snapshot.Inconsistent != w.lastInconsistent {
+		if snapshot.Inconsistent {
+			w.logf("T3 kept changing while it was read; teardowns wait for a consistent snapshot")
+		}
+		w.lastInconsistent = snapshot.Inconsistent
 	}
 
 	cfg := w.store.GetConfigSnapshot()
@@ -178,13 +275,14 @@ func (w *Watcher) Tick(ctx context.Context) error {
 	// quiet tick — and this is exactly the moment somebody needs to know.
 	// It is said once per change of count, though: repeated every five seconds
 	// it grew the log to tens of megabytes and buried everything else.
-	refused := countGoneWorktrees(worktrees, snapshot)
+	gone := goneWorktrees(worktrees, snapshot)
+	refused := len(gone)
 	if refused <= w.decider.MaxTeardowns {
 		refused = 0
 	}
 	if refused != w.lastRefused && refused > 0 {
 		w.logf("refusing to tear down %d worktrees at once — deleting a T3 project deletes every thread in it. "+
-			"Run 'conductor t3 reconcile --archive' if this really was intended.", refused)
+			"Run 'conductor t3 reconcile --archive' if this really was intended. %v", refused, gone)
 	}
 	w.lastRefused = refused
 
@@ -397,6 +495,7 @@ func collect(cfg *config.Config) []Worktree {
 				Hibernated:   worktree.Hibernated,
 				Archived:     worktree.Archived,
 				IsRoot:       worktree.IsRoot,
+				Provisioning: worktree.SetupStatus.InProgress() && !worktree.SetupStalled(ready.StaleAfter),
 				KnownThreads: threads,
 				Ports:        worktree.Ports,
 			})
@@ -405,21 +504,29 @@ func collect(cfg *config.Config) []Worktree {
 	return out
 }
 
-// countGoneWorktrees counts how many hosted worktrees have lost every thread,
-// before the batch cap is applied.
-func countGoneWorktrees(worktrees []Worktree, snapshot *t3.ShellSnapshot) int {
+// goneWorktrees names the hosted worktrees that have lost every thread, before
+// the batch cap is applied. Named rather than counted, so a refusal in the log
+// says which worktrees it was about.
+func goneWorktrees(worktrees []Worktree, snapshot *t3.ShellSnapshot) []string {
+	if snapshot == nil || snapshot.Inconsistent {
+		return nil
+	}
 	live, archived := indexThreads(snapshot)
-	n := 0
+	var out []string
 	for _, worktree := range worktrees {
 		if worktree.IsRoot || worktree.Archived || worktree.Path == "" || len(worktree.KnownThreads) == 0 {
 			continue
 		}
+		if worktree.Provisioning {
+			continue // Held: see Decide.
+		}
 		key := normalize(worktree.Path)
 		if len(live[key]) == 0 && len(archived[key]) == 0 {
-			n++
+			out = append(out, worktree.Key())
 		}
 	}
-	return n
+	sort.Strings(out)
+	return out
 }
 
 func sameStrings(a, b []string) bool {

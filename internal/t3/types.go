@@ -16,6 +16,15 @@ type ShellSnapshot struct {
 	Projects         []Project `json:"projects"`
 	Threads          []Thread  `json:"threads"`
 	UpdatedAt        time.Time `json:"updatedAt"`
+
+	// Inconsistent marks a snapshot assembled from reads that did not all see
+	// the same server state. On V2 the active and archived threads come from
+	// separate reads, and when the server's sequence moved between them a
+	// thread can be missing from both. Such a snapshot is fine for display and
+	// for keeping things alive, and must never be the evidence for destroying
+	// anything. Zero means consistent: only the V2 merge can produce one that
+	// is not, and it sets this explicitly.
+	Inconsistent bool `json:"-"`
 }
 
 // Project is a T3 project: a workspace root plus its scripts.
@@ -46,7 +55,18 @@ type Thread struct {
 	ModelSelection      ModelSelection  `json:"modelSelection"`
 	Session             *ThreadSession  `json:"session"`
 	LatestTurn          json.RawMessage `json:"latestTurn"`
+	// RunID is V2's latestRunId. V1 has no equivalent and leaves it empty; it
+	// is how WaitForTurn tells a new run from the one before it.
+	RunID string `json:"-"`
+	// ProviderSubagent marks a thread the provider spawned as a subagent of
+	// another (V2 lineage "subagent", creationSource "provider"). It shares its
+	// parent's worktree but takes no messages: T3 refuses a turn on it with
+	// "This subagent is run by its provider and cannot take messages".
+	ProviderSubagent bool `json:"-"`
 }
+
+// Addressable reports whether conductor may send this thread a turn.
+func (t *Thread) Addressable() bool { return !t.ProviderSubagent }
 
 // Settled override values, from T3's own schema:
 //
