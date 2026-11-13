@@ -58,7 +58,15 @@ type Thread struct {
 	// RunID is V2's latestRunId. V1 has no equivalent and leaves it empty; it
 	// is how WaitForTurn tells a new run from the one before it.
 	RunID string `json:"-"`
+	// ProviderSubagent marks a thread the provider spawned as a subagent of
+	// another (V2 lineage "subagent", creationSource "provider"). It shares its
+	// parent's worktree but takes no messages: T3 refuses a turn on it with
+	// "This subagent is run by its provider and cannot take messages".
+	ProviderSubagent bool `json:"-"`
 }
+
+// Addressable reports whether conductor may send this thread a turn.
+func (t *Thread) Addressable() bool { return !t.ProviderSubagent }
 
 // Settled override values, from T3's own schema:
 //

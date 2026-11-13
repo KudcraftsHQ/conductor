@@ -43,7 +43,13 @@ func (s *ShellSnapshot) FindProjectByTitle(title string) (*Project, bool) {
 	return nil, false
 }
 
-// FindThreadByWorktree returns the live thread bound to worktreePath.
+// FindThreadByWorktree returns the live thread bound to worktreePath that can
+// take a turn.
+//
+// Provider-run subagents are skipped: a Claude Agent spawned by the worktree's
+// thread is recorded as its own thread on the same worktree, often ahead of
+// its parent, and a turn sent to it is refused. Callers asking "is anything
+// still on this worktree" want FindThreadsByWorktree, which counts them.
 //
 // The worktree path is the join key between conductor and T3: conductor owns
 // it, and T3 stores it verbatim on the thread. Titles are unsuitable because
@@ -51,7 +57,7 @@ func (s *ShellSnapshot) FindProjectByTitle(title string) (*Project, bool) {
 func (s *ShellSnapshot) FindThreadByWorktree(worktreePath string) (*Thread, bool) {
 	for i := range s.Threads {
 		t := &s.Threads[i]
-		if t.Archived() {
+		if t.Archived() || !t.Addressable() {
 			continue
 		}
 		if t.Worktree() != "" && pathsEqual(t.Worktree(), worktreePath) {
