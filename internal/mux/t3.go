@@ -411,8 +411,8 @@ func existingThread(ctx context.Context, client *t3.Client, project, branch, wor
 // threadOccupying reports the thread still holding a worktree, and whether the
 // marker is stale (recorded threads that are all archived).
 func threadOccupying(snapshot *t3.ShellSnapshot, worktreePath string, markerIDs []string) (occupant string, stale bool) {
-	if thread, ok := snapshot.FindThreadByWorktree(worktreePath); ok {
-		return thread.ID, false
+	if threads := snapshot.FindThreadsByWorktree(worktreePath); len(threads) > 0 {
+		return threads[0].ID, false
 	}
 	if len(markerIDs) == 0 {
 		return "", false

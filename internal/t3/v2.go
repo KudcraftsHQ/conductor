@@ -62,6 +62,19 @@ type v2Thread struct {
 	SettledOverride *string `json:"settledOverride"`
 	SettledAt       *string `json:"settledAt"`
 	DeletedAt       *string `json:"deletedAt"`
+	CreationSource  string  `json:"creationSource"`
+	Lineage         *struct {
+		ParentThreadID       *string `json:"parentThreadId"`
+		RelationshipToParent *string `json:"relationshipToParent"`
+	} `json:"lineage"`
+}
+
+// providerSubagent is T3's isProviderNativeSubagentThread: a subagent the
+// provider runs itself, as opposed to a delegate_task child (creationSource
+// "mcp"), which can take messages.
+func (t v2Thread) providerSubagent() bool {
+	return t.Lineage != nil && t.Lineage.RelationshipToParent != nil &&
+		*t.Lineage.RelationshipToParent == "subagent" && t.CreationSource == "provider"
 }
 
 // v2Project is OrchestrationProjectShell. It has no deletedAt: a deleted
@@ -140,16 +153,17 @@ func (t v2Thread) sessionStatus() string {
 // approvals, auth refresh, dynamic tool calls) waits on a human decision too.
 func (t v2Thread) toThread() Thread {
 	thread := Thread{
-		ID:              t.ID,
-		ProjectID:       t.ProjectID,
-		Title:           t.Title,
-		Branch:          t.Branch,
-		WorktreePath:    t.WorktreePath,
-		ArchivedAt:      t.ArchivedAt,
-		DeletedAt:       t.DeletedAt,
-		SettledAt:       t.SettledAt,
-		SettledOverride: t.SettledOverride,
-		ModelSelection:  t.ModelSelection,
+		ID:               t.ID,
+		ProjectID:        t.ProjectID,
+		Title:            t.Title,
+		Branch:           t.Branch,
+		WorktreePath:     t.WorktreePath,
+		ArchivedAt:       t.ArchivedAt,
+		DeletedAt:        t.DeletedAt,
+		SettledAt:        t.SettledAt,
+		SettledOverride:  t.SettledOverride,
+		ModelSelection:   t.ModelSelection,
+		ProviderSubagent: t.providerSubagent(),
 		Session: &ThreadSession{
 			ThreadID:           t.ID,
 			Status:             t.sessionStatus(),
