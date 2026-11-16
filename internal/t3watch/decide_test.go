@@ -38,6 +38,15 @@ func decider(now time.Time) *Decider {
 	return d
 }
 
+// confirmed runs Decide twice, TeardownConfirm apart, which is what a teardown
+// needs; it returns the second pass.
+func confirmed(d *Decider, start time.Time, worktrees []Worktree, snapshot *t3.ShellSnapshot) []Decision {
+	d.Now = func() time.Time { return start }
+	d.Decide(worktrees, snapshot)
+	d.Now = func() time.Time { return start.Add(d.TeardownConfirm) }
+	return d.Decide(worktrees, snapshot)
+}
+
 func only(t *testing.T, decisions []Decision) Decision {
 	t.Helper()
 	require.Len(t, decisions, 1)
@@ -126,14 +135,65 @@ func TestHibernatedWorktreeStaysPut(t *testing.T) {
 	assert.Equal(t, ActionNone, only(t, decider(time.Now()).Decide([]Worktree{worktree}, snapshot)).Action)
 }
 
-// Deletion is the only thing that removes a tree, and it needs no debounce:
-// the thread is already gone for good by the time we see this.
+// Deletion is the only thing that removes a tree — and only once two
+// consistent snapshots, TeardownConfirm apart, agree there is no thread.
 func TestTeardownWhenEveryThreadIsDeleted(t *testing.T) {
 	snapshot := &t3.ShellSnapshot{Threads: []t3.Thread{}}
+	now := time.Now()
+	d := decider(now)
 
-	decision := only(t, decider(time.Now()).Decide([]Worktree{hosted("a")}, snapshot))
+	first := only(t, d.Decide([]Worktree{hosted("a")}, snapshot))
+	assert.Equal(t, ActionNone, first.Action, "one snapshot is never enough to destroy a tree")
 
-	assert.Equal(t, ActionTeardown, decision.Action)
+	d.Now = func() time.Time { return now.Add(d.TeardownConfirm / 2) }
+	assert.Equal(t, ActionNone, only(t, d.Decide([]Worktree{hosted("a")}, snapshot)).Action, "not yet confirmed")
+
+	d.Now = func() time.Time { return now.Add(d.TeardownConfirm) }
+	assert.Equal(t, ActionTeardown, only(t, d.Decide([]Worktree{hosted("a")}, snapshot)).Action)
+}
+
+// A snapshot whose reads did not agree is no evidence of deletion: it neither
+// tears down nor starts the confirmation clock.
+func TestInconsistentSnapshotNeverTearsDown(t *testing.T) {
+	inconsistent := &t3.ShellSnapshot{Inconsistent: true}
+	now := time.Now()
+	d := decider(now)
+	for i := 0; i < 4; i++ {
+		d.Now = func() time.Time { return now.Add(time.Duration(i) * d.TeardownConfirm) }
+		assert.Equal(t, ActionNone, only(t, d.Decide([]Worktree{hosted("a")}, inconsistent)).Action)
+	}
+	// The first consistent sighting starts the clock rather than finishing it.
+	d.Now = func() time.Time { return now.Add(10 * d.TeardownConfirm) }
+	assert.Equal(t, ActionNone, only(t, d.Decide([]Worktree{hosted("a")}, &t3.ShellSnapshot{})).Action)
+}
+
+// A thread seen in between — live or archived — resets the clock, so a
+// thread caught mid-move between T3's active and archived lists twice in a
+// row still cannot cost its worktree.
+func TestAnyThreadResetsTeardownConfirmation(t *testing.T) {
+	gone := &t3.ShellSnapshot{}
+	archivedOnly := &t3.ShellSnapshot{Threads: []t3.Thread{thread("a", wtPath, at("2026-10-03T00:00:00Z"), nil)}}
+	now := time.Now()
+	d := decider(now)
+
+	d.Decide([]Worktree{hosted("a")}, gone)
+	d.Now = func() time.Time { return now.Add(d.TeardownConfirm / 2) }
+	assert.NotEqual(t, ActionTeardown, only(t, d.Decide([]Worktree{hosted("a")}, archivedOnly)).Action)
+	d.Now = func() time.Time { return now.Add(d.TeardownConfirm) }
+	assert.Equal(t, ActionNone, only(t, d.Decide([]Worktree{hosted("a")}, gone)).Action, "clock restarted")
+	d.Now = func() time.Time { return now.Add(2 * d.TeardownConfirm) }
+	assert.Equal(t, ActionTeardown, only(t, d.Decide([]Worktree{hosted("a")}, gone)).Action)
+}
+
+// Waking provisions, and so does adopt run by a T3 launch. Whichever started
+// first owns it; the watcher does not start a second one.
+func TestNoWakeWhileAnotherProvisionRuns(t *testing.T) {
+	worktree := hosted("a")
+	worktree.Hibernated = true
+	worktree.Provisioning = true
+	snapshot := &t3.ShellSnapshot{Threads: []t3.Thread{thread("a", wtPath, nil, nil)}}
+
+	assert.Equal(t, ActionNone, only(t, decider(time.Now()).Decide([]Worktree{worktree}, snapshot)).Action)
 }
 
 // Deleting a T3 project cascades into deleting every thread it holds. With one
@@ -150,7 +210,7 @@ func TestBatchDeletionIsSuppressed(t *testing.T) {
 		})
 	}
 
-	decisions := decider(time.Now()).Decide(worktrees, &t3.ShellSnapshot{})
+	decisions := confirmed(decider(time.Now()), time.Now(), worktrees, &t3.ShellSnapshot{})
 
 	assert.Equal(t, 0, TeardownCount(decisions), "five simultaneous deletions must not tear anything down")
 }
@@ -167,7 +227,7 @@ func TestSmallBatchDeletionProceeds(t *testing.T) {
 		})
 	}
 
-	decisions := decider(time.Now()).Decide(worktrees, &t3.ShellSnapshot{})
+	decisions := confirmed(decider(time.Now()), time.Now(), worktrees, &t3.ShellSnapshot{})
 
 	assert.Equal(t, 2, TeardownCount(decisions))
 }
@@ -213,7 +273,7 @@ func TestDeletedThreadsDoNotHoldAWorktreeOpen(t *testing.T) {
 		thread("a", wtPath, nil, at("2026-08-09T00:00:00Z")),
 	}}
 
-	assert.Equal(t, ActionTeardown, only(t, decider(time.Now()).Decide([]Worktree{hosted("a")}, snapshot)).Action)
+	assert.Equal(t, ActionTeardown, only(t, confirmed(decider(time.Now()), time.Now(), []Worktree{hosted("a")}, snapshot)).Action)
 }
 
 // Paths differing only by a trailing separator are the same worktree.
@@ -302,4 +362,24 @@ func TestNoDevVerdictOutsideActive(t *testing.T) {
 	decision := only(t, decider(time.Now()).Decide([]Worktree{sleeping}, live))
 	assert.Equal(t, ActionWake, decision.Action)
 	assert.Equal(t, DevKeep, decision.Dev)
+}
+
+// A worktree whose setup is still running is held, however long its thread
+// takes to show up in T3.
+func TestProvisioningWorktreeIsNeverTornDown(t *testing.T) {
+	worktree := hosted("a")
+	worktree.Provisioning = true
+	snapshot := &t3.ShellSnapshot{}
+
+	d := decider(time.Now())
+	decision := only(t, confirmed(d, time.Now(), []Worktree{worktree}, snapshot))
+	assert.Equal(t, ActionNone, decision.Action)
+	assert.Empty(t, goneWorktrees([]Worktree{worktree}, snapshot))
+
+	// Once setup has finished, the confirmation starts from scratch.
+	worktree.Provisioning = false
+	start := time.Now()
+	d.Now = func() time.Time { return start }
+	assert.Equal(t, ActionNone, only(t, d.Decide([]Worktree{worktree}, snapshot)).Action)
+	assert.Equal(t, ActionTeardown, only(t, confirmed(d, start.Add(time.Second), []Worktree{worktree}, snapshot)).Action)
 }

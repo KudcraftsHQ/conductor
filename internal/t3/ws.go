@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -20,12 +21,15 @@ import (
 
 // WS method names. These are the subset conductor drives.
 const (
-	MethodTerminalOpen      = "terminal.open"
-	MethodTerminalWrite     = "terminal.write"
-	MethodTerminalClose     = "terminal.close"
-	MethodTerminalRestart   = "terminal.restart"
-	MethodVcsCreateWorktree = "vcs.createWorktree"
-	MethodVcsRemoveWorktree = "vcs.removeWorktree"
+	MethodTerminalOpen    = "terminal.open"
+	MethodTerminalWrite   = "terminal.write"
+	MethodTerminalClose   = "terminal.close"
+	MethodTerminalRestart = "terminal.restart"
+	// MethodSubscribeTerminalMetadata streams terminal summaries. Its first
+	// value lists every terminal T3 holds; there is no list RPC besides it.
+	MethodSubscribeTerminalMetadata = "subscribeTerminalMetadata"
+	MethodVcsCreateWorktree         = "vcs.createWorktree"
+	MethodVcsRemoveWorktree         = "vcs.removeWorktree"
 	// MethodSubscribeServerConfig is a streaming subscription whose first chunk
 	// carries the server config, including the provider instance registry. That
 	// registry has no HTTP equivalent, so this is the only way for conductor to
@@ -65,26 +69,51 @@ type wsExit struct {
 type Conn struct {
 	ws     *websocket.Conn
 	nextID int
+	// Protocol is the orchestration protocol the socket was opened for.
+	Protocol int
 }
 
 // Dial opens an authenticated RPC connection. Close it when done.
+//
+// A V2 server refuses the upgrade with 426 unless the client names the
+// protocol in the query, so the query follows the detected protocol. A 426
+// means the cached answer is stale: it is re-detected and the dial retried once.
 func (c *Client) Dial(ctx context.Context) (*Conn, error) {
+	var conn *Conn
+	err := c.withProtocol(ctx, func(p int) error {
+		dialed, err := c.dial(ctx, p)
+		if err != nil {
+			return err
+		}
+		conn = dialed
+		return nil
+	})
+	return conn, err
+}
+
+func (c *Client) dial(ctx context.Context, protocol int) (*Conn, error) {
 	ticket, err := c.websocketTicket(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	endpoint := strings.Replace(c.Origin, "http", "ws", 1) +
-		"/ws?wsTicket=" + url.QueryEscape(ticket)
+	endpoint := strings.Replace(c.Origin, "http", "ws", 1) + "/ws?wsTicket=" + url.QueryEscape(ticket)
+	if protocol >= ProtocolV2 {
+		endpoint += "&" + protocolQueryParam + "=" + fmt.Sprint(protocol)
+	}
 
-	ws, _, err := websocket.Dial(ctx, endpoint, nil)
+	ws, res, err := websocket.Dial(ctx, endpoint, nil)
 	if err != nil {
+		if res != nil && res.StatusCode == http.StatusUpgradeRequired {
+			return nil, fmt.Errorf("T3 refused the websocket for protocol %d (HTTP 426): %w", protocol, errProtocolMismatch)
+		}
+		c.ResetProtocol()
 		return nil, fmt.Errorf("failed to open T3 websocket: %w", err)
 	}
 	// Terminal history can be large; the default 32KiB read limit truncates it.
 	ws.SetReadLimit(32 << 20)
 
-	return &Conn{ws: ws, nextID: 1}, nil
+	return &Conn{ws: ws, nextID: 1, Protocol: protocol}, nil
 }
 
 // Close shuts the connection down.
@@ -285,7 +314,11 @@ type TerminalSnapshot struct {
 // TerminalOpen spawns a pty owned by threadID. The terminal's lifecycle is the
 // thread's: archiving the thread reaps the process, so conductor does not have
 // to track it separately.
-func (c *Conn) TerminalOpen(ctx context.Context, threadID, terminalID, cwd, worktreePath string) (*TerminalSnapshot, error) {
+//
+// Opening a terminal on a thread whose worktree directory is gone makes current
+// T3 builds recreate the worktree, so callers must check the directory exists
+// first.
+func (c *Conn) TerminalOpen(ctx context.Context, threadID, terminalID, cwd, worktreePath string, opts ...TerminalOpenOptions) (*TerminalSnapshot, error) {
 	payload := map[string]any{
 		"threadId":   threadID,
 		"terminalId": terminalID,
@@ -295,6 +328,11 @@ func (c *Conn) TerminalOpen(ctx context.Context, threadID, terminalID, cwd, work
 	}
 	if worktreePath != "" {
 		payload["worktreePath"] = worktreePath
+	}
+	for _, opt := range opts {
+		if opt.StopOnSettle {
+			payload["stopOnSettle"] = true
+		}
 	}
 	var snapshot TerminalSnapshot
 	if err := c.Call(ctx, MethodTerminalOpen, payload, &snapshot); err != nil {
@@ -313,9 +351,46 @@ func (c *Conn) TerminalWrite(ctx context.Context, threadID, terminalID, data str
 	}, nil)
 }
 
+// TerminalOpenOptions are terminal.open's optional flags.
+type TerminalOpenOptions struct {
+	// StopOnSettle has T3 stop the terminal and its processes when the thread
+	// settles. Servers that predate the flag ignore it.
+	StopOnSettle bool
+}
+
+// TerminalSummary is one entry of T3's terminal metadata stream.
+type TerminalSummary struct {
+	ThreadID             string `json:"threadId"`
+	TerminalID           string `json:"terminalId"`
+	Status               string `json:"status"`
+	PID                  *int   `json:"pid"`
+	HasRunningSubprocess bool   `json:"hasRunningSubprocess"`
+}
+
+// Running reports whether the terminal's shell is up and busy with a command.
+func (t TerminalSummary) Running() bool {
+	return (t.Status == "running" || t.Status == "starting") && t.HasRunningSubprocess
+}
+
+// TerminalList returns every terminal T3 holds, from the first value of the
+// terminal metadata stream.
+func (c *Conn) TerminalList(ctx context.Context) ([]TerminalSummary, error) {
+	var event struct {
+		Type      string            `json:"type"`
+		Terminals []TerminalSummary `json:"terminals"`
+	}
+	if err := c.CallStream(ctx, MethodSubscribeTerminalMetadata, map[string]any{}, &event); err != nil {
+		return nil, err
+	}
+	if event.Type != "snapshot" {
+		return nil, fmt.Errorf("T3 %s began with %q, not a snapshot", MethodSubscribeTerminalMetadata, event.Type)
+	}
+	return event.Terminals, nil
+}
+
 // TerminalRunCommand opens a terminal and submits a command line to it.
-func (c *Conn) TerminalRunCommand(ctx context.Context, threadID, terminalID, cwd, worktreePath, command string) (*TerminalSnapshot, error) {
-	snapshot, err := c.TerminalOpen(ctx, threadID, terminalID, cwd, worktreePath)
+func (c *Conn) TerminalRunCommand(ctx context.Context, threadID, terminalID, cwd, worktreePath, command string, opts ...TerminalOpenOptions) (*TerminalSnapshot, error) {
+	snapshot, err := c.TerminalOpen(ctx, threadID, terminalID, cwd, worktreePath, opts...)
 	if err != nil {
 		return nil, err
 	}

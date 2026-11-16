@@ -14,6 +14,7 @@ import (
 	"github.com/hammashamzah/conductor/internal/github"
 	"github.com/hammashamzah/conductor/internal/mux"
 	"github.com/hammashamzah/conductor/internal/store"
+	"github.com/hammashamzah/conductor/internal/t3"
 	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/tunnel"
 	_ "github.com/lib/pq"
@@ -325,15 +326,16 @@ func (m *Manager) RunSetupAsync(projectName, worktreeName string, onComplete fun
 
 // ArchiveWorktree releases a worktree's resources and removes its tree.
 //
-// This is the destructive end of the lifecycle and it deletes the branch, which
-// is why the T3-driven paths call ReleaseResources and RemoveTree separately
-// instead: there, a thread being deleted must not be able to destroy commits.
-// The worktree entry remains in config so logs can still be viewed.
+// The local branch is kept. Archiving used to delete it with `git branch -D`,
+// which lost any commit that had not been pushed; a tree can be recreated from
+// a branch, but nothing recreates a branch. Deleting a branch is only ever an
+// explicit act (the TUI's orphaned-branch delete). The worktree entry remains
+// in config so logs can still be viewed.
 func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 	if err := m.ReleaseResources(projectName, worktreeName); err != nil {
 		return err
 	}
-	return m.RemoveTree(projectName, worktreeName, true)
+	return m.RemoveTree(projectName, worktreeName)
 }
 
 // ReleaseResources frees everything a worktree consumes — its archive script
@@ -409,11 +411,10 @@ func (m *Manager) ReleaseResources(projectName, worktreeName string) error {
 // RemoveTree removes the working tree from disk and marks the entry archived,
 // so it survives as a tombstone whose logs can still be read.
 //
-// deleteBranch must be false on anything driven by T3 Code. Deleting a thread
-// there is a routine act, and T3's own worktree removal leaves the branch
-// alone; matching that means a stray deletion costs a tree that can be
-// recreated rather than commits that cannot.
-func (m *Manager) RemoveTree(projectName, worktreeName string, deleteBranch bool) error {
+// It never deletes the branch. T3's own worktree removal leaves the branch
+// alone too, so a stray removal costs a tree that can be recreated rather than
+// commits that cannot.
+func (m *Manager) RemoveTree(projectName, worktreeName string) error {
 	project, ok := m.config.GetProject(projectName)
 	if !ok {
 		return fmt.Errorf("project '%s' not found", projectName)
@@ -434,11 +435,6 @@ func (m *Manager) RemoveTree(projectName, worktreeName string, deleteBranch bool
 	if err := GitWorktreeRemove(project.Path, worktree.Path); err != nil {
 		// Try to remove directory manually
 		_ = os.RemoveAll(worktree.Path)
-	}
-
-	if deleteBranch {
-		// Delete the branch (ignore error - branch may not exist)
-		_ = GitBranchDelete(project.Path, worktree.Branch)
 	}
 
 	if m.store != nil {
@@ -492,6 +488,16 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 		}
 	}
 
+	// The agent's context file names the port and database, and a wake just
+	// changed both. Rewrite it before the slow setup, so an agent woken with
+	// the worktree is told to wait rather than handed the old address. Only
+	// T3-hosted worktrees: tmux and herdr pass the prompt on the command line.
+	if t3.HasMarker(worktree.Path) || mux.Current().Kind() == mux.KindT3 {
+		if err := mux.WriteT3AgentContext(worktree.Path, projectName, worktree.Branch, worktree.Ports, worktree.DatabaseName); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not write the agent context file: %v\n", err)
+		}
+	}
+
 	if m.store != nil {
 		_ = m.store.SetWorktreeStatus(projectName, worktreeName, config.SetupStatusRunning)
 	}
@@ -508,6 +514,12 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 	if m.store != nil {
 		_ = m.store.SetWorktreeStatus(projectName, worktreeName, status)
 		_ = m.store.WakeWorktree(projectName, worktreeName, worktree.Ports, worktree.DatabaseName, worktree.DatabaseURL)
+		// Flush now, not after the save debounce: the dev window below runs
+		// `conductor run`, which reads the ports from conductor.json. Read
+		// before the save lands, a woken worktree has none, so PORT is never
+		// set and the server comes up on the project's defaults (3000/3001)
+		// instead of its own.
+		_ = m.store.ForceSave()
 	} else {
 		worktree.MarkSetup(status)
 		worktree.Hibernated = false

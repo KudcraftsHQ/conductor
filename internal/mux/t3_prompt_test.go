@@ -10,13 +10,13 @@ import (
 // The context file is conductor's only standing channel to an agent T3 is
 // running, so what it does and does not say is behaviour, not documentation.
 func TestT3AgentPromptNamesTheAddress(t *testing.T) {
-	prompt := T3AgentPrompt("kudtrading", "t3code/429ade34", []int{3159, 3160})
+	prompt := T3AgentPrompt("kudtrading", "t3code/429ade34", []int{3159, 3160}, "")
 
 	// The address is written in rather than described. An agent that has to run
 	// a command to find the app will guess 3000 instead.
-	assert.Contains(t, prompt, "The app is at http://localhost:3159")
+	assert.Contains(t, prompt, "App:       http://localhost:3159")
 	assert.Contains(t, prompt, "BASE_URL=http://localhost:3159")
-	assert.NotContains(t, prompt, "3160", "only the first port is the dev server")
+	assert.NotContains(t, prompt, "localhost:3160", "only the first port is the dev server")
 
 	// And a way to re-derive it, because a woken worktree gets new ports.
 	assert.Contains(t, prompt, "conductor t3 dev status")
@@ -24,7 +24,7 @@ func TestT3AgentPromptNamesTheAddress(t *testing.T) {
 
 // A worktree with no ports yet must not be given an invented one.
 func TestT3AgentPromptAdmitsWhenThereIsNoPort(t *testing.T) {
-	prompt := T3AgentPrompt("demo", "feature", nil)
+	prompt := T3AgentPrompt("demo", "feature", nil, "")
 
 	assert.NotContains(t, prompt, "localhost:")
 	assert.Contains(t, prompt, "conductor t3 dev status")
@@ -35,7 +35,7 @@ func TestT3AgentPromptAdmitsWhenThereIsNoPort(t *testing.T) {
 // directly on a machine that allows one browser job at a time, and it reports a
 // green exit code with nothing to look at.
 func TestT3AgentPromptCoversTheOperationalRules(t *testing.T) {
-	prompt := T3AgentPrompt("kudtrading", "t3code/429ade34", []int{3159})
+	prompt := T3AgentPrompt("kudtrading", "t3code/429ade34", []int{3159}, "")
 
 	for _, required := range []string{
 		"conductor wait",            // provisioning
@@ -58,15 +58,24 @@ func TestT3AgentPromptCoversTheOperationalRules(t *testing.T) {
 // The window name is a tmux target an agent may paste; a label is a display
 // string that must not read as one.
 func TestT3AgentPromptLabelHasNoSlashes(t *testing.T) {
-	prompt := T3AgentPrompt("kudtrading", "t3code/429ade34", []int{3159})
+	prompt := T3AgentPrompt("kudtrading", "t3code/429ade34", []int{3159}, "")
 	assert.Contains(t, prompt, "--label kudtrading-t3code-429ade34")
 }
 
 // The file is read in a terminal, so lines that run past a terminal's width are
 // a defect in it.
 func TestT3AgentPromptWrapsToATerminal(t *testing.T) {
-	prompt := T3AgentPrompt("kudtrading", "t3code/429ade34", []int{3159})
+	prompt := T3AgentPrompt("kudtrading", "t3code/429ade34", []int{3159}, "")
 	for _, line := range strings.Split(prompt, "\n") {
 		assert.LessOrEqual(t, len(line), 88, "overlong line: %q", line)
 	}
+}
+
+// The database is named so a fresh agent can find it, but only by name: the
+// URL carries the password, and this file lands in every agent's context.
+func TestT3AgentPromptNamesTheDatabaseNotItsURL(t *testing.T) {
+	prompt := T3AgentPrompt("kudtrading", "feat", []int{3159, 3160}, "dev_tokyo")
+	assert.Contains(t, prompt, "Database:  dev_tokyo")
+	assert.Contains(t, prompt, "Ports:     3159, 3160")
+	assert.NotContains(t, prompt, "postgres://")
 }

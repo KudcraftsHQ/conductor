@@ -122,8 +122,12 @@ func (a Agent) OneShotArgs(prompt string) []string {
 // This is used by OpenCode which reads project markdown files.
 func WriteContextFile(worktreePath, systemPrompt string) error {
 	filePath := filepath.Join(worktreePath, ContextFileName)
-	content := fmt.Sprintf("# Conductor Context\n\n%s\n", systemPrompt)
-	return os.WriteFile(filePath, []byte(content), 0644)
+	return os.WriteFile(filePath, []byte(ContextFileContent(systemPrompt)), 0644)
+}
+
+// ContextFileContent is what WriteContextFile writes for a system prompt.
+func ContextFileContent(systemPrompt string) string {
+	return fmt.Sprintf("# Conductor Context\n\n%s\n", systemPrompt)
 }
 
 // CleanContextFile removes the context file from a worktree (e.g., on archive).

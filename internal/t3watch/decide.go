@@ -64,11 +64,18 @@ type Worktree struct {
 	// Branch is what the dev-server window is keyed by, so it is not
 	// interchangeable with Name: the window is project/branch while the entry
 	// is registered under a city.
-	Branch       string
-	Path         string
-	Hibernated   bool
-	Archived     bool
-	IsRoot       bool
+	Branch     string
+	Path       string
+	Hibernated bool
+	Archived   bool
+	IsRoot     bool
+	// Provisioning is true while another process is provisioning the worktree
+	// (setup status creating or running, and not stalled).
+	Provisioning bool
+	// Missing is true when the worktree's directory is not on disk. T3's
+	// storage cleanup prunes idle worktrees' directories while their threads
+	// stay live, and recreates one when a turn is sent on such a thread.
+	Missing      bool
 	KnownThreads []string
 	// Ports are the worktree's allocated ports. Nothing but its own supervised
 	// server should listen on them, which is how a stray is recognised.
@@ -91,6 +98,12 @@ type Decision struct {
 	Archive int
 	// Dev is what the dev server should be doing, independent of Action.
 	Dev DevWant
+	// LogThread is the one thread that gets the dev log view on a wake, or ""
+	// when no live thread is fit to carry it.
+	LogThread string
+	// Dormant marks a hibernation caused by the directory going missing,
+	// rather than by every thread being archived.
+	Dormant bool
 }
 
 // Clock lets tests drive the debounce without sleeping.
@@ -114,22 +127,36 @@ type Decider struct {
 	// the dev server stops. Settling and unsettling in quick succession should
 	// not cost a rebuild.
 	SettleDebounce time.Duration
+	// TeardownConfirm is how long a worktree must stay threadless before it is
+	// torn down. A teardown is the one irreversible action, so a single
+	// snapshot is never enough evidence: the worktree has to be seen with no
+	// thread at all on at least two passes this far apart, both from consistent
+	// snapshots. A thread moving between T3's active and archived lists shows
+	// up in neither for an instant; it cannot do that twice, seconds apart.
+	TeardownConfirm time.Duration
 	// Now defaults to time.Now.
 	Now Clock
 
 	zeroLiveSince map[string]time.Time
 	settledSince  map[string]time.Time
+	goneSince     map[string]time.Time
 }
+
+// DefaultTeardownConfirm is TeardownConfirm's default: two watcher polls and
+// change.
+const DefaultTeardownConfirm = 12 * time.Second
 
 // NewDecider returns a Decider with the given debounce and teardown cap.
 func NewDecider(debounce time.Duration, maxTeardowns int) *Decider {
 	return &Decider{
-		Debounce:       debounce,
-		MaxTeardowns:   maxTeardowns,
-		SettleDebounce: DefaultSettleDebounce,
-		Now:            time.Now,
-		zeroLiveSince:  make(map[string]time.Time),
-		settledSince:   make(map[string]time.Time),
+		Debounce:        debounce,
+		MaxTeardowns:    maxTeardowns,
+		SettleDebounce:  DefaultSettleDebounce,
+		TeardownConfirm: DefaultTeardownConfirm,
+		Now:             time.Now,
+		zeroLiveSince:   make(map[string]time.Time),
+		settledSince:    make(map[string]time.Time),
+		goneSince:       make(map[string]time.Time),
 	}
 }
 
@@ -151,6 +178,9 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 	}
 	if d.settledSince == nil {
 		d.settledSince = make(map[string]time.Time)
+	}
+	if d.goneSince == nil {
+		d.goneSince = make(map[string]time.Time)
 	}
 	now := d.now()
 	live, archived := indexThreads(snapshot)
@@ -179,12 +209,53 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 			Archive:  len(archivedIDs),
 		}
 
+		if len(liveIDs) > 0 || len(archivedIDs) > 0 {
+			// Any thread at all, live or archived, holds the tree.
+			delete(d.goneSince, key)
+		}
+
+		if worktree.Missing && (len(liveIDs) > 0 || len(archivedIDs) > 0) {
+			// Dormant: threads still hold the worktree but its directory is
+			// gone. It must hold no resources, so it is hibernated at once,
+			// and it is never woken until the directory comes back — T3
+			// recreates it when somebody sends a turn on one of its threads,
+			// and the next pass then wakes it the ordinary way.
+			delete(d.zeroLiveSince, key)
+			delete(d.settledSince, key)
+			if !worktree.Hibernated && !worktree.Provisioning {
+				decision.Action = ActionHibernate
+				decision.Dormant = true
+			}
+			decisions = append(decisions, decision)
+			continue
+		}
+
 		switch {
 		case len(liveIDs) == 0 && len(archivedIDs) == 0:
 			// Every thread that ever held this worktree is gone from T3
-			// altogether, which only happens by deletion.
+			// altogether, which only happens by deletion — but only a
+			// consistent snapshot can say so, and only twice in a row.
 			delete(d.zeroLiveSince, key)
 			delete(d.settledSince, key)
+			if worktree.Provisioning {
+				// A worktree still being set up is never gone: whatever
+				// launched it is holding it, even if T3 has not shown its
+				// thread yet. The clock restarts once setup ends.
+				delete(d.goneSince, key)
+				break
+			}
+			if snapshot == nil || snapshot.Inconsistent {
+				// No evidence either way: neither start nor reset the clock.
+				break
+			}
+			since, seen := d.goneSince[key]
+			if !seen {
+				d.goneSince[key] = now
+				break
+			}
+			if now.Sub(since) < d.TeardownConfirm {
+				break
+			}
 			decision.Action = ActionTeardown
 			teardowns++
 
@@ -193,7 +264,15 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 			if worktree.Hibernated {
 				// Waking provisions the dev server itself.
 				delete(d.settledSince, key)
+				if worktree.Provisioning {
+					// Something else — adopt run by a T3 launch, or a wake
+					// by hand — is already provisioning it. A second
+					// provision would drop and re-clone the database under
+					// the first.
+					break
+				}
 				decision.Action = ActionWake
+				decision.LogThread = pickLogThread(snapshot, key)
 				break
 			}
 			decision.Dev = d.devWant(key, unsettled[key], now)
@@ -328,6 +407,57 @@ func indexThreads(snapshot *t3.ShellSnapshot) (live, archived map[string][]strin
 		live[key] = append(live[key], thread.ID)
 	}
 	return live, archived
+}
+
+// pickLogThread chooses the thread on a worktree that shows the dev log view.
+//
+// Only live threads qualify, and never a provider-run subagent: those live
+// inside their parent's view, and one worktree can carry dozens of them. Among
+// the rest a thread a person started (from the web or mobile client) beats one
+// an agent or the server started, and then the most recently updated wins.
+func pickLogThread(snapshot *t3.ShellSnapshot, key string) string {
+	if snapshot == nil {
+		return ""
+	}
+	var best *t3.Thread
+	var bestAt time.Time
+	for i := range snapshot.Threads {
+		thread := &snapshot.Threads[i]
+		if thread.Archived() || thread.ProviderSubagent || thread.Worktree() == "" {
+			continue
+		}
+		if normalize(thread.Worktree()) != key {
+			continue
+		}
+		at, _ := time.Parse(time.RFC3339Nano, thread.UpdatedAt)
+		if best == nil {
+			best, bestAt = thread, at
+			continue
+		}
+		if userCreated(*thread) != userCreated(*best) {
+			if userCreated(*thread) {
+				best, bestAt = thread, at
+			}
+			continue
+		}
+		if at.After(bestAt) {
+			best, bestAt = thread, at
+		}
+	}
+	if best == nil {
+		return ""
+	}
+	return best.ID
+}
+
+// userCreated reports whether a person started the thread. V1 threads carry no
+// creation source, so they count as a person's.
+func userCreated(thread t3.Thread) bool {
+	switch thread.CreationSource {
+	case "", "web", "mobile":
+		return true
+	}
+	return false
 }
 
 func normalize(path string) string {
