@@ -63,6 +63,7 @@ type v2Thread struct {
 	SettledAt       *string `json:"settledAt"`
 	DeletedAt       *string `json:"deletedAt"`
 	CreationSource  string  `json:"creationSource"`
+	UpdatedAt       string  `json:"updatedAt"`
 	Lineage         *struct {
 		ParentThreadID       *string `json:"parentThreadId"`
 		RelationshipToParent *string `json:"relationshipToParent"`
@@ -164,6 +165,8 @@ func (t v2Thread) toThread() Thread {
 		SettledOverride:  t.SettledOverride,
 		ModelSelection:   t.ModelSelection,
 		ProviderSubagent: t.providerSubagent(),
+		CreationSource:   t.CreationSource,
+		UpdatedAt:        t.UpdatedAt,
 		Session: &ThreadSession{
 			ThreadID:           t.ID,
 			Status:             t.sessionStatus(),

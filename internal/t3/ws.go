@@ -21,12 +21,15 @@ import (
 
 // WS method names. These are the subset conductor drives.
 const (
-	MethodTerminalOpen      = "terminal.open"
-	MethodTerminalWrite     = "terminal.write"
-	MethodTerminalClose     = "terminal.close"
-	MethodTerminalRestart   = "terminal.restart"
-	MethodVcsCreateWorktree = "vcs.createWorktree"
-	MethodVcsRemoveWorktree = "vcs.removeWorktree"
+	MethodTerminalOpen    = "terminal.open"
+	MethodTerminalWrite   = "terminal.write"
+	MethodTerminalClose   = "terminal.close"
+	MethodTerminalRestart = "terminal.restart"
+	// MethodSubscribeTerminalMetadata streams terminal summaries. Its first
+	// value lists every terminal T3 holds; there is no list RPC besides it.
+	MethodSubscribeTerminalMetadata = "subscribeTerminalMetadata"
+	MethodVcsCreateWorktree         = "vcs.createWorktree"
+	MethodVcsRemoveWorktree         = "vcs.removeWorktree"
 	// MethodSubscribeServerConfig is a streaming subscription whose first chunk
 	// carries the server config, including the provider instance registry. That
 	// registry has no HTTP equivalent, so this is the only way for conductor to
@@ -311,7 +314,11 @@ type TerminalSnapshot struct {
 // TerminalOpen spawns a pty owned by threadID. The terminal's lifecycle is the
 // thread's: archiving the thread reaps the process, so conductor does not have
 // to track it separately.
-func (c *Conn) TerminalOpen(ctx context.Context, threadID, terminalID, cwd, worktreePath string) (*TerminalSnapshot, error) {
+//
+// Opening a terminal on a thread whose worktree directory is gone makes current
+// T3 builds recreate the worktree, so callers must check the directory exists
+// first.
+func (c *Conn) TerminalOpen(ctx context.Context, threadID, terminalID, cwd, worktreePath string, opts ...TerminalOpenOptions) (*TerminalSnapshot, error) {
 	payload := map[string]any{
 		"threadId":   threadID,
 		"terminalId": terminalID,
@@ -321,6 +328,11 @@ func (c *Conn) TerminalOpen(ctx context.Context, threadID, terminalID, cwd, work
 	}
 	if worktreePath != "" {
 		payload["worktreePath"] = worktreePath
+	}
+	for _, opt := range opts {
+		if opt.StopOnSettle {
+			payload["stopOnSettle"] = true
+		}
 	}
 	var snapshot TerminalSnapshot
 	if err := c.Call(ctx, MethodTerminalOpen, payload, &snapshot); err != nil {
@@ -339,9 +351,46 @@ func (c *Conn) TerminalWrite(ctx context.Context, threadID, terminalID, data str
 	}, nil)
 }
 
+// TerminalOpenOptions are terminal.open's optional flags.
+type TerminalOpenOptions struct {
+	// StopOnSettle has T3 stop the terminal and its processes when the thread
+	// settles. Servers that predate the flag ignore it.
+	StopOnSettle bool
+}
+
+// TerminalSummary is one entry of T3's terminal metadata stream.
+type TerminalSummary struct {
+	ThreadID             string `json:"threadId"`
+	TerminalID           string `json:"terminalId"`
+	Status               string `json:"status"`
+	PID                  *int   `json:"pid"`
+	HasRunningSubprocess bool   `json:"hasRunningSubprocess"`
+}
+
+// Running reports whether the terminal's shell is up and busy with a command.
+func (t TerminalSummary) Running() bool {
+	return (t.Status == "running" || t.Status == "starting") && t.HasRunningSubprocess
+}
+
+// TerminalList returns every terminal T3 holds, from the first value of the
+// terminal metadata stream.
+func (c *Conn) TerminalList(ctx context.Context) ([]TerminalSummary, error) {
+	var event struct {
+		Type      string            `json:"type"`
+		Terminals []TerminalSummary `json:"terminals"`
+	}
+	if err := c.CallStream(ctx, MethodSubscribeTerminalMetadata, map[string]any{}, &event); err != nil {
+		return nil, err
+	}
+	if event.Type != "snapshot" {
+		return nil, fmt.Errorf("T3 %s began with %q, not a snapshot", MethodSubscribeTerminalMetadata, event.Type)
+	}
+	return event.Terminals, nil
+}
+
 // TerminalRunCommand opens a terminal and submits a command line to it.
-func (c *Conn) TerminalRunCommand(ctx context.Context, threadID, terminalID, cwd, worktreePath, command string) (*TerminalSnapshot, error) {
-	snapshot, err := c.TerminalOpen(ctx, threadID, terminalID, cwd, worktreePath)
+func (c *Conn) TerminalRunCommand(ctx context.Context, threadID, terminalID, cwd, worktreePath, command string, opts ...TerminalOpenOptions) (*TerminalSnapshot, error) {
+	snapshot, err := c.TerminalOpen(ctx, threadID, terminalID, cwd, worktreePath, opts...)
 	if err != nil {
 		return nil, err
 	}
