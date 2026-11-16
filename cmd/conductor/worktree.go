@@ -227,7 +227,7 @@ var worktreeOpenCmd = &cobra.Command{
 var worktreeArchiveCmd = &cobra.Command{
 	Use:   "archive <name>",
 	Short: "Archive a worktree",
-	Long:  "Remove a worktree and free its allocated ports",
+	Long:  "Remove a worktree and free its allocated ports. Its local branch is kept.",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s, err := store.Load()

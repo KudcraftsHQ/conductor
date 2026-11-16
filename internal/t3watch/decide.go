@@ -72,6 +72,10 @@ type Worktree struct {
 	// Provisioning is true while another process is provisioning the worktree
 	// (setup status creating or running, and not stalled).
 	Provisioning bool
+	// Missing is true when the worktree's directory is not on disk. T3's
+	// storage cleanup prunes idle worktrees' directories while their threads
+	// stay live, and recreates one when a turn is sent on such a thread.
+	Missing      bool
 	KnownThreads []string
 	// Ports are the worktree's allocated ports. Nothing but its own supervised
 	// server should listen on them, which is how a stray is recognised.
@@ -97,6 +101,9 @@ type Decision struct {
 	// LogThread is the one thread that gets the dev log view on a wake, or ""
 	// when no live thread is fit to carry it.
 	LogThread string
+	// Dormant marks a hibernation caused by the directory going missing,
+	// rather than by every thread being archived.
+	Dormant bool
 }
 
 // Clock lets tests drive the debounce without sleeping.
@@ -205,6 +212,22 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 		if len(liveIDs) > 0 || len(archivedIDs) > 0 {
 			// Any thread at all, live or archived, holds the tree.
 			delete(d.goneSince, key)
+		}
+
+		if worktree.Missing && (len(liveIDs) > 0 || len(archivedIDs) > 0) {
+			// Dormant: threads still hold the worktree but its directory is
+			// gone. It must hold no resources, so it is hibernated at once,
+			// and it is never woken until the directory comes back — T3
+			// recreates it when somebody sends a turn on one of its threads,
+			// and the next pass then wakes it the ordinary way.
+			delete(d.zeroLiveSince, key)
+			delete(d.settledSince, key)
+			if !worktree.Hibernated && !worktree.Provisioning {
+				decision.Action = ActionHibernate
+				decision.Dormant = true
+			}
+			decisions = append(decisions, decision)
+			continue
 		}
 
 		switch {

@@ -229,17 +229,6 @@ func SuggestNewBranchName(repoPath, originalBranch string) string {
 	return fmt.Sprintf("%s-%d", originalBranch, time.Now().Unix())
 }
 
-// GitBranchDelete deletes a git branch
-func GitBranchDelete(repoPath, branch string) error {
-	cmd := exec.Command("git", "branch", "-D", branch)
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git branch delete failed: %s", string(out))
-	}
-	return nil
-}
-
 // GitBranchExists checks if a branch exists
 func GitBranchExists(repoPath, branch string) bool {
 	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)

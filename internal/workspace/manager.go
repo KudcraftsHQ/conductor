@@ -326,15 +326,16 @@ func (m *Manager) RunSetupAsync(projectName, worktreeName string, onComplete fun
 
 // ArchiveWorktree releases a worktree's resources and removes its tree.
 //
-// This is the destructive end of the lifecycle and it deletes the branch, which
-// is why the T3-driven paths call ReleaseResources and RemoveTree separately
-// instead: there, a thread being deleted must not be able to destroy commits.
-// The worktree entry remains in config so logs can still be viewed.
+// The local branch is kept. Archiving used to delete it with `git branch -D`,
+// which lost any commit that had not been pushed; a tree can be recreated from
+// a branch, but nothing recreates a branch. Deleting a branch is only ever an
+// explicit act (the TUI's orphaned-branch delete). The worktree entry remains
+// in config so logs can still be viewed.
 func (m *Manager) ArchiveWorktree(projectName, worktreeName string) error {
 	if err := m.ReleaseResources(projectName, worktreeName); err != nil {
 		return err
 	}
-	return m.RemoveTree(projectName, worktreeName, true)
+	return m.RemoveTree(projectName, worktreeName)
 }
 
 // ReleaseResources frees everything a worktree consumes — its archive script
@@ -410,11 +411,10 @@ func (m *Manager) ReleaseResources(projectName, worktreeName string) error {
 // RemoveTree removes the working tree from disk and marks the entry archived,
 // so it survives as a tombstone whose logs can still be read.
 //
-// deleteBranch must be false on anything driven by T3 Code. Deleting a thread
-// there is a routine act, and T3's own worktree removal leaves the branch
-// alone; matching that means a stray deletion costs a tree that can be
-// recreated rather than commits that cannot.
-func (m *Manager) RemoveTree(projectName, worktreeName string, deleteBranch bool) error {
+// It never deletes the branch. T3's own worktree removal leaves the branch
+// alone too, so a stray removal costs a tree that can be recreated rather than
+// commits that cannot.
+func (m *Manager) RemoveTree(projectName, worktreeName string) error {
 	project, ok := m.config.GetProject(projectName)
 	if !ok {
 		return fmt.Errorf("project '%s' not found", projectName)
@@ -435,11 +435,6 @@ func (m *Manager) RemoveTree(projectName, worktreeName string, deleteBranch bool
 	if err := GitWorktreeRemove(project.Path, worktree.Path); err != nil {
 		// Try to remove directory manually
 		_ = os.RemoveAll(worktree.Path)
-	}
-
-	if deleteBranch {
-		// Delete the branch (ignore error - branch may not exist)
-		_ = GitBranchDelete(project.Path, worktree.Branch)
 	}
 
 	if m.store != nil {

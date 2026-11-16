@@ -95,24 +95,11 @@ func TestRemoveTreeKeepsBranchWhenAsked(t *testing.T) {
 	cfg, name := lifecycleConfig(repoPath, worktreePath, branch)
 
 	manager := NewManager(cfg)
-	require.NoError(t, manager.RemoveTree("proj", name, false))
+	require.NoError(t, manager.RemoveTree("proj", name))
 
 	assert.NoDirExists(t, worktreePath)
 	assert.True(t, GitBranchExists(repoPath, branch), "the branch must outlive the worktree")
 	assert.True(t, cfg.Projects["proj"].Worktrees[name].Archived)
-}
-
-// The conductor-initiated archive is the destructive one and still deletes the
-// branch, so existing behaviour is unchanged for anyone not using T3.
-func TestArchiveWorktreeStillDeletesBranch(t *testing.T) {
-	repoPath, worktreePath, branch := gitRepoWithWorktree(t)
-	cfg, name := lifecycleConfig(repoPath, worktreePath, branch)
-
-	manager := NewManager(cfg)
-	require.NoError(t, manager.ArchiveWorktree("proj", name))
-
-	assert.NoDirExists(t, worktreePath)
-	assert.False(t, GitBranchExists(repoPath, branch))
 }
 
 // Removing a tree that is already gone is success: T3 deletes its own worktree
@@ -124,7 +111,7 @@ func TestRemoveTreeToleratesAMissingDirectory(t *testing.T) {
 	require.NoError(t, os.RemoveAll(worktreePath))
 
 	manager := NewManager(cfg)
-	assert.NoError(t, manager.RemoveTree("proj", name, false))
+	assert.NoError(t, manager.RemoveTree("proj", name))
 	assert.True(t, cfg.Projects["proj"].Worktrees[name].Archived)
 }
 
