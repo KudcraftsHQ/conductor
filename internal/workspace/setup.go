@@ -607,14 +607,12 @@ func cloneWorktreeDBRemote(ctx context.Context, cfg *config.DatabaseConfig, proj
 		return "", "", fmt.Errorf("remote mode requires cloneUrl and devUrl to be configured")
 	}
 
-	dbName := database.GenerateRemoteDBName(projectName, worktreeName)
+	// The URL is the external one: what the worktree's app connects to.
+	dbName, dbURL := database.RemoteWorktreeDB(cfg, projectName, worktreeName)
 
 	err := database.RemoteCloneForWorktree(ctx, cfg.SSHHost, cfg.CloneURL, cfg.DevURL, dbName, cfg.ExcludeTables, progress)
 	if err != nil {
 		return "", "", err
 	}
-
-	// Use external URL for worktree .env (what the app connects to)
-	dbURL := database.BuildRemoteWorktreeURL(cfg.DevURLExternal, cfg.DevURL, dbName)
 	return dbName, dbURL, nil
 }

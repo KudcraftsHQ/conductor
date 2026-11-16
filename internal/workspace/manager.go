@@ -189,7 +189,7 @@ func (m *Manager) RegisterWorktree(projectName, name, branch, worktreePath strin
 	// Create worktree entry with "creating" status
 	worktree := config.NewWorktree(worktreePath, branch, false, ports)
 	worktree.MarkSetup(config.SetupStatusCreating)
-	m.assignDatabase(projectName, project, worktree)
+	m.assignDatabase(projectName, name, project, worktree)
 
 	// Add worktree (use store if available for persistence)
 	if m.store != nil {
@@ -213,14 +213,26 @@ func (m *Manager) allocatePorts(projectName, name string, portCount int) ([]int,
 	return m.config.AllocatePorts(projectName, name, portCount)
 }
 
-// assignDatabase names the worktree's local database from its first port.
+// assignDatabase records the database a worktree will use.
 //
-// Remote databases are named later, by the clone in runSetupSync, because their
-// name comes from the worktree name rather than a port. That is also why a
-// woken worktree keeps its remote database name but gets a new local one: the
-// ports it is named after have changed.
-func (m *Manager) assignDatabase(projectName string, project *config.Project, worktree *config.Worktree) {
-	if project.Database == nil || m.config.Defaults.LocalPostgresURL == "" || len(worktree.Ports) == 0 {
+// In remote mode that is its dev_<city> database on the remote host, named
+// after the worktree. It is recorded now, before the clone runs, so the
+// worktree points at the remote host even when the clone fails; the clone in
+// runSetupSync fills it. A local name here would be handed to the setup script
+// as CONDUCTOR_DB_URL while the clone went to the remote host, leaving the
+// worktree on an empty local database.
+//
+// In local mode the name comes from the first port, which is why a woken
+// worktree gets a new local name: the ports it is named after have changed.
+func (m *Manager) assignDatabase(projectName, worktreeName string, project *config.Project, worktree *config.Worktree) {
+	if project.Database == nil {
+		return
+	}
+	if project.Database.Mode == config.DatabaseModeRemote {
+		worktree.DatabaseName, worktree.DatabaseURL = database.RemoteWorktreeDB(project.Database, projectName, worktreeName)
+		return
+	}
+	if m.config.Defaults.LocalPostgresURL == "" || len(worktree.Ports) == 0 {
 		return
 	}
 	pattern := project.Database.DBNamePattern
@@ -365,21 +377,9 @@ func (m *Manager) ReleaseResources(projectName, worktreeName string) error {
 	// We ignore the error - archiving proceeds regardless
 	_ = GetSetupManager().RunArchiveScript(project, projectName, worktreeName, worktree)
 
-	// Drop database if one was created for this worktree
-	if worktree.DatabaseName != "" {
-		// Check if this is a remote database (dev_* prefix indicates remote mode)
-		if strings.HasPrefix(worktree.DatabaseName, "dev_") && project.Database != nil && project.Database.SSHHost != "" {
-			// Drop remote database via SSH
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_ = database.RemoteDropDatabase(ctx, project.Database.SSHHost, project.Database.DevURL, worktree.DatabaseName)
-			cancel()
-		} else if m.config.Defaults.LocalPostgresURL != "" {
-			// Drop local database
-			_ = dropWorktreeDB(m.config.Defaults.LocalPostgresURL, worktree.DatabaseName)
-		}
-	}
-
-	// Stop tunnel if active
+	// Stop what is connected to the database before dropping it. The dev
+	// server was killed after the drop, so its connection pool reconnected
+	// between the terminate and the DROP and the drop failed, silently.
 	if worktree.Tunnel != nil && worktree.Tunnel.Active {
 		_ = tunnel.KillProcess(worktree.Tunnel.PID)
 		_ = tunnel.DeletePIDFile(projectName, worktreeName)
@@ -389,9 +389,9 @@ func (m *Manager) ReleaseResources(projectName, worktreeName string) error {
 			worktree.Tunnel = nil
 		}
 	}
-
-	// Kill tmux window if it exists
 	_ = mux.Current().KillWindow(projectName, worktree.Branch)
+
+	m.dropDatabases(projectName, worktreeName, project, worktree)
 
 	// Free the ports. The entry stays, marked hibernated, so the tree on disk
 	// is still recognised as this worktree when it is woken.
@@ -406,6 +406,79 @@ func (m *Manager) ReleaseResources(projectName, worktreeName string) error {
 	}
 
 	return nil
+}
+
+// dropDatabases drops every database this worktree owns.
+//
+// In remote mode that is its dev_<city> database on the remote host, whatever
+// name the entry recorded. A worktree registered while its clone failed
+// carried a local {project}-{port} name, and dropping only the recorded name
+// left its remote database behind for good once the entry was archived. A
+// recorded local name is dropped as well, since that database may exist too.
+// Failures are reported rather than swallowed: a database that silently
+// survives is disk on a shared server nobody will ever reclaim.
+func (m *Manager) dropDatabases(projectName, worktreeName string, project *config.Project, worktree *config.Worktree) {
+	remote := project.Database != nil && project.Database.Mode == config.DatabaseModeRemote && project.Database.SSHHost != ""
+	remoteName := ""
+	if remote {
+		remoteName = database.GenerateRemoteDBName(projectName, worktreeName)
+	}
+	if remoteName != "" && m.databaseUsedElsewhere(projectName, worktreeName, remoteName) {
+		// The remote server is shared by every project; a name another entry
+		// records is that entry's database, not this one's.
+		fmt.Fprintf(os.Stderr, "warning: not dropping %s for %s/%s: another worktree records it\n", remoteName, projectName, worktreeName)
+		remoteName = ""
+	}
+	if remoteName != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		err := database.RemoteDropDatabase(ctx, project.Database.SSHHost, project.Database.DevURL, remoteName)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not drop remote database %s for %s/%s: %v\n", remoteName, projectName, worktreeName, err)
+		}
+	}
+
+	name := worktree.DatabaseName
+	if name == "" || name == remoteName {
+		return
+	}
+	if strings.HasPrefix(name, "dev_") && remote {
+		if m.databaseUsedElsewhere(projectName, worktreeName, name) {
+			return
+		}
+		// A remote name other than its own (an older naming); drop it there.
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		err := database.RemoteDropDatabase(ctx, project.Database.SSHHost, project.Database.DevURL, name)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not drop remote database %s for %s/%s: %v\n", name, projectName, worktreeName, err)
+		}
+		return
+	}
+	if m.config.Defaults.LocalPostgresURL != "" && !strings.HasPrefix(name, "dev_") {
+		if err := dropWorktreeDB(m.config.Defaults.LocalPostgresURL, name); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not drop local database %s for %s/%s: %v\n", name, projectName, worktreeName, err)
+		}
+	}
+}
+
+// databaseUsedElsewhere reports whether any other worktree entry, in any
+// project, records dbName as its database.
+func (m *Manager) databaseUsedElsewhere(projectName, worktreeName, dbName string) bool {
+	for pn, project := range m.config.Projects {
+		if project == nil {
+			continue
+		}
+		for wn, wt := range project.Worktrees {
+			if wt == nil || (pn == projectName && wn == worktreeName) {
+				continue
+			}
+			if wt.DatabaseName == dbName && !wt.Archived {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // RemoveTree removes the working tree from disk and marks the entry archived,
@@ -476,6 +549,11 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 	// A woken worktree has no ports: they were returned when it hibernated, and
 	// it gets new ones now. The local database is named after the first port,
 	// so it is renamed to match; a remote dev_<city> database keeps its name.
+	// A remote-mode worktree that somehow carries another name (recorded while
+	// a clone failed, or under an older conductor) is put back on its own.
+	if project.Database != nil && project.Database.Mode == config.DatabaseModeRemote {
+		m.assignDatabase(projectName, worktreeName, project, worktree)
+	}
 	if len(worktree.Ports) == 0 {
 		portCount := project.DefaultPortsPerWorktree
 		ports, err := m.allocatePorts(projectName, worktreeName, portCount)
@@ -484,7 +562,7 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 		}
 		worktree.Ports = ports
 		if !strings.HasPrefix(worktree.DatabaseName, "dev_") {
-			m.assignDatabase(projectName, project, worktree)
+			m.assignDatabase(projectName, worktreeName, project, worktree)
 		}
 	}
 

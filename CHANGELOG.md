@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Remote-mode worktrees left on an empty local database**: a worktree was registered with a local `{project}-{port}` name and URL, and only switched to its remote `dev_<city>` database if the remote clone succeeded. When the clone failed (e.g. `database "dev_<city>" already exists`), the setup script got the local URL while the clone had gone to the remote host, so the app saw an empty local database.
+  - Remote-mode worktrees now record their `dev_<city>` name and remote URL at registration, so they point at the remote host even when a clone fails; provision and wake also move a worktree carrying another name back onto its own remote database
+  - The remote clone drops any database already under the target name (`WITH (FORCE)`) before creating it, so a half-finished earlier clone no longer blocks every retry; it refuses to clone into the source database's name
+  - `conductor database reinstantiate` (CLI and TUI) clones into the worktree's own remote database and records it, instead of cloning whatever name the worktree carried onto the remote host
+- **Archiving left remote dev databases behind**: releasing a worktree dropped only the database name it recorded, so a remote-mode worktree carrying a local `{project}-{port}` name kept its real `dev_<city>` database on the shared server forever (24 such orphans, ~17 GB). The dev server was also killed *after* the drop, so its connection pool reconnected between terminate and `DROP` and the drop failed silently.
+  - Release now stops the tunnel and dev window first, then drops the worktree's own `dev_<city>` database (and a recorded local name too), never a name another live worktree records
+  - Remote drops use `DROP DATABASE … WITH (FORCE)`, and failures are printed instead of swallowed
+- **CI and auto-release were failing on every push**: two updater checks assumed Linux refuses writes to a running binary (ETXTBSY), which newer kernels on GitHub's runners no longer do. They now skip there, so releases are cut again (none since v1.8.23.0)
 - **T3 agents now load the worktree's context file**: conductor wrote `.conductor-context.md` into every T3-hosted worktree, but no agent looked for it. Adopt, provision and wake now also write auto-load shims beside it, without touching tracked files or hiding the repository's own `AGENTS.md`:
   - `CLAUDE.local.md` (Claude Code) imports it with `@.conductor-context.md`; an existing `CLAUDE.local.md` keeps its content and gets a marked block appended
   - `AGENTS.local.md` (dsh) and `.pi/APPEND_SYSTEM.md` (pi) carry it inline, since neither resolves imports; the pi file is skipped when a global `~/.pi/agent/APPEND_SYSTEM.md` exists, which it would replace
