@@ -63,6 +63,11 @@ type Thread struct {
 	// parent's worktree but takes no messages: T3 refuses a turn on it with
 	// "This subagent is run by its provider and cannot take messages".
 	ProviderSubagent bool `json:"-"`
+	// CreationSource is V2's creationSource: web | mobile | mcp | provider |
+	// server. V1 has no equivalent and leaves it empty.
+	CreationSource string `json:"-"`
+	// UpdatedAt is when T3 last changed the thread, as an ISO timestamp.
+	UpdatedAt string `json:"updatedAt"`
 }
 
 // Addressable reports whether conductor may send this thread a turn.

@@ -65,6 +65,9 @@ type Watcher struct {
 	// lastRefused is the suppressed teardown count last reported, so the
 	// refusal is logged when it changes rather than on every tick.
 	lastRefused int
+	// wakeFailed is the last reason each worktree could not be woken, so a
+	// wake that keeps failing the same way is logged once, not every tick.
+	wakeFailed map[string]string
 
 	// shell is the V2 shell subscription, when there is one. It only shortens
 	// the time to react; polling continues underneath it regardless.
@@ -419,14 +422,23 @@ func (w *Watcher) apply(cfg *config.Config, decision Decision) {
 		}
 
 	case ActionWake:
+		if !isDir(worktree.Path) {
+			// The tree was deleted from disk while threads still point at it.
+			// Provisioning would fail, and touching T3's terminals for it would
+			// make T3 recreate the worktree. Say so once and leave it.
+			w.wakeFailure(worktree.Key(), fmt.Sprintf("worktree directory %s is missing", worktree.Path))
+			return
+		}
 		w.logf("waking %s (%d live thread(s))", worktree.Key(), decision.Live)
 		if w.DryRun {
 			return
 		}
 		if err := manager.Provision(worktree.Project, worktree.Name); err != nil {
-			w.logf("could not wake %s: %v", worktree.Key(), err)
+			w.wakeFailure(worktree.Key(), err.Error())
+			return
 		}
-		OpenLogTerminals(w.client, worktree.Project, worktree.Branch, worktree.Path, decision.Threads)
+		delete(w.wakeFailed, worktree.Key())
+		OpenLogTerminal(w.client, worktree.Project, worktree.Branch, worktree.Path, decision.LogThread)
 
 	case ActionTeardown:
 		w.logf("tearing down %s — every thread bound to it was deleted", worktree.Key())
@@ -446,6 +458,18 @@ func (w *Watcher) apply(cfg *config.Config, decision Decision) {
 		}
 		t3.RemoveMarker(worktree.Path)
 	}
+}
+
+// wakeFailure logs why a worktree could not be woken, once per distinct reason.
+func (w *Watcher) wakeFailure(key, reason string) {
+	if w.wakeFailed == nil {
+		w.wakeFailed = make(map[string]string)
+	}
+	if w.wakeFailed[key] == reason {
+		return
+	}
+	w.wakeFailed[key] = reason
+	w.logf("could not wake %s: %s", key, reason)
 }
 
 // rebind stores the current thread set for a worktree, in conductor's state and
