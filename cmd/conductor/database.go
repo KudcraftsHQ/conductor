@@ -483,7 +483,7 @@ var databaseReinstantiateCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to get current directory: %w", err)
 		}
-		_, project, _, err := cfg.DetectProject(cwd)
+		projectName, project, _, err := cfg.DetectProject(cwd)
 		if err != nil {
 			return fmt.Errorf("not in a registered project")
 		}
@@ -526,12 +526,16 @@ var databaseReinstantiateCmd = &cobra.Command{
 			}
 		}
 
-		if worktree.DatabaseName == "" {
-			return fmt.Errorf("worktree '%s' does not have a database configured", worktreeName)
-		}
-
+		// Re-clone into the worktree's own remote database, whatever name it
+		// recorded: a worktree registered while its clone failed can carry a
+		// local {project}-{port} name, and cloning that name on the remote
+		// host fills a database the worktree never connects to.
 		dbConfig := project.Database
-		dbName := worktree.DatabaseName
+		dbName, dbURL := database.RemoteWorktreeDB(dbConfig, projectName, worktreeName)
+		if worktree.DatabaseName != dbName || worktree.DatabaseURL != dbURL {
+			fmt.Printf("Worktree '%s' recorded database %q; moving it to its remote database %s\n",
+				worktreeName, worktree.DatabaseName, dbName)
+		}
 
 		fmt.Printf("Reinstantiating database for worktree '%s'...\n", worktreeName)
 		fmt.Printf("  Database: %s\n", dbName)
@@ -555,6 +559,13 @@ var databaseReinstantiateCmd = &cobra.Command{
 			})
 		if err != nil {
 			return fmt.Errorf("failed to clone database: %w", err)
+		}
+
+		if worktree.DatabaseName != dbName || worktree.DatabaseURL != dbURL {
+			if err := s.SetWorktreeDatabase(projectName, worktreeName, dbName, dbURL); err != nil {
+				return fmt.Errorf("cloned %s but could not record it on the worktree: %w", dbName, err)
+			}
+			fmt.Println("  Recorded on the worktree. Re-run its setup (conductor adopt --reprovision) so .env picks it up.")
 		}
 
 		fmt.Printf("\n✓ Database reinstantiated: %s\n", dbName)

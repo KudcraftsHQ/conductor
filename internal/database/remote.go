@@ -32,11 +32,26 @@ func RemoteCloneForWorktree(ctx context.Context, sshHost, cloneURL, devURL, targ
 	// Build admin URL for creating the database
 	adminURL := buildAdminURL(devParsed)
 
+	// The target is dropped before it is created, so it must never be the
+	// source the clone reads from.
+	if src, err := url.Parse(cloneURL); err == nil && strings.TrimPrefix(src.Path, "/") == targetDB {
+		return fmt.Errorf("refusing to clone into %s: it is the source database", targetDB)
+	}
+
 	if progress != nil {
 		progress("Creating database " + targetDB + " via SSH")
 	}
 
-	// Step 1: Create the empty database via SSH
+	// Step 1: Replace any database left under this name. A dev database is a
+	// copy, and an earlier clone that died halfway leaves an empty one behind;
+	// a plain CREATE then fails with "already exists" on every retry and the
+	// worktree never gets its data. FORCE ends sessions still connected to it.
+	dropSQL := fmt.Sprintf(`DROP DATABASE IF EXISTS %q WITH (FORCE)`, targetDB)
+	if err := execSSHSQL(ctx, sshHost, adminURL, dropSQL); err != nil {
+		return fmt.Errorf("failed to drop existing database: %w", err)
+	}
+
+	// Step 2: Create the empty database via SSH
 	createSQL := fmt.Sprintf(`CREATE DATABASE %q`, targetDB)
 	if err := execSSHSQL(ctx, sshHost, adminURL, createSQL); err != nil {
 		return fmt.Errorf("failed to create database: %w", err)
@@ -46,7 +61,7 @@ func RemoteCloneForWorktree(ctx context.Context, sshHost, cloneURL, devURL, targ
 		progress("Cloning data via pg_dump | psql (server-side)")
 	}
 
-	// Step 2: Clone data via SSH using pg_dump | psql
+	// Step 3: Clone data via SSH using pg_dump | psql
 	if err := cloneViaSSH(ctx, sshHost, cloneURL, targetURL, excludeTables); err != nil {
 		// Cleanup on failure
 		dropSQL := fmt.Sprintf(`DROP DATABASE IF EXISTS %q`, targetDB)
@@ -405,6 +420,16 @@ func sanitizeDBNamePart(name string) string {
 	}, name)
 
 	return strings.ToLower(safe)
+}
+
+// RemoteWorktreeDB returns the dev database a worktree owns on the remote
+// host: its name, and the URL the worktree's app connects with. Both are fixed
+// by the worktree's name, so they can be recorded before the clone runs. A
+// failed clone then leaves the worktree pointing at its own (empty) remote
+// database, which a retry fills, rather than at a local name nobody clones.
+func RemoteWorktreeDB(cfg *DatabaseConfig, projectName, worktreeName string) (string, string) {
+	name := GenerateRemoteDBName(projectName, worktreeName)
+	return name, BuildRemoteWorktreeURL(cfg.DevURLExternal, cfg.DevURL, name)
 }
 
 // BuildRemoteWorktreeURL builds the full connection URL for a remote worktree database

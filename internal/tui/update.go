@@ -1220,8 +1220,7 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		project := m.config.Projects[m.selectedProject]
 		worktree := project.Worktrees[worktreeName]
 
-		if worktree == nil || worktree.DatabaseName == "" {
-			m.setStatus("No database configured for this worktree", true)
+		if worktree == nil {
 			return m, nil
 		}
 
@@ -1239,7 +1238,9 @@ func (m *Model) handleWorktreesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Store reinstantiate target and show confirmation dialog
 		m.dbReinstantiateProject = m.selectedProject
 		m.dbReinstantiateWorktree = worktreeName
-		m.dbReinstantiateDBName = worktree.DatabaseName
+		// The worktree's own remote database, not whatever name it recorded:
+		// see the reinstantiate command.
+		m.dbReinstantiateDBName, _ = database.RemoteWorktreeDB(project.Database, m.selectedProject, worktreeName)
 		m.prevView = m.currentView
 		m.currentView = ViewConfirmDbReinstantiate
 		return m, nil
@@ -1436,6 +1437,14 @@ func (m *Model) executeDbReinstantiate() (tea.Model, tea.Cmd) {
 		err = database.RemoteCloneForWorktree(ctx, dbConfig.SSHHost, dbConfig.CloneURL,
 			dbConfig.DevURL, dbName, dbConfig.ExcludeTables, nil)
 		if err != nil {
+			return DatabaseReinstantiateCompletedMsg{
+				ProjectName: projectName, WorktreeName: worktreeName, Err: err,
+			}
+		}
+
+		// Record it, in case the worktree carried another name.
+		_, dbURL := database.RemoteWorktreeDB(dbConfig, projectName, worktreeName)
+		if err := m.store.SetWorktreeDatabase(projectName, worktreeName, dbName, dbURL); err != nil {
 			return DatabaseReinstantiateCompletedMsg{
 				ProjectName: projectName, WorktreeName: worktreeName, Err: err,
 			}

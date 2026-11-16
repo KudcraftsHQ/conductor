@@ -189,7 +189,7 @@ func (m *Manager) RegisterWorktree(projectName, name, branch, worktreePath strin
 	// Create worktree entry with "creating" status
 	worktree := config.NewWorktree(worktreePath, branch, false, ports)
 	worktree.MarkSetup(config.SetupStatusCreating)
-	m.assignDatabase(projectName, project, worktree)
+	m.assignDatabase(projectName, name, project, worktree)
 
 	// Add worktree (use store if available for persistence)
 	if m.store != nil {
@@ -213,14 +213,26 @@ func (m *Manager) allocatePorts(projectName, name string, portCount int) ([]int,
 	return m.config.AllocatePorts(projectName, name, portCount)
 }
 
-// assignDatabase names the worktree's local database from its first port.
+// assignDatabase records the database a worktree will use.
 //
-// Remote databases are named later, by the clone in runSetupSync, because their
-// name comes from the worktree name rather than a port. That is also why a
-// woken worktree keeps its remote database name but gets a new local one: the
-// ports it is named after have changed.
-func (m *Manager) assignDatabase(projectName string, project *config.Project, worktree *config.Worktree) {
-	if project.Database == nil || m.config.Defaults.LocalPostgresURL == "" || len(worktree.Ports) == 0 {
+// In remote mode that is its dev_<city> database on the remote host, named
+// after the worktree. It is recorded now, before the clone runs, so the
+// worktree points at the remote host even when the clone fails; the clone in
+// runSetupSync fills it. A local name here would be handed to the setup script
+// as CONDUCTOR_DB_URL while the clone went to the remote host, leaving the
+// worktree on an empty local database.
+//
+// In local mode the name comes from the first port, which is why a woken
+// worktree gets a new local name: the ports it is named after have changed.
+func (m *Manager) assignDatabase(projectName, worktreeName string, project *config.Project, worktree *config.Worktree) {
+	if project.Database == nil {
+		return
+	}
+	if project.Database.Mode == config.DatabaseModeRemote {
+		worktree.DatabaseName, worktree.DatabaseURL = database.RemoteWorktreeDB(project.Database, projectName, worktreeName)
+		return
+	}
+	if m.config.Defaults.LocalPostgresURL == "" || len(worktree.Ports) == 0 {
 		return
 	}
 	pattern := project.Database.DBNamePattern
@@ -476,6 +488,11 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 	// A woken worktree has no ports: they were returned when it hibernated, and
 	// it gets new ones now. The local database is named after the first port,
 	// so it is renamed to match; a remote dev_<city> database keeps its name.
+	// A remote-mode worktree that somehow carries another name (recorded while
+	// a clone failed, or under an older conductor) is put back on its own.
+	if project.Database != nil && project.Database.Mode == config.DatabaseModeRemote {
+		m.assignDatabase(projectName, worktreeName, project, worktree)
+	}
 	if len(worktree.Ports) == 0 {
 		portCount := project.DefaultPortsPerWorktree
 		ports, err := m.allocatePorts(projectName, worktreeName, portCount)
@@ -484,7 +501,7 @@ func (m *Manager) Provision(projectName, worktreeName string) error {
 		}
 		worktree.Ports = ports
 		if !strings.HasPrefix(worktree.DatabaseName, "dev_") {
-			m.assignDatabase(projectName, project, worktree)
+			m.assignDatabase(projectName, worktreeName, project, worktree)
 		}
 	}
 

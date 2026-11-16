@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Remote-mode worktrees left on an empty local database**: a worktree was registered with a local `{project}-{port}` name and URL, and only switched to its remote `dev_<city>` database if the remote clone succeeded. When the clone failed (e.g. `database "dev_<city>" already exists`), the setup script got the local URL while the clone had gone to the remote host, so the app saw an empty local database.
+  - Remote-mode worktrees now record their `dev_<city>` name and remote URL at registration, so they point at the remote host even when a clone fails; provision and wake also move a worktree carrying another name back onto its own remote database
+  - The remote clone drops any database already under the target name (`WITH (FORCE)`) before creating it, so a half-finished earlier clone no longer blocks every retry; it refuses to clone into the source database's name
+  - `conductor database reinstantiate` (CLI and TUI) clones into the worktree's own remote database and records it, instead of cloning whatever name the worktree carried onto the remote host
 - **T3 agents now load the worktree's context file**: conductor wrote `.conductor-context.md` into every T3-hosted worktree, but no agent looked for it. Adopt, provision and wake now also write auto-load shims beside it, without touching tracked files or hiding the repository's own `AGENTS.md`:
   - `CLAUDE.local.md` (Claude Code) imports it with `@.conductor-context.md`; an existing `CLAUDE.local.md` keeps its content and gets a marked block appended
   - `AGENTS.local.md` (dsh) and `.pi/APPEND_SYSTEM.md` (pi) carry it inline, since neither resolves imports; the pi file is skipped when a global `~/.pi/agent/APPEND_SYSTEM.md` exists, which it would replace
