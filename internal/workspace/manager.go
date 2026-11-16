@@ -377,21 +377,9 @@ func (m *Manager) ReleaseResources(projectName, worktreeName string) error {
 	// We ignore the error - archiving proceeds regardless
 	_ = GetSetupManager().RunArchiveScript(project, projectName, worktreeName, worktree)
 
-	// Drop database if one was created for this worktree
-	if worktree.DatabaseName != "" {
-		// Check if this is a remote database (dev_* prefix indicates remote mode)
-		if strings.HasPrefix(worktree.DatabaseName, "dev_") && project.Database != nil && project.Database.SSHHost != "" {
-			// Drop remote database via SSH
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_ = database.RemoteDropDatabase(ctx, project.Database.SSHHost, project.Database.DevURL, worktree.DatabaseName)
-			cancel()
-		} else if m.config.Defaults.LocalPostgresURL != "" {
-			// Drop local database
-			_ = dropWorktreeDB(m.config.Defaults.LocalPostgresURL, worktree.DatabaseName)
-		}
-	}
-
-	// Stop tunnel if active
+	// Stop what is connected to the database before dropping it. The dev
+	// server was killed after the drop, so its connection pool reconnected
+	// between the terminate and the DROP and the drop failed, silently.
 	if worktree.Tunnel != nil && worktree.Tunnel.Active {
 		_ = tunnel.KillProcess(worktree.Tunnel.PID)
 		_ = tunnel.DeletePIDFile(projectName, worktreeName)
@@ -401,9 +389,9 @@ func (m *Manager) ReleaseResources(projectName, worktreeName string) error {
 			worktree.Tunnel = nil
 		}
 	}
-
-	// Kill tmux window if it exists
 	_ = mux.Current().KillWindow(projectName, worktree.Branch)
+
+	m.dropDatabases(projectName, worktreeName, project, worktree)
 
 	// Free the ports. The entry stays, marked hibernated, so the tree on disk
 	// is still recognised as this worktree when it is woken.
@@ -418,6 +406,79 @@ func (m *Manager) ReleaseResources(projectName, worktreeName string) error {
 	}
 
 	return nil
+}
+
+// dropDatabases drops every database this worktree owns.
+//
+// In remote mode that is its dev_<city> database on the remote host, whatever
+// name the entry recorded. A worktree registered while its clone failed
+// carried a local {project}-{port} name, and dropping only the recorded name
+// left its remote database behind for good once the entry was archived. A
+// recorded local name is dropped as well, since that database may exist too.
+// Failures are reported rather than swallowed: a database that silently
+// survives is disk on a shared server nobody will ever reclaim.
+func (m *Manager) dropDatabases(projectName, worktreeName string, project *config.Project, worktree *config.Worktree) {
+	remote := project.Database != nil && project.Database.Mode == config.DatabaseModeRemote && project.Database.SSHHost != ""
+	remoteName := ""
+	if remote {
+		remoteName = database.GenerateRemoteDBName(projectName, worktreeName)
+	}
+	if remoteName != "" && m.databaseUsedElsewhere(projectName, worktreeName, remoteName) {
+		// The remote server is shared by every project; a name another entry
+		// records is that entry's database, not this one's.
+		fmt.Fprintf(os.Stderr, "warning: not dropping %s for %s/%s: another worktree records it\n", remoteName, projectName, worktreeName)
+		remoteName = ""
+	}
+	if remoteName != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		err := database.RemoteDropDatabase(ctx, project.Database.SSHHost, project.Database.DevURL, remoteName)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not drop remote database %s for %s/%s: %v\n", remoteName, projectName, worktreeName, err)
+		}
+	}
+
+	name := worktree.DatabaseName
+	if name == "" || name == remoteName {
+		return
+	}
+	if strings.HasPrefix(name, "dev_") && remote {
+		if m.databaseUsedElsewhere(projectName, worktreeName, name) {
+			return
+		}
+		// A remote name other than its own (an older naming); drop it there.
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		err := database.RemoteDropDatabase(ctx, project.Database.SSHHost, project.Database.DevURL, name)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not drop remote database %s for %s/%s: %v\n", name, projectName, worktreeName, err)
+		}
+		return
+	}
+	if m.config.Defaults.LocalPostgresURL != "" && !strings.HasPrefix(name, "dev_") {
+		if err := dropWorktreeDB(m.config.Defaults.LocalPostgresURL, name); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not drop local database %s for %s/%s: %v\n", name, projectName, worktreeName, err)
+		}
+	}
+}
+
+// databaseUsedElsewhere reports whether any other worktree entry, in any
+// project, records dbName as its database.
+func (m *Manager) databaseUsedElsewhere(projectName, worktreeName, dbName string) bool {
+	for pn, project := range m.config.Projects {
+		if project == nil {
+			continue
+		}
+		for wn, wt := range project.Worktrees {
+			if wt == nil || (pn == projectName && wn == worktreeName) {
+				continue
+			}
+			if wt.DatabaseName == dbName && !wt.Archived {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // RemoveTree removes the working tree from disk and marks the entry archived,

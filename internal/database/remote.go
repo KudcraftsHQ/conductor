@@ -301,12 +301,10 @@ func RemoteDropDatabase(ctx context.Context, sshHost, devURL, dbName string) err
 
 	adminURL := buildAdminURL(devParsed)
 
-	// Terminate connections first (ignore errors - there may be no connections)
-	terminateSQL := fmt.Sprintf(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s' AND pid <> pg_backend_pid()`, dbName)
-	_ = execSSHSQL(ctx, sshHost, adminURL, terminateSQL)
-
-	// Drop database (must be separate command - DROP DATABASE cannot run in transaction)
-	dropSQL := fmt.Sprintf(`DROP DATABASE IF EXISTS %q`, dbName)
+	// FORCE terminates connections and drops in one statement. Terminating
+	// first and dropping after left a gap a connection pool reconnected in,
+	// which made the drop fail.
+	dropSQL := fmt.Sprintf(`DROP DATABASE IF EXISTS %q WITH (FORCE)`, dbName)
 	return execSSHSQL(ctx, sshHost, adminURL, dropSQL)
 }
 
