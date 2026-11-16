@@ -413,7 +413,13 @@ func (w *Watcher) apply(cfg *config.Config, decision Decision) {
 		return
 
 	case ActionHibernate:
-		w.logf("hibernating %s (%d archived thread(s), no live ones)", worktree.Key(), decision.Archive)
+		if decision.Dormant {
+			// Said once: the next pass sees it hibernated and leaves it be.
+			w.logf("hibernating %s — its directory %s is gone (pruned by T3); it wakes when the directory returns",
+				worktree.Key(), worktree.Path)
+		} else {
+			w.logf("hibernating %s (%d archived thread(s), no live ones)", worktree.Key(), decision.Archive)
+		}
 		if w.DryRun {
 			return
 		}
@@ -423,9 +429,10 @@ func (w *Watcher) apply(cfg *config.Config, decision Decision) {
 
 	case ActionWake:
 		if !isDir(worktree.Path) {
-			// The tree was deleted from disk while threads still point at it.
-			// Provisioning would fail, and touching T3's terminals for it would
-			// make T3 recreate the worktree. Say so once and leave it.
+			// The directory vanished between collect and now; the decider
+			// keeps dormant worktrees away from here otherwise. Provisioning
+			// would fail, and touching T3's terminals for it would make T3
+			// recreate the worktree. Say so once and leave it.
 			w.wakeFailure(worktree.Key(), fmt.Sprintf("worktree directory %s is missing", worktree.Path))
 			return
 		}
@@ -453,7 +460,7 @@ func (w *Watcher) apply(cfg *config.Config, decision Decision) {
 				w.logf("could not release %s: %v", worktree.Key(), err)
 			}
 		}
-		if err := manager.RemoveTree(worktree.Project, worktree.Name, false); err != nil {
+		if err := manager.RemoveTree(worktree.Project, worktree.Name); err != nil {
 			w.logf("could not remove %s: %v", worktree.Key(), err)
 		}
 		t3.RemoveMarker(worktree.Path)
@@ -520,6 +527,7 @@ func collect(cfg *config.Config) []Worktree {
 				Archived:     worktree.Archived,
 				IsRoot:       worktree.IsRoot,
 				Provisioning: worktree.SetupStatus.InProgress() && !worktree.SetupStalled(ready.StaleAfter),
+				Missing:      worktree.Path != "" && !isDir(worktree.Path),
 				KnownThreads: threads,
 				Ports:        worktree.Ports,
 			})

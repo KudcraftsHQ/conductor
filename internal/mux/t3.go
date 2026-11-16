@@ -657,6 +657,10 @@ Read them before concluding a request failed — the stack trace is there.
   conductor t3 logs -f        # follow live
   conductor t3 logs %s %s
 
+When the worktree wakes, conductor opens one 'conductor-dev-logs' terminal tab
+following these logs, on one live thread only (not on every thread), and T3
+closes it when that thread settles. Don't open more followers of your own.
+
 ### E2E runs go through the queue, never straight to Playwright
 One browser job at a time on this machine. Never run 'npx playwright test'
 directly, launch your own Chromium/Puppeteer, or use --workers > 1 or shards:
@@ -675,8 +679,10 @@ attach via chromium.connectOverCDP(process.env.E2E_QUEUE_BROWSER_CDP).
 ### Never hardcode ports or database names
 Read CONDUCTOR_PORT, CONDUCTOR_PORTS, CONDUCTOR_PORT_<LABEL> or the .env the
 setup script writes. Archiving every thread releases the ports and drops the
-database; unarchiving rebuilds both with new ports. Your working tree and
-branch are never touched.`,
+database; unarchiving rebuilds both with new ports. If T3's storage cleanup
+prunes this worktree's directory while it sits idle, conductor hibernates it the
+same way; T3 recreates the directory when a turn arrives, and conductor wakes it
+with new ports. Archiving or removing a worktree never deletes its branch.`,
 		address, portLine, database, window,
 		project, branch,
 		// A label is a display string, but slashes in it read as a path and

@@ -17,6 +17,7 @@ database.**
 |---|---|---|
 | at least one live thread | **active** — ports, database, tunnel, dev server | worktree + branch |
 | every thread archived | **hibernated** — resources released | worktree + branch, untouched |
+| threads remain, directory pruned | **dormant** (hibernated) — resources released | directory gone, branch kept |
 | every thread deleted | **gone** — entry dropped | worktree removed, **branch kept** |
 
 Archiving is reversible and deleting is not, which matches what T3 itself does:
@@ -27,10 +28,26 @@ Two consequences worth knowing:
 
 - **Hibernation never touches your working tree.** Uncommitted work survives it.
   What you lose is the environment: new ports and a fresh dev database on wake.
-- **Teardown never deletes the branch.** T3's own worktree removal leaves it
-  alone, and a thread deleted by mistake must not be able to destroy commits.
-  `conductor worktree archive` — the manual, conductor-initiated path — still
-  deletes the branch, because that one is a deliberate act.
+- **Nothing conductor does deletes a branch.** Teardown, `conductor worktree
+  archive`, `conductor t3 reconcile --archive` and the TUI's archive all remove
+  the worktree and keep its local branch, so unpushed commits survive. T3's own
+  worktree removal leaves it alone too. The only branch delete is the TUI's
+  explicit delete of an orphaned branch.
+
+### Dormant worktrees: a pruned directory
+
+T3's storage cleanup removes the directories of idle worktrees while their
+threads stay live. The watcher treats a worktree whose directory is missing as
+dormant and handles it with no manual cleanup:
+
+- The first pass that sees the directory missing **hibernates it once** —
+  archive script, database dropped, tunnel and dev window stopped, ports
+  returned — and logs one line. After that it is quiet: it is never woken,
+  and no T3 terminal is opened for it, while the directory is gone. (Opening a
+  terminal on one of its threads would make T3 recreate the worktree.)
+- When somebody sends a turn on one of its threads, T3 recreates the directory.
+  The next pass sees a hibernated worktree with a live thread and **wakes it**
+  the ordinary way: new ports, fresh database, setup, dev server.
 
 ## Setting up a project
 
@@ -79,6 +96,17 @@ acted on within about a second rather than at the next poll. When a pass fails
 it re-reads T3's origin and token (T3 picks its port at startup, so a restarted
 server can move) and re-detects the protocol.
 
+The token in `~/.conductor/t3-token` needs T3's `terminal:read` scope, which
+the watcher uses to see whether a thread's log tab is already running. Tokens
+issued before T3 added that scope to its defaults lack it. Without it the
+watcher closes and reopens the log tab instead of skipping it. Re-issue with
+the default scopes to fix that:
+
+```bash
+t3 auth session issue --label conductor --ttl 365d --token-only > ~/.conductor/t3-token
+chmod 600 ~/.conductor/t3-token
+```
+
 ### Guards
 
 These exist because the failure modes are expensive:
@@ -113,8 +141,13 @@ the active thread's, so a second thread running the dev script would collide on
 the port rather than share the server. A tmux window is shared by construction,
 and survives T3 restarts and updates besides.
 
-What each thread gets instead is a read-only view: conductor opens a terminal
-running `conductor t3 logs -f` on every thread bound to the worktree.
+What a thread gets instead is a read-only view: when a worktree wakes,
+conductor opens a terminal tab `conductor-dev-logs` running
+`conductor t3 logs -f`, on **one** live thread — never an archived thread or a
+provider-run subagent, preferring one a person started, then the most recently
+updated. It is opened with T3's `stopOnSettle`, so T3 closes it when that
+thread settles, and it is skipped when that thread's tab is already following.
+Other threads read the logs with the commands below.
 
 **So: do not start your own dev server.** One is already running. Read it, and
 control it, with:
