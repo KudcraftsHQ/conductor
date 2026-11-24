@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Every action re-checks fresh facts first; per-item failures never stop the pass; JSONL log in `~/.local/state/conductor/lifecycle.log`; one ntfy summary per pass (low for slim/retire with GB freed, default for new needs-you, high for new failures, nothing on a quiet pass)
   - `--no-notify`; the pause file stops everything and a paused run exits 0
   - `conductor wt schedule install|uninstall|status`: the hourly systemd user timer `conductor-lifecycle.timer` (written, not enabled)
+- **Worktree lifecycle, phase 2 — revive and rehydrate**:
+  - `conductor wt revive <thread-id|branch|path|record-id> [--no-install] [--dry-run]`: recreates a retired worktree at its original path (branch, or the branch recreated at the recorded HEAD), restores a needs-you snapshot as uncommitted changes (untracked files included) and the archived ignored files, installs dependencies, and re-provisions ports/DB only for conductor-registered worktrees. Idempotent
+  - `conductor wt hydrate [path]`: reinstalls dependencies from the tracked lockfile (bun preferred) in a slimmed worktree; a no-op when present, never in a repo root
+  - `conductor t3 watch` revives a retired worktree, or rehydrates a slimmed one, when a thread on it unsettles — before it wakes the worktree or starts its dev server. Paths the lifecycle does not know are untouched
+  - `conductor wt hooks install|uninstall|status`: a Claude Code SessionStart hook (`conductor wt hydrate --hook`) in `~/.claude/settings.json` (or `--settings` / `$CONDUCTOR_CLAUDE_SETTINGS`), preserving every other key and backing the file up first. Silent when there is nothing to do, never fails a session
 
 ### Fixed
 - **Remote-mode worktrees left on an empty local database**: a worktree was registered with a local `{project}-{port}` name and URL, and only switched to its remote `dev_<city>` database if the remote clone succeeded. When the clone failed (e.g. `database "dev_<city>" already exists`), the setup script got the local URL while the clone had gone to the remote host, so the app saw an empty local database.
