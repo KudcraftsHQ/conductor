@@ -1,12 +1,16 @@
 package main
 
-// PHASE 2 — agent A owns this file: fill in the non-dry-run branch of
-// runWtGC with lifecycle.Sweep. Registration lives in lifecycle.go.
+// `conductor wt gc` (plan or execute one lifecycle sweep) and
+// `conductor wt schedule` (the hourly systemd user timer that runs it).
+// gc itself is registered in lifecycle.go; schedule is added here.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/hammashamzah/conductor/internal/lifecycle"
@@ -14,12 +18,13 @@ import (
 )
 
 var (
-	wtGCDryRun bool
-	wtGCForce  bool
-	wtGCOnly   string
-	wtGCJSON   bool
-	wtGCSize   bool
-	wtGCFresh  bool
+	wtGCDryRun   bool
+	wtGCForce    bool
+	wtGCOnly     string
+	wtGCJSON     bool
+	wtGCSize     bool
+	wtGCFresh    bool
+	wtGCNoNotify bool
 )
 
 var wtGCCmd = &cobra.Command{
@@ -41,6 +46,8 @@ func registerLifecycleGC() {
 	wtGCCmd.Flags().BoolVar(&wtGCJSON, "json", false, "Print the plan as JSON")
 	wtGCCmd.Flags().BoolVar(&wtGCSize, "size", false, "Measure what each action would free (slow)")
 	wtGCCmd.Flags().BoolVar(&wtGCFresh, "fresh", false, "Bypass the 15-minute gh PR cache")
+	wtGCCmd.Flags().BoolVar(&wtGCNoNotify, "no-notify", false, "Send no ntfy summary (needs-you snapshots then wait for a notifying sweep)")
+	registerLifecycleSchedule()
 }
 
 func runWtGC(cmd *cobra.Command, args []string) error {
@@ -49,14 +56,14 @@ func runWtGC(cmd *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("--only must be slim or retire")
 	}
-	if !wtGCDryRun {
-		return fmt.Errorf("wt gc: %w; use --dry-run to see the plan", lifecycle.ErrNotImplemented)
-	}
 	ctx, cancel := lifecycleContext()
 	defer cancel()
 	env, err := lifecycle.NewEnv()
 	if err != nil {
 		return err
+	}
+	if !wtGCDryRun {
+		return runWtSweep(ctx, env, args)
 	}
 	pass, err := lifecycle.PlanPass(ctx, env, lifecycle.PassOptions{
 		Gather: lifecycle.GatherOptions{Sizes: wtGCSize, NoPRCache: wtGCFresh},
@@ -69,17 +76,65 @@ func runWtGC(cmd *cobra.Command, args []string) error {
 	return printGCPlan(pass, wtGCOnly, wtGCJSON)
 }
 
-// onlyAllows reports whether --only admits an action. "retire" includes the
-// needs-you snapshot, which is the first step towards retiring.
-func onlyAllows(only string, a lifecycle.Action) bool {
-	switch only {
-	case "slim":
-		return a == lifecycle.ActionSlim
-	case "retire":
-		return a == lifecycle.ActionRetire || a == lifecycle.ActionSnapshot
+// runWtSweep executes one sweep and prints what it did. A paused lifecycle
+// is not an error (the scheduled run must not show as failed while paused).
+func runWtSweep(ctx context.Context, env *lifecycle.Env, args []string) error {
+	sum, err := lifecycle.Sweep(ctx, env, lifecycle.SweepOptions{
+		Pass: lifecycle.PassOptions{
+			Gather: lifecycle.GatherOptions{Sizes: wtGCSize, NoPRCache: wtGCFresh},
+			Force:  wtGCForce,
+			Paths:  args,
+		},
+		Exec:   lifecycle.ExecOptions{Force: wtGCForce},
+		Only:   wtGCOnly,
+		Notify: !wtGCNoNotify,
+	})
+	if errors.Is(err, lifecycle.ErrPaused) {
+		_, info := env.Paused()
+		fmt.Printf("Paused — nothing done. %s\n", info.Reason)
+		return nil
 	}
-	return true
+	if err != nil {
+		return err
+	}
+	if len(args) > 0 && len(sum.Pass.Facts) == 0 {
+		return fmt.Errorf("no discovered worktree matches %s", strings.Join(args, " "))
+	}
+	if wtGCJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(sum)
+	}
+	for _, l := range sum.Lines {
+		fmt.Println(tildeAll(l))
+	}
+	for _, l := range sum.Skipped {
+		fmt.Println("skipped  " + tildeAll(l))
+	}
+	for _, l := range append(append([]string{}, sum.Failed...), sum.FailedAgain...) {
+		fmt.Println("FAILED   " + tildeAll(l))
+	}
+	fmt.Printf("\nSlimmed %d · needs-you %d · retired %d · failed %d · skipped %d · freed %s (disk %s)\n",
+		len(sum.Slimmed), len(sum.NeedsYou), len(sum.Retired), len(sum.Failed)+len(sum.FailedAgain), len(sum.Skipped),
+		bytesCell(sum.FreedBytes), bytesCell(max(sum.DiskFreed, 0)))
+	switch {
+	case sum.NotifyErr != "":
+		fmt.Println("ntfy: " + sum.NotifyErr)
+	case sum.Notified:
+		fmt.Println("ntfy: summary sent")
+	}
+	return nil
 }
+
+// tildeAll shortens every home-directory path in a line.
+func tildeAll(s string) string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return strings.ReplaceAll(s, home+"/", "~/")
+	}
+	return s
+}
+
+func onlyAllows(only string, a lifecycle.Action) bool { return lifecycle.OnlyAllows(only, a) }
 
 func printGCPlan(pass *lifecycle.Pass, only string, asJSON bool) error {
 	type item struct {
