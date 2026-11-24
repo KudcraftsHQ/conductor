@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"io/fs"
 	"path/filepath"
-	"syscall"
 )
 
 // OwnBytes is the disk a worktree would actually free: allocated blocks of
@@ -20,8 +19,8 @@ func OwnBytes(path string) (int64, error) {
 		if err != nil {
 			return nil
 		}
-		if st, ok := info.Sys().(*syscall.Stat_t); ok && (st.Nlink == 1 || d.IsDir()) {
-			total += int64(st.Blocks) * 512
+		if st, ok := statOf(info); ok && (st.nlink == 1 || d.IsDir()) {
+			total += st.blocks * 512
 		}
 		return nil
 	})
@@ -43,16 +42,16 @@ func SharedAwareBytes(paths []string) (int64, error) {
 			if err != nil {
 				return nil
 			}
-			st, ok := info.Sys().(*syscall.Stat_t)
+			st, ok := statOf(info)
 			if !ok {
 				return nil
 			}
-			k := key{uint64(st.Dev), st.Ino}
+			k := key{st.dev, st.ino}
 			if seen[k] {
 				return nil
 			}
 			seen[k] = true
-			total += int64(st.Blocks) * 512
+			total += st.blocks * 512
 			return nil
 		})
 		if err != nil {
@@ -60,4 +59,10 @@ func SharedAwareBytes(paths []string) (int64, error) {
 		}
 	}
 	return total, nil
+}
+
+// fileStat is the part of a stat(2) result sizing needs.
+type fileStat struct {
+	dev, ino, nlink uint64
+	blocks          int64 // 512-byte blocks allocated
 }
