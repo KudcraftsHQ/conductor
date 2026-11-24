@@ -132,6 +132,11 @@ anything tracked (`NeverSlim` in settings.go).
    during removal, clear the remainder (the interim script's `remove_worktree`).
    `git worktree prune`. Never delete the branch.
 
+As built: a worktree that still has uncommitted or untracked changes at its
+retire date is skipped, not removed, because `git worktree remove` refuses it
+without `--force`. Its needs-you snapshot keeps the work and it stays slim.
+Unpushed commits alone do not block: the graveyard ref at HEAD keeps them.
+
 ## Safety rules (never overridden, not even by --force)
 
 1. Nothing that git or the record cannot bring back is ever deleted.
@@ -191,8 +196,11 @@ the URL comes from that env file.
 
 ## Scheduling
 
-Hourly sweep (`sweepInterval`) from the long-running `conductor t3 watch` daemon,
-or a systemd user timer `conductor-lifecycle.timer`. React to watcher
+Hourly sweep (`sweepInterval`) from a systemd user timer: `conductor wt schedule
+install` writes `~/.config/systemd/user/conductor-lifecycle.{service,timer}`
+(not enabled; `systemctl --user enable --now conductor-lifecycle.timer`). Not a
+hook in `conductor t3 watch`: a sweep runs for minutes and would stall the
+watcher's 5 s loop. React to watcher
 settle/unsettle events for rehydrate/revive. At cutover disable
 `t3-stale-worktrees-report.timer` and `t3-stale-worktrees-listen.service` (keep
 the script file).
