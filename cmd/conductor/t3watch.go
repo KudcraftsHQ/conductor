@@ -109,7 +109,9 @@ var t3WatchOnceCmd = &cobra.Command{
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		return watcher.Tick(ctx)
+		err = watcher.Tick(ctx)
+		watcher.WaitLifecycle() // a revive or install must not be cut off by exiting
+		return err
 	},
 }
 

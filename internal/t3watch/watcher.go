@@ -69,6 +69,9 @@ type Watcher struct {
 	// wake that keeps failing the same way is logged once, not every tick.
 	wakeFailed map[string]string
 
+	// lc runs the worktree lifecycle's revive/hydrate when a thread unsettles.
+	lc lifecycleHooks
+
 	// shell is the V2 shell subscription, when there is one. It only shortens
 	// the time to react; polling continues underneath it regardless.
 	shell *t3.ShellWatch
@@ -269,8 +272,16 @@ func (w *Watcher) Tick(ctx context.Context) error {
 		w.lastInconsistent = snapshot.Inconsistent
 	}
 
+	// Before anything else touches a path whose thread just unsettled: a
+	// retired worktree is revived, a slimmed one reinstalled. A path being
+	// restored sits out Decide until that is done.
+	w.runLifecycleHooks(snapshot)
+
 	cfg := w.store.GetConfigSnapshot()
 	worktrees := collect(cfg)
+	if held := w.lifecycleHeld(worktrees); len(held) != len(worktrees) {
+		worktrees = held
+	}
 	decisions := w.decider.Decide(worktrees, snapshot)
 
 	// Decide suppresses an implausibly large batch of deletions rather than

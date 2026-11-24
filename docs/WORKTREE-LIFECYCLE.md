@@ -166,6 +166,19 @@ Unpushed commits alone do not block: the graveyard ref at HEAD keeps them.
   project wants them (existing adopt path), mark active. Same path → the T3
   thread continues unchanged.
 - **Manual:** `conductor wt revive <thread-id|branch|path|record-id> [--no-install]`.
+- **As built (phase 2):** the watcher fires on a path's transition to having an
+  unsettled thread, from T3's snapshot (registered or not), after a stat-only
+  `lifecycle.NeedsRestore`; the restore runs in a goroutine and the path sits
+  out `Decide` until it is done. A path that is back on disk while the
+  inventory still says retired (T3 recreates a pruned worktree when a turn is
+  sent) gets its missing ignored files and, on a clean tree at the recorded
+  HEAD, its snapshot. Automatic revive/hydrate stop while paused; manual ones
+  do not (they only add). Ports/DB: an archived entry is put back as
+  hibernated and the watcher wakes it; a hibernated one without T3 threads is
+  woken by a manual `wt revive`; a dropped entry goes through `conductor adopt`.
+  The SessionStart hook acts only in a worktree the inventory marks slimmed,
+  runs the install detached and waits up to 40 s before leaving it in the
+  background. `wt hooks install` is not run automatically.
 
 ## CLI
 
@@ -174,7 +187,9 @@ Unpushed commits alone do not block: the graveyard ref at HEAD keeps them.
 | `conductor wt ls [--all] [--state X] [--json] [--size] [--fresh]` | 1 |
 | `conductor wt gc --dry-run [--force] [--only slim\|retire] [--json] [path…]` | 1 (plan only) |
 | `conductor wt gc …` without `--dry-run` | 2 |
-| `conductor wt revive …`, `conductor wt hydrate …` | 2 (registered, return "not implemented yet") |
+| `conductor wt revive <thread-id\|branch\|path\|record-id> [--no-install] [--dry-run] [--json]` | 2 |
+| `conductor wt hydrate [path] [--dry-run]`, `conductor wt hydrate --hook` (SessionStart) | 2 |
+| `conductor wt hooks install\|uninstall\|status [--settings f] [--command c]` | 2 |
 | `conductor wt pause [--reason]`, `conductor wt resume` | 1 |
 | `conductor wt config [set k v \| unset k] [--project p]` | 1 |
 
