@@ -35,6 +35,9 @@ type Defaults struct {
 	// Code or herdr conductor is already running inside, then herdr when tmux
 	// is unavailable, and tmux otherwise.
 	Multiplexer string `json:"multiplexer,omitempty"`
+	// Lifecycle holds the worktree-lifecycle settings (slim/retire/revive).
+	// See docs/WORKTREE-LIFECYCLE.md. nil means built-in defaults.
+	Lifecycle *LifecycleConfig `json:"lifecycle,omitempty"`
 }
 
 // TmuxDefaults contains tmux session settings
@@ -76,6 +79,8 @@ type Project struct {
 	Database *DatabaseConfig `json:"database,omitempty"`
 	// Tooling contains detected project type and tool availability (per-machine)
 	Tooling *ProjectTooling `json:"tooling,omitempty"`
+	// Lifecycle overrides defaults.lifecycle for this project's worktrees.
+	Lifecycle *LifecycleConfig `json:"lifecycle,omitempty"`
 }
 
 // ProjectTooling contains detected project type info and tool installation status
