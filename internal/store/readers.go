@@ -345,6 +345,7 @@ func (s *Store) copyProject(p *config.Project) *config.Project {
 		tooling := *p.Tooling
 		cp.Tooling = &tooling
 	}
+	cp.Lifecycle = p.Lifecycle.Clone()
 	return &cp
 }
 
@@ -410,6 +411,7 @@ func (s *Store) GetConfigSnapshot() *config.Config {
 		clickUp := *s.config.Defaults.ClickUp
 		cfg.Defaults.ClickUp = &clickUp
 	}
+	cfg.Defaults.Lifecycle = s.config.Defaults.Lifecycle.Clone()
 	// Both maps are always non-nil in a snapshot, as they always were.
 	cfg.PortAllocations = make(map[string]*config.PortAlloc, len(s.config.PortAllocations))
 	for port, alloc := range s.config.PortAllocations {

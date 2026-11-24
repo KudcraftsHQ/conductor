@@ -41,6 +41,21 @@ type LifecycleConfig struct {
 	Keep []string `json:"keep,omitempty"`
 }
 
+// Clone returns a deep copy (nil for nil).
+func (c *LifecycleConfig) Clone() *LifecycleConfig {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	if c.Enabled != nil {
+		v := *c.Enabled
+		cp.Enabled = &v
+	}
+	cp.SlimAllowlist = append([]string(nil), c.SlimAllowlist...)
+	cp.Keep = append([]string(nil), c.Keep...)
+	return &cp
+}
+
 // Duration is a time.Duration that reads and writes as a string and also
 // accepts a day suffix ("14d", "1d12h"), which time.ParseDuration does not.
 type Duration time.Duration
