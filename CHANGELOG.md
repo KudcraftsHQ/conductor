@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Worktree lifecycle, phase 1** (`docs/WORKTREE-LIFECYCLE.md`): one inventory of every git worktree on the machine — conductor's, T3's and Claude Code's `.claude/worktrees` — discovered from git itself, with a pure classifier deciding active / slim / retired-candidate / needs-you / untouchable.
+  - `conductor wt ls [--all] [--state X] [--json] [--size]`: state, thread, PR, git and idle time per worktree; `--size` measures only bytes not hardlinked elsewhere
+  - `conductor wt gc --dry-run [--force] [--only slim|retire]`: the plan a sweep would carry out (executing it is phase 2)
+  - `conductor wt pause` / `resume` (pause file `~/.conductor/lifecycle.paused`) and `conductor wt config` for `defaults.lifecycle` / per-project overrides (slimAfter, retireAfter, needsYouAfter, abandonAfter, sweepInterval, slimAllowlist, ignoredArchiveCapMB, keep)
+  - Inventory in `~/.conductor/lifecycle.json`, separate from conductor.json: it allocates no ports or databases and the T3 watcher never reads it
+  - Graveyard record and `refs/graveyard/<id>` helpers; `wt revive` and `wt hydrate` are registered and report "not implemented yet"
+
 ### Fixed
 - **Remote-mode worktrees left on an empty local database**: a worktree was registered with a local `{project}-{port}` name and URL, and only switched to its remote `dev_<city>` database if the remote clone succeeded. When the clone failed (e.g. `database "dev_<city>" already exists`), the setup script got the local URL while the clone had gone to the remote host, so the app saw an empty local database.
   - Remote-mode worktrees now record their `dev_<city>` name and remote URL at registration, so they point at the remote host even when a clone fails; provision and wake also move a worktree carrying another name back onto its own remote database

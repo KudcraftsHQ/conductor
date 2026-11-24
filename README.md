@@ -194,6 +194,12 @@ conductor worktree archive tokyo
 
 # Show worktree status
 conductor worktree status
+
+# Worktree lifecycle: every worktree on the machine (conductor, T3, .claude/worktrees)
+conductor wt ls                 # state, thread, PR, git, idle per worktree
+conductor wt gc --dry-run       # what a sweep would slim / snapshot / retire
+conductor wt pause | resume     # stop / restart lifecycle actions
+conductor wt config             # lifecycle settings (see docs/WORKTREE-LIFECYCLE.md)
 ```
 
 #### Port Management
