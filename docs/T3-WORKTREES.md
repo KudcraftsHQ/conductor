@@ -168,6 +168,29 @@ at the restart prompt only needs Enter, and a running server is interrupted
 first and then answered once the loop has actually reached the prompt — sending
 Enter early feeds the keystroke to the dev server instead.
 
+### When it stops on its own
+
+The watcher stops a worktree's dev server once every live thread on it has been
+settled for two minutes, and starts it again when one unsettles.
+
+Above that sits the **PR hold**. Once the PR for the branch a worktree has
+checked out is merged or closed, with no open PR beside it, the dev server is
+stopped at once and kept stopped whatever its threads do. The PR state is the
+one `conductor wt ls` shows, read through the same gh cache. The hold lifts on
+new work:
+
+- a commit on the branch made after the PR closed (one origin's default branch
+  does not have, so pulling main into a merged branch does not count)
+- a new or reopened PR on the branch
+- `conductor t3 dev restart`, which records itself in
+  `~/.local/state/conductor/dev-restarts/` before it restarts anything
+
+The hold covers worktrees T3 does not host as well. Stopping a dev server is
+reversible, so it is the one thing the watcher does to a worktree without
+threads. Nothing else is touched: ports, database and the tree stay as they
+are. The log says `<project>/<name>: PR #N merged — its dev server stays
+stopped…` once when the hold engages, and again when new work lifts it.
+
 The port is discovered by T3's own port scanner (`lsof`), so the preview panel
 finds it without configuration. It appears in the generic "Local" list rather
 than as the thread's own server, because the listening process is tmux's child.

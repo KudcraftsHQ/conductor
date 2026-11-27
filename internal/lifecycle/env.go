@@ -47,10 +47,7 @@ func NewEnv() (*Env, error) {
 	if err != nil {
 		return nil, err
 	}
-	state := filepath.Join(home, ".local", "state", "conductor")
-	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
-		state = filepath.Join(x, "conductor")
-	}
+	state := stateDir(home)
 	return &Env{
 		Home:          home,
 		ConductorDir:  cdir,
@@ -99,4 +96,18 @@ func realpath(p string) string {
 		return r
 	}
 	return filepath.Clean(p)
+}
+
+// StateDir is where the lifecycle keeps its log and caches:
+// ~/.local/state/conductor, or $XDG_STATE_HOME/conductor.
+func StateDir() string {
+	home, _ := os.UserHomeDir()
+	return stateDir(home)
+}
+
+func stateDir(home string) string {
+	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
+		return filepath.Join(x, "conductor")
+	}
+	return filepath.Join(home, ".local", "state", "conductor")
 }

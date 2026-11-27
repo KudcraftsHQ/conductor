@@ -33,7 +33,9 @@ The rules that are easy to break:
   `ArchiveWorktree`, the deliberate manual path, passes `true`.
 - **A worktree with no `T3Threads` is invisible to the watcher.** Everything
   made under tmux or herdr has none, and treating that as "all threads deleted"
-  would destroy every one of them.
+  would destroy every one of them. The single exception is the PR hold: a
+  merged or closed PR's dev server is stopped (never anything else), because
+  stopping is reversible. See "When it stops on its own" in the T3 doc.
 - **`internal/t3watch` holds the state machine**, and it is pure — decisions are
   a function of two snapshots. Test transitions there, not through the daemon.
 - **Never derive a worktree path from project and worktree names.** T3 puts the

@@ -19,6 +19,7 @@ import (
 	"github.com/hammashamzah/conductor/internal/store"
 	"github.com/hammashamzah/conductor/internal/stray"
 	"github.com/hammashamzah/conductor/internal/t3"
+	"github.com/hammashamzah/conductor/internal/t3watch"
 	"github.com/hammashamzah/conductor/internal/tmux"
 	"github.com/hammashamzah/conductor/internal/workspace"
 )
@@ -685,6 +686,11 @@ var t3DevRestartCmd = &cobra.Command{
 		project, _, wt, err := currentWorktree()
 		if err != nil {
 			return err
+		}
+		// Asking for it by hand lifts a merged PR's hold, and has to be
+		// recorded first or the watcher could stop it again straight away.
+		if err := t3watch.MarkDevRestart(wt.Path); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not record the restart for the watcher: %v\n", err)
 		}
 		what, err := tmux.RestartDevServer(project, wt.Branch, wt.Path)
 		if err != nil {

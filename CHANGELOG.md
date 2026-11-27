@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **T3 watcher: PR hold.** Once a worktree's PR is merged or closed (no open one beside it, same source as `conductor wt ls`), `conductor t3 watch` stops its dev server at once and keeps it stopped even while a thread is unsettled. A commit on the branch after the merge, a new or reopened PR, or `conductor t3 dev restart` lifts the hold. It also covers worktrees with no T3 threads, and only ever stops the dev server. Logged once as `<project>/<name>: PR #N merged`, and the stop line names the reason.
 - **Worktree lifecycle, phase 1** (`docs/WORKTREE-LIFECYCLE.md`): one inventory of every git worktree on the machine — conductor's, T3's and Claude Code's `.claude/worktrees` — discovered from git itself, with a pure classifier deciding active / slim / retired-candidate / needs-you / untouchable.
   - `conductor wt ls [--all] [--state X] [--json] [--size]`: state, thread, PR, git and idle time per worktree; `--size` measures only bytes not hardlinked elsewhere
   - `conductor wt gc --dry-run [--force] [--only slim|retire]`: the plan a sweep would carry out (executing it is phase 2)

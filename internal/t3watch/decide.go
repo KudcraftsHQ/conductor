@@ -20,9 +20,17 @@
 // archiving — so an active worktree whose every live thread is settled has its
 // dev server stopped, and unsettling any of them starts it again. Only the
 // server is touched; ports and database stay allocated.
+//
+// Above both sits the PR hold. Once a worktree's PR is merged or closed its
+// work is done whatever its threads say, so its dev server is stopped and kept
+// stopped until there is new work: a commit made after the PR closed, a new or
+// reopened PR, or `conductor t3 dev restart`. The hold also covers worktrees
+// T3 does not host. Stopping a dev server is reversible, so unlike every other
+// action here it does not need a thread to justify it.
 package t3watch
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -53,9 +61,19 @@ const (
 	DevKeep DevWant = ""
 	// DevRun means at least one live thread is unsettled.
 	DevRun DevWant = "run"
-	// DevStop means every live thread has been settled for the debounce.
+	// DevStop means every live thread has been settled for the debounce, or
+	// the worktree's PR is merged or closed.
 	DevStop DevWant = "stop"
 )
+
+// FinishedPR is the merged or closed PR on a worktree's branch, with no open
+// one beside it.
+type FinishedPR struct {
+	Number int
+	State  string // merged | closed
+	// At is when it was merged or closed. Zero when unknown, which never holds.
+	At time.Time
+}
 
 // Worktree is the watcher's view of one registered worktree.
 type Worktree struct {
@@ -80,6 +98,27 @@ type Worktree struct {
 	// Ports are the worktree's allocated ports. Nothing but its own supervised
 	// server should listen on them, which is how a stray is recognised.
 	Ports []int
+	// PR is the merged or closed PR on the checked-out branch, or nil when
+	// there is none, one is open, or it is not known yet.
+	PR *FinishedPR
+	// LastCommit is when the branch's own newest commit was made (one origin's
+	// default branch lacks), DevRestartedAt when somebody last ran
+	// `conductor t3 dev restart` here. Either one after PR.At is new
+	// work, and lifts the PR hold.
+	LastCommit     time.Time
+	DevRestartedAt time.Time
+}
+
+// PRHold says why the worktree's dev server is held stopped, as "PR #12
+// merged", or "" when it is not: no finished PR, or new work since it finished.
+func (w Worktree) PRHold() string {
+	if w.PR == nil || w.PR.At.IsZero() {
+		return ""
+	}
+	if w.LastCommit.After(w.PR.At) || w.DevRestartedAt.After(w.PR.At) {
+		return ""
+	}
+	return fmt.Sprintf("PR #%d %s", w.PR.Number, w.PR.State)
 }
 
 // Key identifies a worktree across ticks.
@@ -98,6 +137,15 @@ type Decision struct {
 	Archive int
 	// Dev is what the dev server should be doing, independent of Action.
 	Dev DevWant
+	// DevReason says why, for the log: the PR hold ("PR #12 merged") or the
+	// thread rule.
+	DevReason string
+	// PRHold is the worktree's PR hold, recorded even when Dev is not stop
+	// because the worktree is hibernated or being woken.
+	PRHold string
+	// Unhosted marks a worktree T3 does not host, decided only because of its
+	// PR hold. Nothing but its dev server may be touched.
+	Unhosted bool
 	// LogThread is the one thread that gets the dev log view on a wake, or ""
 	// when no live thread is fit to carry it.
 	LogThread string
@@ -193,7 +241,20 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 			continue
 		}
 		if len(worktree.KnownThreads) == 0 {
-			// Not T3-hosted. Invisible to this watcher, by design.
+			// Not T3-hosted. Invisible to this watcher, by design — except
+			// that a finished PR's dev server is stopped. That is reversible,
+			// so it needs no thread to justify it, and it is the only thing a
+			// worktree like this can ever get from here.
+			if hold := worktree.PRHold(); hold != "" && !worktree.Hibernated && !worktree.Missing && !worktree.Provisioning {
+				decisions = append(decisions, Decision{
+					Worktree:  worktree,
+					Action:    ActionNone,
+					Dev:       DevStop,
+					DevReason: hold,
+					PRHold:    hold,
+					Unhosted:  true,
+				})
+			}
 			continue
 		}
 
@@ -207,6 +268,7 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 			Threads:  append(append([]string{}, liveIDs...), archivedIDs...),
 			Live:     len(liveIDs),
 			Archive:  len(archivedIDs),
+			PRHold:   worktree.PRHold(),
 		}
 
 		if len(liveIDs) > 0 || len(archivedIDs) > 0 {
@@ -275,12 +337,29 @@ func (d *Decider) Decide(worktrees []Worktree, snapshot *t3.ShellSnapshot) []Dec
 				decision.LogThread = pickLogThread(snapshot, key)
 				break
 			}
+			if decision.PRHold != "" {
+				// Finished work: stop now, whatever the threads say.
+				delete(d.settledSince, key)
+				decision.Dev, decision.DevReason = DevStop, decision.PRHold
+				break
+			}
 			decision.Dev = d.devWant(key, unsettled[key], now)
+			switch decision.Dev {
+			case DevStop:
+				decision.DevReason = "every thread on it is settled"
+			case DevRun:
+				decision.DevReason = "a thread on it is unsettled"
+			}
 
 		default: // Only archived threads remain.
 			delete(d.settledSince, key)
 			if worktree.Hibernated {
 				break // Already asleep.
+			}
+			if decision.PRHold != "" {
+				// Hibernation releases the rest after its debounce; the dev
+				// server need not wait for it.
+				decision.Dev, decision.DevReason = DevStop, decision.PRHold
 			}
 			since, seen := d.zeroLiveSince[key]
 			if !seen {
