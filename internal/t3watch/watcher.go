@@ -72,6 +72,9 @@ type Watcher struct {
 	// lc runs the worktree lifecycle's revive/hydrate when a thread unsettles.
 	lc lifecycleHooks
 
+	// prs is each worktree's PR facts, for the PR hold.
+	prs prFacts
+
 	// shell is the V2 shell subscription, when there is one. It only shortens
 	// the time to react; polling continues underneath it regardless.
 	shell *t3.ShellWatch
@@ -279,6 +282,7 @@ func (w *Watcher) Tick(ctx context.Context) error {
 
 	cfg := w.store.GetConfigSnapshot()
 	worktrees := collect(cfg)
+	w.annotatePRs(ctx, worktrees)
 	if held := w.lifecycleHeld(worktrees); len(held) != len(worktrees) {
 		worktrees = held
 	}
@@ -381,7 +385,7 @@ func (w *Watcher) syncDevServer(decision Decision, listeners map[int][]int) bool
 		if !serving {
 			return true
 		}
-		w.logf("stopping dev server for %s — every thread on it is settled", worktree.Key())
+		w.logf("stopping dev server for %s — %s", worktree.Key(), decision.DevReason)
 		if w.DryRun {
 			return false
 		}
@@ -395,7 +399,7 @@ func (w *Watcher) syncDevServer(decision Decision, listeners map[int][]int) bool
 		if serving {
 			return true
 		}
-		w.logf("starting dev server for %s — a thread on it is unsettled", worktree.Key())
+		w.logf("starting dev server for %s — %s", worktree.Key(), decision.DevReason)
 		if w.DryRun {
 			return false
 		}
@@ -412,6 +416,10 @@ func (w *Watcher) syncDevServer(decision Decision, listeners map[int][]int) bool
 // one worktree that cannot be woken must not stop the others being tidied.
 func (w *Watcher) apply(cfg *config.Config, decision Decision) {
 	worktree := decision.Worktree
+	if decision.Unhosted {
+		// Decided only for its PR hold; syncDevServers does all of it.
+		return
+	}
 	manager := workspace.NewManagerWithStore(cfg, w.store)
 
 	// The thread index is refreshed on every tick, whatever the action. Once a

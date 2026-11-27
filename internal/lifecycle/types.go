@@ -161,6 +161,8 @@ type PR struct {
 	Number int    `json:"number"`
 	URL    string `json:"url"`
 	State  string `json:"state"` // OPEN | MERGED | CLOSED (gh's casing)
+	// ClosedAt is when a merged or closed PR was merged or closed.
+	ClosedAt time.Time `json:"closedAt,omitempty"`
 }
 
 // ThreadFact is one T3 thread bound to the worktree, read from T3's state DB.
@@ -253,9 +255,12 @@ func (f *Facts) ThreadStatus() string {
 
 // PRStatus summarises PRs for display and for classify: open | merged | closed | none.
 // OPEN wins over everything, then MERGED, then CLOSED.
-func (f *Facts) PRStatus() string {
+func (f *Facts) PRStatus() string { return PRStatusOf(f.PRs) }
+
+// PRStatusOf is PRStatus for any list of a branch's PRs.
+func PRStatusOf(prs []PR) string {
 	has := map[string]bool{}
-	for _, p := range f.PRs {
+	for _, p := range prs {
 		has[p.State] = true
 	}
 	switch {
